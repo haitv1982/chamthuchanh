@@ -1,0 +1,6 @@
+{
+  "name": "Hệ Thống Chấm Điểm Thực Hành Tin Học Trực Tuyến - LabGrade AI",
+  "description": "Nền tảng hỗ trợ giáo viên Tin học quản lý tiết thực hành phòng máy: học sinh nộp bài theo nhóm/cá nhân, chấm điểm tự động tức thì theo thang điểm 10, cho phép nộp lại nhiều lần để đạt điểm tối đa, theo dõi trực tiếp và xuất file Excel báo cáo chi tiết theo lớp.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
