@@ -29,6 +29,21 @@ export interface Assignment {
   isActive: boolean;
 }
 
+export interface StepEvaluation {
+  stepNumber: number;
+  instruction: string;
+  status: 'passed' | 'partial' | 'failed';
+  detail: string;
+}
+
+export interface InspectionSummary {
+  contentScorePercent: number; // Tỷ lệ đáp ứng nội dung (0 - 100%)
+  formatScorePercent: number;  // Tỷ lệ đáp ứng hình thức/cấu trúc (0 - 100%)
+  stepCompletionRate: string;  // Ví dụ: "6/8 bước đã hoàn thành"
+  isOffTopic?: boolean;        // Tệp nộp có bị lạc đề hoặc không khớp chủ đề không
+  warningMessage?: string;     // Cảnh báo nếu phát hiện tệp rỗng hoặc sai bài
+}
+
 export interface CriterionResult {
   criterionId: string;
   criterionName: string;
@@ -43,12 +58,15 @@ export interface SubmissionAttempt {
   fileName: string;
   fileSize: number;
   fileContent?: string;
+  imageBase64?: string; // Dữ liệu ảnh sản phẩm để AI chấm trực quan (Vision)
   score: number;
   aiComparisonDetails?: string; // Chi tiết đối chiếu với sản phẩm mẫu & chuẩn tri thức
   criteriaResults: CriterionResult[];
   strengths: string[];
   weaknesses: string[];
   howToGetTen: string[];
+  stepEvaluations?: StepEvaluation[]; // Đối chiếu chi tiết từng bước thực hiện
+  inspectionSummary?: InspectionSummary; // Thước đo quét nội dung và hình thức
   teacherNote?: string;
 }
 
@@ -64,6 +82,7 @@ export interface Submission {
   highestScore: number;
   latestScore: number;
   latestSubmittedAt: string;
+  practiceDate?: string; // Ngày thực hành (YYYY-MM-DD, phân tách giữa các ngày/tuần khác nhau)
   status: 'graded' | 'perfect' | 'needs_improvement';
 }
 

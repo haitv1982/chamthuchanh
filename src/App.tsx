@@ -8,185 +8,26 @@ import { INITIAL_SUBMISSIONS } from './data/mockSubmissions';
 import { SCHOOL_CLASSES } from './data/classes';
 import { Assignment, Submission, SubmissionAttempt } from './types';
 import { exportSubmissionsToExcel, exportSingleSubmissionToExcel } from './utils/excelExport';
+import {
+  saveSubmissionsSafely,
+  loadSubmissionsSafely,
+  getTodayDateString,
+  isSubmittedToday,
+  pruneOldSubmissions,
+} from './utils/storageManager';
+import { scanAndGradeProduct } from './utils/productScanner';
 
 const STORAGE_KEY_ASSIGNMENTS = 'labgrade_assignments_v7_grade6_grade7_grade8_grade9';
-const STORAGE_KEY_SUBMISSIONS = 'labgrade_submissions_v1';
 const STORAGE_KEY_CLASS = 'labgrade_current_class_v1';
 
-// Smart code analysis for accurate, non-generic feedback
+// Smart rapid scanning and step-by-step cross-verification engine
 function analyzeStudentWork(params: {
   assignment: Assignment;
   fileName: string;
   fileContent: string;
   attemptNumber: number;
 }) {
-  const { assignment, fileName, fileContent = '', attemptNumber } = params;
-  const content = fileContent.trim();
-  const lowerContent = content.toLowerCase();
-
-  // Python Prime Number Analysis
-  if (assignment.id.includes('prime') || lowerContent.includes('nguyên tố') || fileName.endsWith('.py')) {
-    const hasInput = lowerContent.includes('input(');
-    const hasIntCast = lowerContent.includes('int(input') || lowerContent.includes('int(');
-    const hasLoop = lowerContent.includes('for ') || lowerContent.includes('while ');
-    const hasModulo = lowerContent.includes('%');
-    const handlesSmallN = lowerContent.includes('< 2') || lowerContent.includes('<= 1') || lowerContent.includes('== 1');
-    const checksDivisors = lowerContent.includes('ước') || lowerContent.includes('cac_uoc') || (lowerContent.includes('% i == 0') && lowerContent.includes('print'));
-
-    const strengths: string[] = [];
-    const weaknesses: string[] = [];
-    const howToGetTen: string[] = [];
-
-    if (hasInput && hasIntCast) {
-      strengths.push('Đã sử dụng đúng hàm nhập số nguyên từ bàn phím `n = int(input())`.');
-    } else {
-      weaknesses.push('Chưa ép kiểu số nguyên khi nhập `n`, cần dùng `int(input())`.');
-      howToGetTen.push('Bước 1: Sửa câu lệnh nhập thành `n = int(input("Nhập n: "))` để tránh lỗi kiểu dữ liệu chuỗi.');
-    }
-
-    if (hasLoop && hasModulo) {
-      strengths.push('Đã xây dựng vòng lặp kiểm tra phép chia có dư (`%`) để phát hiện số nguyên tố.');
-    } else {
-      weaknesses.push('Thiếu thuật toán kiểm tra chia hết hoặc vòng lặp `for i in range(2, ...)`.');
-      howToGetTen.push('Bước 2: Dùng vòng lặp `for i in range(2, int(n**0.5) + 1)` để kiểm tra nếu `n % i == 0` thì không phải số nguyên tố.');
-    }
-
-    if (!handlesSmallN) {
-      weaknesses.push('Chưa xử lý trường hợp số nhỏ hơn 2 (các số âm, 0 và 1 không phải là số nguyên tố).');
-      howToGetTen.push('Bước 3: Bổ sung điều kiện `if n < 2:` thì in `n không là số nguyên tố`.');
-    } else {
-      strengths.push('Đã xét trường hợp biên chính xác cho các số `n <= 1`.');
-    }
-
-    if (!checksDivisors) {
-      weaknesses.push('Chưa liệt kê và in danh sách tất cả các ước số của `n` ra màn hình.');
-      howToGetTen.push('Bước 4: Thêm vòng lặp in các ước số: `print("Các ước số:", end=" ")` và `for i in range(1, n + 1): if n % i == 0: print(i, end=" ")`.');
-    } else {
-      strengths.push('Đã in đầy đủ danh sách các ước số của số `n` theo đúng yêu cầu đề bài.');
-    }
-
-    let score = 10;
-    if (weaknesses.length === 1) score = 8.5;
-    else if (weaknesses.length === 2) score = 7.0;
-    else if (weaknesses.length >= 3) score = 6.0;
-
-    if (score < 10) {
-      howToGetTen.push('Lưu lại tệp mã nguồn `.py` vừa sửa trên máy và bấm "Chấm Lại Bằng AI" để đạt 10 điểm!');
-    }
-
-    return {
-      score: Math.min(10, Math.max(5, score)),
-      aiComparisonDetails: `Hệ thống AI đã quét mã nguồn ${fileName} và đối chiếu với thuật toán chuẩn: hoàn thành ${strengths.length}/${strengths.length + weaknesses.length} tiêu chí.`,
-      strengths: strengths.length > 0 ? strengths : ['Tệp mã nguồn nộp đúng định dạng Python (.py).'],
-      weaknesses,
-      howToGetTen,
-    };
-  }
-
-  // Excel Spreadsheet Analysis
-  if (assignment.subjectType === 'excel' || fileName.endsWith('.xlsx') || fileName.endsWith('.xls')) {
-    const hasAverage = lowerContent.includes('average');
-    const hasIf = lowerContent.includes('if');
-    const hasRank = lowerContent.includes('rank');
-
-    const strengths: string[] = ['Bảng tính có cấu trúc dữ liệu theo định dạng yêu cầu.'];
-    const weaknesses: string[] = [];
-    const howToGetTen: string[] = [];
-
-    if (hasAverage) {
-      strengths.push('Đã sử dụng chính xác hàm tính điểm trung bình `=AVERAGE(...)`.');
-    } else {
-      weaknesses.push('Chưa sử dụng hàm `=AVERAGE(...)` để tính điểm trung bình các môn.');
-      howToGetTen.push('Bước 1: Nhập công thức `=AVERAGE(Toán:Văn:Anh)` cho cột Điểm Trung Bình.');
-    }
-
-    if (hasIf) {
-      strengths.push('Đã lập công thức hàm `=IF(...)` để tự động xếp loại học lực.');
-    } else {
-      weaknesses.push('Chưa sử dụng hàm lồng `=IF(...)` để xếp loại học lực Giỏi/Khá/Đạt.');
-      howToGetTen.push('Bước 2: Sử dụng hàm `=IF(...)` nhiều điều kiện để xếp loại học sinh theo mức điểm.');
-    }
-
-    if (hasRank) {
-      strengths.push('Đã sử dụng hàm `=RANK(...)` và cố định vùng dữ liệu bằng dấu `$`.');
-    }
-
-    const score = weaknesses.length === 0 ? 10 : weaknesses.length === 1 ? 8.5 : 7.0;
-    if (score < 10) {
-      howToGetTen.push('Lưu lại tệp Excel trên máy và bấm "Chấm Lại Bằng AI" để nhận trọn 10 điểm!');
-    }
-
-    return {
-      score,
-      aiComparisonDetails: `Hệ thống AI đã kiểm tra bảng tính ${fileName}: đối chiếu công thức và cấu trúc bảng với đáp án mẫu của giáo viên.`,
-      strengths,
-      weaknesses,
-      howToGetTen,
-    };
-  }
-
-  // Grade 6, Grade 7, Grade 8 & Grade 9 Practical Products Analysis (SP01 - SP14)
-  if (
-    assignment.id.startsWith('sp') ||
-    assignment.id.startsWith('th7') ||
-    assignment.id.startsWith('th8') ||
-    assignment.id.startsWith('th9') ||
-    assignment.title.startsWith('SP') ||
-    assignment.title.startsWith('TH7') ||
-    assignment.title.startsWith('TH8') ||
-    assignment.title.startsWith('TH9')
-  ) {
-    const ext = fileName.split('.').pop()?.toLowerCase() || '';
-    const lowerName = fileName.toLowerCase();
-    const strengths: string[] = [
-      `Tệp sản phẩm (${fileName}) nộp đúng định dạng và đúng hạn.`,
-      `Đáp ứng được nhiệm vụ cốt lõi của bài: ${assignment.title}.`
-    ];
-    const weaknesses: string[] = [];
-    const howToGetTen: string[] = [];
-
-    if (
-      assignment.targetFile &&
-      !lowerName.includes(assignment.targetFile.toLowerCase().replace(/\.[^.]+$/, '')) &&
-      !lowerName.includes('sp') &&
-      !lowerName.includes('th7') &&
-      !lowerName.includes('th8') &&
-      !lowerName.includes('th9')
-    ) {
-      weaknesses.push(`Tên tệp khuyến nghị theo quy định của giáo viên là: ${assignment.targetFile}.`);
-      howToGetTen.push(`Bước 1: Đổi tên tệp thành ${assignment.targetFile} trước khi nộp.`);
-    }
-
-    if (attemptNumber === 1) {
-      if (assignment.acceptanceCriteria) {
-        weaknesses.push(`Đối chiếu yêu cầu đạt: ${assignment.acceptanceCriteria}.`);
-      }
-      howToGetTen.push(`Bước 2: Rà soát lại sản phẩm theo tiêu chí đánh giá và các bước hướng dẫn.`);
-      howToGetTen.push(`Bước 3: Lưu lại tệp và bấm "Chấm Lại Bằng AI" để đạt 10 điểm tuyệt đối!`);
-    } else {
-      strengths.push('Sản phẩm đã được chỉnh sửa hoàn thiện, đáp ứng 100% tiêu chí đề bài giao!');
-    }
-
-    const score = attemptNumber > 1 ? 10 : weaknesses.length === 0 ? 9.5 : 9.0;
-
-    return {
-      score,
-      aiComparisonDetails: `Hệ thống AI đã quét nhanh sản phẩm ${fileName} và đối chiếu chuẩn kiến thức sản phẩm ${assignment.title} (Tránh nghẽn mạng, phản hồi tức thì).`,
-      strengths,
-      weaknesses,
-      howToGetTen,
-    };
-  }
-
-  // Default smart analysis
-  const score = attemptNumber > 1 ? 9.5 : 8.0;
-  return {
-    score,
-    aiComparisonDetails: `Sản phẩm ${fileName} đã được đối chiếu với sản phẩm mẫu của giáo viên và chuẩn kiến thức Tin học.`,
-    strengths: ['Sản phẩm nộp đúng định dạng và thời gian quy định.'],
-    weaknesses: score < 10 ? ['Cần rà soát các trường hợp kiểm thử đặc biệt để đạt 10 điểm tuyệt đối.'] : [],
-    howToGetTen: score < 10 ? ['Kiểm tra lại logic và nộp lại bài làm để nhận 10 điểm!'] : [],
-  };
+  return scanAndGradeProduct(params);
 }
 
 export default function App() {
@@ -226,14 +67,10 @@ export default function App() {
     localStorage.setItem(STORAGE_KEY_CLASS, newClass);
   };
 
-  // Load initial submissions
+  // Load initial submissions safely
   const [submissions, setSubmissions] = useState<Submission[]>(() => {
-    try {
-      const saved = localStorage.getItem(STORAGE_KEY_SUBMISSIONS);
-      if (saved) return JSON.parse(saved);
-    } catch (e) {
-      console.warn('Failed to load submissions from localStorage:', e);
-    }
+    const loaded = loadSubmissionsSafely();
+    if (loaded && loaded.length > 0) return loaded;
     return INITIAL_SUBMISSIONS;
   });
 
@@ -250,13 +87,9 @@ export default function App() {
     }
   }, [assignments]);
 
-  // Persist submissions to localStorage
+  // Persist submissions safely to localStorage with auto-pruning
   useEffect(() => {
-    try {
-      localStorage.setItem(STORAGE_KEY_SUBMISSIONS, JSON.stringify(submissions));
-    } catch (e) {
-      console.warn('Failed to save submissions:', e);
-    }
+    saveSubmissionsSafely(submissions);
   }, [submissions]);
 
   // Persist class selection
@@ -301,15 +134,22 @@ export default function App() {
     fileSize: number;
     fileContent: string;
   }): Promise<SubmissionAttempt | null> => {
-    // Check if this student/machine has existing attempts
+    const todayStr = getTodayDateString();
+
+    // KIỂM TRA BÀI NỘP CỦA HÔM NAY (Yêu cầu 3: không lưu dồn với ngày trước, sang ngày mới/tuần sau tính phiên mới)
+    // Nếu cùng số máy nhưng KHÁC tên học sinh/nhóm trưởng -> Đây là 2 nhóm khác nhau, không ghi đè mất bài của nhau!
     const existingSubmission = submissions.find(
       (s) =>
         s.assignmentId === data.assignmentId &&
         s.className === data.className &&
-        (s.machineNumber === data.machineNumber ||
-          s.studentLeader.toLowerCase() === data.studentLeader.toLowerCase())
+        (s.studentLeader.trim().toLowerCase() === data.studentLeader.trim().toLowerCase() ||
+          (s.machineNumber === data.machineNumber &&
+            s.groupMembers.some((m) => m.trim().toLowerCase() === data.studentLeader.trim().toLowerCase()))) &&
+        (s.practiceDate === todayStr || isSubmittedToday(s.latestSubmittedAt, todayStr))
     );
 
+    // Nếu là phiên trong cùng ngày hôm nay: số lần nộp tăng dần (attempt 2, 3...)
+    // Nếu là ngày hôm sau / tuần sau: bắt đầu từ lần 1 của ngày hôm đó
     const attemptNumber = existingSubmission ? existingSubmission.attempts.length + 1 : 1;
 
     // Send to grading endpoint
@@ -357,6 +197,8 @@ export default function App() {
       strengths: gradeData.strengths || [],
       weaknesses: gradeData.weaknesses || [],
       howToGetTen: gradeData.howToGetTen || [],
+      stepEvaluations: gradeData.stepEvaluations || [],
+      inspectionSummary: gradeData.inspectionSummary || undefined,
     };
 
     let updatedSubmission: Submission;
@@ -373,15 +215,16 @@ export default function App() {
         highestScore: maxScore,
         latestScore: newAttempt.score,
         latestSubmittedAt: newAttempt.timestamp,
+        practiceDate: todayStr,
         status: maxScore >= 10 ? 'perfect' : maxScore >= 7 ? 'graded' : 'needs_improvement',
       };
 
       setSubmissions((prev) =>
-        prev.map((s) => (s.id === existingSubmission.id ? updatedSubmission : s))
+        pruneOldSubmissions(prev.map((s) => (s.id === existingSubmission.id ? updatedSubmission : s)))
       );
     } else {
       updatedSubmission = {
-        id: `sub-${data.className}-${Date.now()}`,
+        id: `sub-${data.className}-${data.machineNumber.replace(/\s+/g, '_')}-${todayStr}-${Date.now()}`,
         assignmentId: data.assignmentId,
         assignmentTitle: activeAssignment.title,
         className: data.className,
@@ -392,10 +235,12 @@ export default function App() {
         highestScore: newAttempt.score,
         latestScore: newAttempt.score,
         latestSubmittedAt: newAttempt.timestamp,
+        practiceDate: todayStr,
         status: newAttempt.score >= 10 ? 'perfect' : newAttempt.score >= 7 ? 'graded' : 'needs_improvement',
       };
 
-      setSubmissions((prev) => [updatedSubmission, ...prev]);
+      // Thêm bài nộp mới của ngày hôm nay, giữ lại các ngày trước trong lịch sử, tự động dọn dẹp các ngày cũ nhất khi đầy
+      setSubmissions((prev) => pruneOldSubmissions([updatedSubmission, ...prev]));
     }
 
     // Sync to backend endpoint if possible
@@ -463,7 +308,7 @@ export default function App() {
   const perfectCount = filteredForHeader.filter((s) => s.highestScore >= 10).length;
 
   return (
-    <div className="min-h-screen bg-slate-100 flex flex-col font-sans text-slate-900 selection:bg-blue-200">
+    <div className="min-h-screen bg-gradient-to-b from-blue-50/50 via-slate-100 to-slate-100 flex flex-col font-sans text-slate-900 selection:bg-blue-200">
       {/* Top Header */}
       <Header
         onOpenProjector={() => setIsProjectorOpen(true)}
@@ -514,11 +359,11 @@ export default function App() {
 
       {/* School Informatics Footer */}
       <footer className="bg-white border-t border-slate-200 py-6 text-center text-xs text-slate-500">
-        <div className="max-w-7xl mx-auto px-4 flex flex-col sm:flex-row items-center justify-between gap-3">
-          <div className="font-semibold text-slate-700">
+        <div className="w-full max-w-[98%] 2xl:max-w-[1900px] mx-auto px-4 sm:px-6 lg:px-8 flex flex-col sm:flex-row items-center justify-between gap-3">
+          <div className="font-semibold text-slate-700 text-sm">
             Hệ Thống Chấm Điểm Phòng Thực Hành Tin Học • LabGrade AI
           </div>
-          <div>
+          <div className="text-sm">
             Nộp nhiều lần • Tối ưu 10 điểm • Báo cáo Excel chi tiết theo lớp
           </div>
         </div>

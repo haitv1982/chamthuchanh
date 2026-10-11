@@ -7,6 +7,7 @@ import {
   FileSpreadsheet,
   Users,
   Sparkles,
+  AlertTriangle,
 } from 'lucide-react';
 import { Submission } from '../types';
 import {
@@ -32,8 +33,34 @@ export const ClassResultsModal: React.FC<ClassResultsModalProps> = ({
   const [sortBy, setSortBy] = useState<'machine' | 'name' | 'score'>('machine');
 
   // Filter submissions by current class
-  const classList = submissions.filter((s) => s.className === className);
-  const filtered = classList.filter((s) => {
+  const classList = className === 'Tất cả'
+    ? submissions
+    : submissions.filter((s) => s.className === className);
+
+  // KHẮC PHỤC YÊU CẦU 2 & 3: Gom nhóm theo Máy + Học sinh và CHỈ LẤY LẦN NỘP CÓ KẾT QUẢ CAO NHẤT
+  const bestMap = new Map<string, Submission>();
+  classList.forEach((sub) => {
+    const key = `${sub.className}__${sub.machineNumber}__${sub.studentLeader.trim().toLowerCase()}`;
+    const existing = bestMap.get(key);
+    if (!existing || sub.highestScore > existing.highestScore) {
+      bestMap.set(key, sub);
+    } else if (sub.highestScore === existing.highestScore) {
+      const timeA = new Date(sub.latestSubmittedAt || 0).getTime();
+      const timeB = new Date(existing.latestSubmittedAt || 0).getTime();
+      if (timeA > timeB) bestMap.set(key, sub);
+    }
+  });
+
+  const uniqueClassList = Array.from(bestMap.values());
+
+  // Đếm các số máy bị trùng (có nhiều hơn 1 nhóm nộp bài)
+  const duplicateMachineCounts = new Map<string, number>();
+  uniqueClassList.forEach((s) => {
+    const m = s.machineNumber;
+    duplicateMachineCounts.set(m, (duplicateMachineCounts.get(m) || 0) + 1);
+  });
+
+  const filtered = uniqueClassList.filter((s) => {
     const q = search.toLowerCase();
     return (
       s.studentLeader.toLowerCase().includes(q) ||
@@ -60,10 +87,10 @@ export const ClassResultsModal: React.FC<ClassResultsModalProps> = ({
     return b.highestScore - a.highestScore;
   });
 
-  const total = classList.length;
-  const perfectCount = classList.filter((s) => s.highestScore >= 10).length;
+  const total = uniqueClassList.length;
+  const perfectCount = uniqueClassList.filter((s) => s.highestScore >= 10).length;
   const avgScore = total > 0
-    ? (classList.reduce((sum, s) => sum + s.highestScore, 0) / total).toFixed(1)
+    ? (uniqueClassList.reduce((sum, s) => sum + s.highestScore, 0) / total).toFixed(1)
     : '0';
 
   return (
@@ -208,6 +235,15 @@ export const ClassResultsModal: React.FC<ClassResultsModalProps> = ({
                           <span className="font-extrabold text-xs px-2.5 py-0.5 rounded-md bg-blue-100 text-blue-800 border border-blue-200">
                             {formattedMachine}
                           </span>
+                          {(duplicateMachineCounts.get(sub.machineNumber) || 0) > 1 && (
+                            <span
+                              className="text-[10px] font-bold px-2 py-0.5 rounded-md bg-amber-100 text-amber-900 border border-amber-300 flex items-center gap-1"
+                              title="Có 2 nhóm học sinh cùng chọn số máy này"
+                            >
+                              <AlertTriangle className="w-3 h-3 text-amber-600 shrink-0" />
+                              <span>Trùng số máy</span>
+                            </span>
+                          )}
                           <span className="font-bold text-sm text-slate-900">
                             {sub.studentLeader}
                           </span>

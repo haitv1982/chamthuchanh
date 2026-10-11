@@ -1,20 +1,26 @@
-<div align="center">
-<img width="1200" height="475" alt="GHBanner" src="https://ai.google.dev/static/site-assets/images/share-ais-513315318.png" />
-</div>
+# Hệ Thống Quản Lý & Chấm Điểm Thực Hành Tin Học THCS (Khối 6, 7, 8, 9)
 
-# Run and deploy your AI Studio app
+Ứng dụng web hỗ trợ giáo viên và học sinh thực hành môn Tin học theo chương trình GDPT 2018 (Khối 6, 7, 8, 9).
 
-This contains everything you need to run your app locally.
+## Cách kích hoạt GitHub Pages để xem trang web trực tiếp
 
-View your app in AI Studio: https://ai.studio/apps/2c05f1c4-5a7a-4961-8c86-055aff6e798f
+1. Mở trang repository trên **GitHub**.
+2. Chọn tab **Settings** (Cài đặt) ở thanh menu trên cùng.
+3. Ở menu bên trái, chọn **Pages**.
+4. Tại mục **Build and deployment** -> **Source**:
+   - Chọn **GitHub Actions**.
+5. Vào tab **Actions** trên GitHub, workflow **Deploy to GitHub Pages** sẽ tự động chạy (build & deploy).
+6. Sau khoảng 1-2 phút, đường dẫn website của bạn sẽ xuất hiện tại mục **Deployments** trên trang chính repository (hoặc trong phần GitHub Pages settings).
 
-## Run Locally
+## Chạy thử ở môi trường Local (Máy tính cá nhân)
 
-**Prerequisites:**  Node.js
+```bash
+# Cài đặt thư viện
+npm install
 
+# Chạy bản thử nghiệm lập trình
+npm run dev
 
-1. Install dependencies:
-   `npm install`
-2. Set the `GEMINI_API_KEY` in [.env.local](.env.local) to your Gemini API key
-3. Run the app:
-   `npm run dev`
+# Đóng gói xuất bản
+npm run build
+```

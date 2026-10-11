@@ -62,15 +62,13 @@ interface StudentExportRecord {
   role: string;
   className: string;
   assignmentTitle: string;
-  attempt1: number | string;
-  attempt2: number | string;
-  attempt3: number | string;
   highestScore: number;
+  bestAttemptNumber: string;
   classification: string;
-  attemptsCount: number;
   formattedTime: string;
   fileName: string;
   comments: string;
+  practiceDate: string;
 }
 
 export function exportSubmissionsToExcel(params: {
@@ -88,13 +86,45 @@ export function exportSubmissionsToExcel(params: {
     schoolName = 'Trường THCS / THPT',
   } = params;
 
-  // Filter submissions by class if specified
-  const filteredList = className === 'Tất cả'
+  // 1. Lọc theo lớp nếu được chỉ định
+  const filteredByClass = className === 'Tất cả'
     ? submissions
     : submissions.filter((s) => s.className === className);
 
+  // 2. Lọc theo bài tập nếu có
+  const filteredByAssignment = assignment
+    ? filteredByClass.filter((s) => s.assignmentId === assignment.id)
+    : filteredByClass;
+
+  // 3. KHẮC PHỤC YÊU CẦU 2 & 3: Gom nhóm theo Máy / Học sinh và CHỈ LẤY LẦN NỘP CÓ KẾT QUẢ CAO NHẤT
+  // Nếu học sinh thực hành nhiều ngày hoặc nhiều lần, chỉ chọn bản ghi có kết quả cao nhất (nếu bằng điểm thì lấy bản ghi mới nhất)
+  const bestSubmissionMap = new Map<string, Submission>();
+
+  filteredByAssignment.forEach((sub) => {
+    // Khóa định danh máy + người nộp (để tránh trùng lặp)
+    const key = `${sub.className}__${sub.machineNumber}__${sub.studentLeader.trim().toLowerCase()}`;
+    const existing = bestSubmissionMap.get(key);
+    if (!existing) {
+      bestSubmissionMap.set(key, sub);
+    } else {
+      // So sánh điểm cao nhất
+      if (sub.highestScore > existing.highestScore) {
+        bestSubmissionMap.set(key, sub);
+      } else if (sub.highestScore === existing.highestScore) {
+        // Nếu bằng điểm, ưu tiên lần nộp ngày sau (mới hơn)
+        const timeA = new Date(sub.latestSubmittedAt || 0).getTime();
+        const timeB = new Date(existing.latestSubmittedAt || 0).getTime();
+        if (timeA > timeB) {
+          bestSubmissionMap.set(key, sub);
+        }
+      }
+    }
+  });
+
+  const finalSubmissions = Array.from(bestSubmissionMap.values());
+
   // Sắp xếp các nhóm theo thứ tự số máy tăng dần (Máy 01, Máy 02, Máy 03,...)
-  const sortedSubmissions = [...filteredList].sort((a, b) => {
+  const sortedSubmissions = [...finalSubmissions].sort((a, b) => {
     const numA = getMachineSortNumber(a.machineNumber);
     const numB = getMachineSortNumber(b.machineNumber);
     if (numA !== numB) return numA - numB;
@@ -109,35 +139,41 @@ export function exportSubmissionsToExcel(params: {
     minute: '2-digit',
   });
 
-  // Thu thập danh sách chi tiết TẤT CẢ các thành viên trong từng nhóm
+  // Thu thập danh sách chi tiết TẤT CẢ các thành viên - CHỈ XUẤT LẦN NỘP CÓ KẾT QUẢ CAO NHẤT
   const allStudentRecords: StudentExportRecord[] = [];
 
   sortedSubmissions.forEach((sub) => {
     const machineFormatted = formatMachineNumber(sub.machineNumber);
     const machineIdx = getMachineSortNumber(sub.machineNumber);
 
-    const attempt1 = sub.attempts[0]?.score !== undefined ? sub.attempts[0].score : '-';
-    const attempt2 = sub.attempts[1]?.score !== undefined ? sub.attempts[1].score : '-';
-    const attempt3 = sub.attempts[2]?.score !== undefined ? sub.attempts[2].score : '-';
+    // Tìm chính xác attempt đạt điểm cao nhất của nhóm/học sinh này
+    const bestAttempt = sub.attempts.length > 0
+      ? sub.attempts.reduce((best, curr) => (curr.score > (best?.score ?? -1) ? curr : best), sub.attempts[0])
+      : null;
+
+    const highestScore = bestAttempt ? bestAttempt.score : sub.highestScore;
+    const bestAttemptNumber = bestAttempt ? `Lần ${bestAttempt.attemptNumber}` : 'Lần 1';
 
     let classification = 'Chưa đạt';
-    if (sub.highestScore >= 9) classification = 'Giỏi (Xuất sắc)';
-    else if (sub.highestScore >= 7) classification = 'Khá';
-    else if (sub.highestScore >= 5) classification = 'Đạt';
+    if (highestScore >= 9) classification = 'Giỏi (Xuất sắc)';
+    else if (highestScore >= 7) classification = 'Khá';
+    else if (highestScore >= 5) classification = 'Đạt';
 
-    const latestAttempt = sub.attempts[sub.attempts.length - 1];
     const commentsList = [
-      ...(latestAttempt?.strengths || []),
-      ...(latestAttempt?.weaknesses ? latestAttempt.weaknesses.map((w) => `Lưu ý: ${w}`) : []),
-      latestAttempt?.teacherNote ? `[GV]: ${latestAttempt.teacherNote}` : '',
-    ].filter(Boolean).join('; ') || (sub.highestScore === 10 ? 'Hoàn thành xuất sắc 10/10' : 'Đã nộp bài đầy đủ');
+      ...(bestAttempt?.strengths || []),
+      ...(bestAttempt?.weaknesses ? bestAttempt.weaknesses.map((w) => `Lưu ý: ${w}`) : []),
+      bestAttempt?.teacherNote ? `[GV]: ${bestAttempt.teacherNote}` : '',
+    ].filter(Boolean).join('; ') || (highestScore >= 10 ? 'Hoàn thành xuất sắc 10/10' : 'Đã nộp bài đầy đủ');
 
-    const formattedTime = new Date(sub.latestSubmittedAt).toLocaleTimeString('vi-VN', {
-      hour: '2-digit',
-      minute: '2-digit',
-    });
+    const formattedTime = bestAttempt?.timestamp
+      ? new Date(bestAttempt.timestamp).toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit' })
+      : new Date(sub.latestSubmittedAt).toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit' });
 
-    const fileName = latestAttempt?.fileName || 'file_thuc_hanh';
+    const practiceDate = sub.practiceDate
+      ? new Date(sub.practiceDate).toLocaleDateString('vi-VN', { day: '2-digit', month: '2-digit', year: 'numeric' })
+      : new Date(sub.latestSubmittedAt).toLocaleDateString('vi-VN', { day: '2-digit', month: '2-digit', year: 'numeric' });
+
+    const fileName = bestAttempt?.fileName || 'file_thuc_hanh';
 
     // 1. Thành viên là Trưởng nhóm / Người nộp
     const leaderParsed = splitVietnameseName(sub.studentLeader);
@@ -150,15 +186,13 @@ export function exportSubmissionsToExcel(params: {
       role: sub.groupMembers.length > 0 ? 'Trưởng nhóm' : 'Làm cá nhân',
       className: sub.className,
       assignmentTitle: sub.assignmentTitle,
-      attempt1,
-      attempt2,
-      attempt3,
-      highestScore: sub.highestScore,
+      highestScore,
+      bestAttemptNumber,
       classification,
-      attemptsCount: sub.attempts.length,
       formattedTime,
       fileName,
       comments: commentsList,
+      practiceDate,
     });
 
     // 2. Từng bạn thành viên cùng nhóm tại máy này
@@ -173,20 +207,18 @@ export function exportSubmissionsToExcel(params: {
         role: 'Thành viên nhóm',
         className: sub.className,
         assignmentTitle: sub.assignmentTitle,
-        attempt1,
-        attempt2,
-        attempt3,
-        highestScore: sub.highestScore,
+        highestScore,
+        bestAttemptNumber,
         classification,
-        attemptsCount: sub.attempts.length,
         formattedTime,
         fileName,
         comments: commentsList,
+        practiceDate,
       });
     });
   });
 
-  // Calculate statistics
+  // Thống kê toàn diện
   const totalStudents = allStudentRecords.length;
   const totalGroups = sortedSubmissions.length;
   const perfectGroups = sortedSubmissions.filter((s) => s.highestScore >= 10).length;
@@ -203,15 +235,13 @@ export function exportSubmissionsToExcel(params: {
     'Vai trò trong nhóm',
     'Lớp',
     'Bài thực hành',
-    'Điểm Lần 1',
-    'Điểm Lần 2',
-    'Điểm Lần 3',
-    'ĐIỂM TỔNG KẾT (CAO NHẤT)',
+    'KẾT QUẢ CAO NHẤT (ĐIỂM)',
+    'Lần nộp đạt điểm cao nhất',
     'Xếp loại học lực',
-    'Số lần nộp',
     'Thời gian nộp',
+    'Ngày thực hành',
     'Tên tệp nộp',
-    'Nhận xét chi tiết',
+    'Nhận xét đánh giá chi tiết (lần cao nhất)',
   ];
 
   const COL_WIDTHS = [
@@ -223,14 +253,12 @@ export function exportSubmissionsToExcel(params: {
     { wch: 18 }, // Vai trò trong nhóm
     { wch: 8 },  // Lớp
     { wch: 34 }, // Bài thực hành
-    { wch: 11 }, // Lần 1
-    { wch: 11 }, // Lần 2
-    { wch: 11 }, // Lần 3
-    { wch: 22 }, // ĐIỂM TỔNG KẾT
+    { wch: 24 }, // KẾT QUẢ CAO NHẤT (ĐIỂM)
+    { wch: 24 }, // Lần nộp đạt điểm cao nhất
     { wch: 16 }, // Xếp loại học lực
-    { wch: 11 }, // Số lần nộp
     { wch: 14 }, // Thời gian nộp
-    { wch: 24 }, // Tên tệp nộp
+    { wch: 14 }, // Ngày thực hành
+    { wch: 26 }, // Tên tệp nộp
     { wch: 60 }, // Nhận xét chi tiết
   ];
 
@@ -247,7 +275,7 @@ export function exportSubmissionsToExcel(params: {
     rows.push([titleText]);
     rows.push([subText]);
     rows.push([`Lớp: ${className} | Bài thực hành: ${assignment ? assignment.title : 'Tất cả bài tập'} | Xuất ngày: ${nowStr}`]);
-    rows.push([`Giáo viên phụ trách: ${teacherName}`]);
+    rows.push([`Giáo viên phụ trách: ${teacherName} | Tiêu chí xuất: CHỈ XUẤT LẦN NỘP CÓ KẾT QUẢ CAO NHẤT`]);
     rows.push(['']);
     rows.push(COL_HEADERS);
 
@@ -261,20 +289,18 @@ export function exportSubmissionsToExcel(params: {
         rec.role,
         rec.className,
         rec.assignmentTitle,
-        rec.attempt1,
-        rec.attempt2,
-        rec.attempt3,
         rec.highestScore,
+        rec.bestAttemptNumber,
         rec.classification,
-        rec.attemptsCount,
         rec.formattedTime,
+        rec.practiceDate,
         rec.fileName,
         rec.comments,
       ]);
     });
 
     rows.push(['']);
-    rows.push(['=== THỐNG KÊ TỔNG HỢP CẢ LỚP ===']);
+    rows.push(['=== THỐNG KÊ TỔNG HỢP CẢ LỚP (KẾT QUẢ CAO NHẤT) ===']);
     rows.push(['Tổng số học sinh ghi nhận điểm:', totalStudents]);
     rows.push(['Tổng số máy / nhóm thực hành:', totalGroups]);
     rows.push(['Điểm trung bình toàn lớp:', avgScore]);
@@ -336,25 +362,37 @@ export function exportSubmissionsToExcel(params: {
     'Danh sách tất cả thành viên',
     'Sĩ số nhóm',
     'Lớp',
-    'Điểm Lần 1',
-    'Điểm Lần 2',
-    'ĐIỂM CAO NHẤT',
+    'KẾT QUẢ CAO NHẤT (ĐIỂM)',
+    'Lần nộp đạt điểm cao nhất',
     'Xếp loại',
-    'Số lần nộp',
-    'Thời gian nộp cuối',
+    'Thời gian nộp (lần cao nhất)',
+    'Ngày thực hành',
+    'Tên tệp nộp (lần cao nhất)',
   ]);
 
   sortedSubmissions.forEach((sub, idx) => {
-    const attempt1 = sub.attempts[0]?.score !== undefined ? sub.attempts[0].score : '-';
-    const attempt2 = sub.attempts[1]?.score !== undefined ? sub.attempts[1].score : '-';
+    const bestAttempt = sub.attempts.length > 0
+      ? sub.attempts.reduce((best, curr) => (curr.score > (best?.score ?? -1) ? curr : best), sub.attempts[0])
+      : null;
+
+    const highestScore = bestAttempt ? bestAttempt.score : sub.highestScore;
+    const bestAttemptNumber = bestAttempt ? `Lần ${bestAttempt.attemptNumber}` : 'Lần 1';
 
     let classification = 'Chưa đạt';
-    if (sub.highestScore >= 9) classification = 'Giỏi';
-    else if (sub.highestScore >= 7) classification = 'Khá';
-    else if (sub.highestScore >= 5) classification = 'Đạt';
+    if (highestScore >= 9) classification = 'Giỏi';
+    else if (highestScore >= 7) classification = 'Khá';
+    else if (highestScore >= 5) classification = 'Đạt';
 
     const leaderParsed = splitVietnameseName(sub.studentLeader);
     const allMembersList = [sub.studentLeader, ...sub.groupMembers].join(', ');
+
+    const bestTime = bestAttempt?.timestamp
+      ? new Date(bestAttempt.timestamp).toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit' })
+      : new Date(sub.latestSubmittedAt).toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit' });
+
+    const practiceDate = sub.practiceDate
+      ? new Date(sub.practiceDate).toLocaleDateString('vi-VN', { day: '2-digit', month: '2-digit', year: 'numeric' })
+      : new Date(sub.latestSubmittedAt).toLocaleDateString('vi-VN', { day: '2-digit', month: '2-digit', year: 'numeric' });
 
     groupRows.push([
       idx + 1,
@@ -365,12 +403,12 @@ export function exportSubmissionsToExcel(params: {
       allMembersList,
       1 + sub.groupMembers.length,
       sub.className,
-      attempt1,
-      attempt2,
-      sub.highestScore,
+      highestScore,
+      bestAttemptNumber,
       classification,
-      sub.attempts.length,
-      new Date(sub.latestSubmittedAt).toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit' }),
+      bestTime,
+      practiceDate,
+      bestAttempt?.fileName || 'file_thuc_hanh',
     ]);
   });
 
@@ -398,12 +436,12 @@ export function exportSubmissionsToExcel(params: {
     { wch: 36 },
     { wch: 12 },
     { wch: 8 },
-    { wch: 11 },
-    { wch: 11 },
+    { wch: 24 },
+    { wch: 24 },
     { wch: 16 },
-    { wch: 12 },
-    { wch: 12 },
-    { wch: 18 },
+    { wch: 14 },
+    { wch: 14 },
+    { wch: 24 },
   ];
   XLSX.utils.book_append_sheet(wb, wsGroups, 'Tong_Hop_Theo_Nhom');
 
