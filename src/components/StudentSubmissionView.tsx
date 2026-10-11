@@ -32,6 +32,7 @@ import {
   AlertTriangle,
   ListChecks,
   XCircle,
+  Search,
 } from 'lucide-react';
 import { Assignment, Submission, SubmissionAttempt } from '../types';
 import { SCHOOL_CLASSES, getClassesByGrade } from '../data/classes';
@@ -130,10 +131,35 @@ export const StudentSubmissionView: React.FC<StudentSubmissionViewProps> = ({
     setErrorMsg(null);
   };
 
+  // Form State
+  const [machineNumber, setMachineNumber] = useState('Máy 05');
+  const [studentLeader, setStudentLeader] = useState('');
+  const [groupMembers, setGroupMembers] = useState<string[]>([]);
+  const [newMemberName, setNewMemberName] = useState('');
+  const [groupSaveNotice, setGroupSaveNotice] = useState<string | null>(null);
+  const [showConflictModal, setShowConflictModal] = useState<boolean>(false);
+
+  // Dropdown chọn sản phẩm phía trên (Yêu cầu 8: nháy nút tam giác để mở/đóng danh sách)
+  const [isProductDropdownOpen, setIsProductDropdownOpen] = useState(false);
+  const [productSearchTerm, setProductSearchTerm] = useState('');
+  const productDropdownRef = useRef<HTMLDivElement>(null);
+
   // Filtered assignments according to the selected Grade filter
   const displayedAssignments = assignments.filter((assign) => {
     if (selectedGradeFilter === 'all') return true;
     return assign.gradeLevel === selectedGradeFilter;
+  });
+
+  // Chỉ số và bộ lọc tìm kiếm cho menu chọn sản phẩm phía trên (Yêu cầu 8)
+  const currentAssignmentIndex = displayedAssignments.findIndex((a) => a.id === activeAssignmentId);
+  const filteredDropdownAssignments = displayedAssignments.filter((assign) => {
+    if (!productSearchTerm.trim()) return true;
+    const term = productSearchTerm.toLowerCase();
+    return (
+      assign.title.toLowerCase().includes(term) ||
+      assign.id.toLowerCase().includes(term) ||
+      (assign.gradeLevel && assign.gradeLevel.toLowerCase().includes(term))
+    );
   });
 
   // Sync grade filter when active assignment changes
@@ -149,14 +175,6 @@ export const StudentSubmissionView: React.FC<StudentSubmissionViewProps> = ({
     }
   }, [activeAssignment?.gradeLevel]);
 
-  // Form State
-  const [machineNumber, setMachineNumber] = useState('Máy 05');
-  const [studentLeader, setStudentLeader] = useState('');
-  const [groupMembers, setGroupMembers] = useState<string[]>([]);
-  const [newMemberName, setNewMemberName] = useState('');
-  const [groupSaveNotice, setGroupSaveNotice] = useState<string | null>(null);
-  const [showConflictModal, setShowConflictModal] = useState<boolean>(false);
-
   // File Upload State
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [fileContent, setFileContent] = useState<string>('');
@@ -169,6 +187,28 @@ export const StudentSubmissionView: React.FC<StudentSubmissionViewProps> = ({
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // Đóng danh sách sản phẩm khi nháy chuột ra ngoài hoặc ấn ESC
+  useEffect(() => {
+    const handleClickOutside = (e: MouseEvent) => {
+      if (productDropdownRef.current && !productDropdownRef.current.contains(e.target as Node)) {
+        setIsProductDropdownOpen(false);
+      }
+    };
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setIsProductDropdownOpen(false);
+      }
+    };
+    if (isProductDropdownOpen) {
+      document.addEventListener('mousedown', handleClickOutside);
+      window.addEventListener('keydown', handleKeyDown);
+    }
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside);
+      window.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [isProductDropdownOpen]);
 
   // =========================================================================
   // XỬ LÝ YÊU CẦU 3: QUẢN LÝ THEO BUỔI THỰC HÀNH (NGÀY) - KHÔNG LƯU DỒN NGÀY CŨ
@@ -834,44 +874,32 @@ export const StudentSubmissionView: React.FC<StudentSubmissionViewProps> = ({
             </div>
           </div>
 
-          {/* Danh Sách Bài Thực Hành Của Khối Đang Chọn */}
-          <div className="bg-white rounded-2xl p-4 sm:p-5 border border-slate-200 shadow-xs space-y-3">
-            <div className="flex items-center justify-between pb-2.5 border-b border-slate-100">
-              <span className="text-sm sm:text-base font-black uppercase tracking-wider text-slate-900 flex items-center gap-2">
-                <Layers className="w-5 h-5 text-blue-600" />
-                Danh Sách Bài {selectedGradeFilter !== 'all' ? selectedGradeFilter : ''}:
+          {/* Thẻ Trạng Thái Bài Thực Hành Đang Làm (Gọn gàng trong cột trái) */}
+          <div className="bg-gradient-to-br from-blue-50/70 via-indigo-50/40 to-slate-50 rounded-2xl p-4 border border-blue-200/80 shadow-2xs space-y-3">
+            <div className="flex items-center justify-between text-xs font-black text-slate-600 uppercase tracking-wider">
+              <span className="flex items-center gap-1.5">
+                <BookOpen className="w-4 h-4 text-blue-600" />
+                Bài đang chọn:
               </span>
-              <span className="text-xs sm:text-sm font-bold text-blue-700 bg-blue-50 px-2.5 py-0.5 rounded-full border border-blue-200">
-                {displayedAssignments.length} bài
+              <span className="text-blue-700 bg-blue-100/90 px-2 py-0.5 rounded-md font-extrabold">
+                {currentAssignmentIndex >= 0 ? `Bài ${currentAssignmentIndex + 1}` : 'Đang chọn'}
               </span>
             </div>
-
-            <div className="space-y-2 max-h-[480px] overflow-y-auto pr-1">
-              {displayedAssignments.map((assign, idx) => {
-                const isSelected = assign.id === activeAssignmentId;
-                return (
-                  <button
-                    key={assign.id}
-                    type="button"
-                    onClick={() => onSelectAssignment(assign.id)}
-                    className={`w-full text-left p-3 rounded-xl text-sm sm:text-base font-bold flex items-start gap-3 transition-all ${
-                      isSelected
-                        ? 'bg-blue-600 text-white shadow-sm ring-2 ring-blue-400'
-                        : 'bg-slate-50 hover:bg-blue-50 text-slate-800 hover:text-blue-700 border border-slate-200/80'
-                    }`}
-                  >
-                    <span
-                      className={`w-6 h-6 rounded-full flex items-center justify-center text-xs font-black shrink-0 mt-0.5 ${
-                        isSelected ? 'bg-white text-blue-700 shadow-2xs' : 'bg-slate-200 text-slate-700'
-                      }`}
-                    >
-                      {idx + 1}
-                    </span>
-                    <span className="line-clamp-2 leading-snug">{assign.title}</span>
-                  </button>
-                );
-              })}
+            <div className="text-sm font-black text-slate-900 line-clamp-2 leading-snug">
+              {activeAssignment?.title}
             </div>
+            <button
+              type="button"
+              onClick={() => {
+                setIsProductDropdownOpen(true);
+                const el = document.getElementById('product-selector-area');
+                if (el) el.scrollIntoView({ behavior: 'smooth' });
+              }}
+              className="w-full flex items-center justify-center gap-1.5 py-2 px-3 bg-white hover:bg-blue-600 hover:text-white text-blue-700 text-xs sm:text-sm font-bold rounded-xl border border-blue-200 hover:border-blue-600 transition-all shadow-2xs cursor-pointer group"
+            >
+              <span>Đổi bài khác (nháy nút tam giác phía trên)</span>
+              <span className="text-xs font-black group-hover:translate-y-0.5 transition-transform">▼</span>
+            </button>
           </div>
 
           {/* Stitch Mascot Card Lời Khuyên */}
@@ -893,42 +921,222 @@ export const StudentSubmissionView: React.FC<StudentSubmissionViewProps> = ({
         {/* KHU VỰC CHÍNH BÊN PHẢI: THÔNG TIN BÀI, NỘP BÀI & KẾT QUẢ AI */}
         {/* ============================================================== */}
         <main className="lg:col-span-8 xl:col-span-8.5 space-y-5">
-          {/* Card 1: Hướng Dẫn Chi Tiết Sản Phẩm Đang Chọn */}
+          {/* Card 1: Hướng Dẫn Chi Tiết Sản Phẩm Đang Chọn & Hộp Chọn Sản Phẩm */}
           <div className="bg-white rounded-2xl p-5 sm:p-7 border border-slate-200 shadow-xs space-y-5">
-            <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 pb-4 border-b border-slate-100">
-              <div className="min-w-0">
-                <div className="flex items-center gap-2.5 flex-wrap">
-                  <span
-                    className={`px-3.5 py-1 rounded-full text-xs sm:text-sm font-black uppercase tracking-wider shadow-2xs ${
-                      activeAssignment?.gradeLevel === 'Lớp 9'
-                        ? 'bg-rose-100 text-rose-800 border border-rose-300'
-                        : activeAssignment?.gradeLevel === 'Lớp 8'
-                        ? 'bg-emerald-100 text-emerald-800 border border-emerald-300'
-                        : activeAssignment?.gradeLevel === 'Lớp 7'
-                        ? 'bg-purple-100 text-purple-800 border border-purple-300'
-                        : 'bg-blue-100 text-blue-700 border border-blue-300'
-                    }`}
-                  >
-                    {activeAssignment?.gradeLevel ? `Tin Học ${activeAssignment.gradeLevel}` : 'Nhiệm Vụ Thực Hành'}
+            {/* ============================================================== */}
+            {/* YÊU CẦU 8: MENU CHỌN SẢN PHẨM PHÍA TRÊN NƠI HIỂN THỊ TÊN SP    */}
+            {/* Ô CHỌN SẢN PHẨM VỚI NÚT TAM GIÁC NHÁY SỔ RA DANH SÁCH          */}
+            {/* ============================================================== */}
+            <div id="product-selector-area" className="relative" ref={productDropdownRef}>
+              <div className="flex items-center justify-between mb-2">
+                <label className="text-xs sm:text-sm font-black uppercase tracking-wider text-slate-800 flex items-center gap-2">
+                  <Layers className="w-4.5 h-4.5 text-blue-600" />
+                  <span>Chọn Sản Phẩm / Bài Thực Hành:</span>
+                  <span className="text-xs font-bold text-blue-700 bg-blue-50 px-2.5 py-0.5 rounded-full border border-blue-200">
+                    {displayedAssignments.length} bài ({selectedGradeFilter !== 'all' ? selectedGradeFilter : 'Tất cả khối'})
                   </span>
-                  <span className="text-xs sm:text-sm text-slate-500 font-semibold">
-                    • Chuẩn Chương Trình GDPT 2018
-                  </span>
-                </div>
-                <h1 className="text-2xl sm:text-3xl font-black text-slate-900 mt-2 flex items-center gap-3">
-                  <BookOpen className="w-7 h-7 sm:w-8 sm:h-8 text-blue-600 shrink-0" />
-                  <span>{activeAssignment?.title}</span>
-                </h1>
+                </label>
+                <span className="text-xs text-slate-500 font-medium hidden sm:flex items-center gap-1">
+                  Nháy nút tam giác <span className="font-extrabold text-blue-600 text-sm">▼</span> để mở danh sách chọn
+                </span>
               </div>
 
-              {/* Stitch Thám Tử Đồng Hành */}
-              <div className="flex items-center gap-3 bg-blue-50/80 border border-blue-200/80 rounded-2xl px-4 py-2.5 shrink-0 self-start md:self-auto">
-                <StitchDetective className="w-12 h-12 shrink-0 drop-shadow-xs" />
-                <div className="text-xs sm:text-sm text-blue-900">
-                  <div className="font-black text-blue-800">Trợ Lý Stitch</div>
-                  <div className="text-xs text-blue-600 font-semibold">Đối chiếu từng bước</div>
+              {/* Hộp chọn bài thực hành với nút tam giác */}
+              <div className="flex items-stretch gap-2">
+                <div
+                  onClick={() => setIsProductDropdownOpen((prev) => !prev)}
+                  className={`flex-1 cursor-pointer bg-gradient-to-r from-blue-50/80 via-indigo-50/40 to-slate-50 hover:from-blue-100/70 hover:to-indigo-50/60 border-2 transition-all duration-200 rounded-2xl p-3 sm:p-4 flex items-center justify-between gap-3 shadow-xs select-none ${
+                    isProductDropdownOpen
+                      ? 'border-blue-500 ring-4 ring-blue-100 shadow-md bg-white'
+                      : 'border-blue-200/90 hover:border-blue-400'
+                  }`}
+                  role="button"
+                  tabIndex={0}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' || e.key === ' ') {
+                      e.preventDefault();
+                      setIsProductDropdownOpen((prev) => !prev);
+                    }
+                  }}
+                >
+                  {/* Icon + Badge số thứ tự bài + Tên sản phẩm */}
+                  <div className="flex items-center gap-3 sm:gap-4 min-w-0 flex-1">
+                    <div className="w-12 h-12 rounded-xl bg-gradient-to-br from-blue-600 to-indigo-600 text-white flex flex-col items-center justify-center shrink-0 shadow-sm shadow-blue-500/30">
+                      <BookOpen className="w-5 h-5" />
+                      <span className="text-[10px] font-black uppercase tracking-tighter leading-none mt-0.5">
+                        {currentAssignmentIndex >= 0 ? `BÀI ${currentAssignmentIndex + 1}` : 'BÀI TẬP'}
+                      </span>
+                    </div>
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center gap-2 flex-wrap mb-0.5">
+                        <span
+                          className={`px-2 py-0.5 rounded-md text-[11px] font-black uppercase tracking-wider ${
+                            activeAssignment?.gradeLevel === 'Lớp 9'
+                              ? 'bg-rose-100 text-rose-800'
+                              : activeAssignment?.gradeLevel === 'Lớp 8'
+                              ? 'bg-emerald-100 text-emerald-800'
+                              : activeAssignment?.gradeLevel === 'Lớp 7'
+                              ? 'bg-purple-100 text-purple-800'
+                              : 'bg-blue-100 text-blue-700'
+                          }`}
+                        >
+                          {activeAssignment?.gradeLevel ? `Tin Học ${activeAssignment.gradeLevel}` : 'Tin Học'}
+                        </span>
+                        <span className="text-xs text-slate-400">•</span>
+                        <span className="text-xs text-slate-600 font-semibold">
+                          {activeAssignment?.steps?.length || 0} bước thực hiện
+                        </span>
+                        <span className="text-xs text-slate-400 hidden sm:inline">•</span>
+                        <span className="text-xs text-slate-500 font-semibold hidden sm:inline">
+                          Chuẩn GDPT 2018
+                        </span>
+                      </div>
+                      <div className="text-base sm:text-lg lg:text-xl font-black text-slate-900 truncate">
+                        {activeAssignment?.title}
+                      </div>
+                    </div>
+                  </div>
                 </div>
+
+                {/* Nút tam giác riêng biệt, nổi bật để học sinh nháy */}
+                <button
+                  type="button"
+                  aria-label="Mở danh sách chọn sản phẩm"
+                  onClick={() => setIsProductDropdownOpen((prev) => !prev)}
+                  className={`px-4 sm:px-5 rounded-2xl flex flex-col items-center justify-center gap-1 shrink-0 transition-all duration-200 border-2 shadow-xs cursor-pointer ${
+                    isProductDropdownOpen
+                      ? 'bg-blue-600 text-white border-blue-600 ring-4 ring-blue-100 scale-[1.02]'
+                      : 'bg-white hover:bg-blue-50 text-blue-700 border-blue-300 hover:border-blue-500'
+                  }`}
+                  title="Nháy nút tam giác để mở danh sách chọn bài thực hành"
+                >
+                  <span
+                    className={`inline-block text-base sm:text-lg transition-transform duration-200 leading-none ${
+                      isProductDropdownOpen ? 'rotate-180 text-white' : 'text-blue-600'
+                    }`}
+                  >
+                    ▼
+                  </span>
+                  <span className="text-[10px] font-black uppercase tracking-wider">
+                    {isProductDropdownOpen ? 'Đóng' : 'Chọn bài'}
+                  </span>
+                </button>
               </div>
+
+              {/* Menu Danh Sách Sản Phẩm Sổ Xuống khi nháy nút tam giác */}
+              {isProductDropdownOpen && (
+                <div className="absolute left-0 right-0 top-full mt-2 z-50 bg-white rounded-2xl border-2 border-blue-400 shadow-2xl p-4 space-y-3 animate-in fade-in slide-in-from-top-2 duration-150">
+                  {/* Header menu sổ xuống */}
+                  <div className="flex items-center justify-between pb-3 border-b border-slate-100">
+                    <div className="flex items-center gap-2">
+                      <Layers className="w-5 h-5 text-blue-600" />
+                      <span className="text-sm sm:text-base font-black text-slate-900 uppercase tracking-wide">
+                        Danh Sách Sản Phẩm {selectedGradeFilter !== 'all' ? selectedGradeFilter : 'Tất Cả Khối'} ({displayedAssignments.length} bài)
+                      </span>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setIsProductDropdownOpen(false)}
+                      className="text-xs font-bold text-slate-500 hover:text-slate-900 px-2.5 py-1 rounded-lg hover:bg-slate-100 transition-colors"
+                    >
+                      Đóng ✕
+                    </button>
+                  </div>
+
+                  {/* Thanh tìm kiếm nhanh */}
+                  <div className="relative">
+                    <Search className="w-4 h-4 absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400" />
+                    <input
+                      type="text"
+                      placeholder="Tìm bài thực hành theo tên hoặc số thứ tự..."
+                      value={productSearchTerm}
+                      onChange={(e) => setProductSearchTerm(e.target.value)}
+                      className="w-full pl-10 pr-4 py-2 text-sm bg-slate-50 border border-slate-200 rounded-xl focus:bg-white focus:outline-hidden focus:ring-2 focus:ring-blue-500 focus:border-blue-500 text-slate-900"
+                    />
+                    {productSearchTerm && (
+                      <button
+                        type="button"
+                        onClick={() => setProductSearchTerm('')}
+                        className="absolute right-3 top-1/2 -translate-y-1/2 text-xs font-bold text-slate-400 hover:text-slate-600"
+                      >
+                        ✕
+                      </button>
+                    )}
+                  </div>
+
+                  {/* Danh sách các sản phẩm để học sinh bấm chọn */}
+                  <div className="max-h-72 sm:max-h-80 overflow-y-auto space-y-1.5 pr-1 divide-y divide-slate-100">
+                    {filteredDropdownAssignments.length === 0 ? (
+                      <div className="py-6 text-center text-sm text-slate-500 font-medium">
+                        Không tìm thấy bài thực hành nào phù hợp với từ khóa "{productSearchTerm}"
+                      </div>
+                    ) : (
+                      filteredDropdownAssignments.map((assign) => {
+                        const isSelected = assign.id === activeAssignmentId;
+                        const originalIdx = displayedAssignments.findIndex((a) => a.id === assign.id);
+                        return (
+                          <button
+                            key={assign.id}
+                            type="button"
+                            onClick={() => {
+                              onSelectAssignment(assign.id);
+                              setIsProductDropdownOpen(false);
+                            }}
+                            className={`w-full text-left p-3 rounded-xl transition-all flex items-center justify-between gap-3 pt-2.5 cursor-pointer ${
+                              isSelected
+                                ? 'bg-blue-600 text-white font-black shadow-xs ring-1 ring-blue-400'
+                                : 'hover:bg-blue-50/90 text-slate-800'
+                            }`}
+                          >
+                            <div className="flex items-center gap-3 min-w-0 flex-1">
+                              <span
+                                className={`w-7 h-7 rounded-lg flex items-center justify-center text-xs font-black shrink-0 ${
+                                  isSelected
+                                    ? 'bg-white text-blue-700 shadow-2xs'
+                                    : 'bg-slate-100 text-slate-700 border border-slate-200'
+                                }`}
+                              >
+                                {originalIdx >= 0 ? originalIdx + 1 : '•'}
+                              </span>
+                              <div className="min-w-0 flex-1">
+                                <div className="text-sm sm:text-base font-bold truncate">
+                                  {assign.title}
+                                </div>
+                                <div
+                                  className={`text-xs ${
+                                    isSelected ? 'text-blue-100' : 'text-slate-500'
+                                  } flex items-center gap-2 mt-0.5`}
+                                >
+                                  <span>{assign.gradeLevel}</span>
+                                  <span>•</span>
+                                  <span>{assign.steps?.length || 0} bước thực hiện</span>
+                                  {assign.toolRequired && (
+                                    <>
+                                      <span>•</span>
+                                      <span>{assign.toolRequired}</span>
+                                    </>
+                                  )}
+                                </div>
+                              </div>
+                            </div>
+
+                            {isSelected ? (
+                              <span className="shrink-0 flex items-center gap-1 text-xs font-black bg-white/20 px-2.5 py-1 rounded-full text-white">
+                                <Check className="w-4 h-4 text-white" />
+                                <span>Đang chọn</span>
+                              </span>
+                            ) : (
+                              <span className="shrink-0 text-xs font-bold text-blue-600 group-hover:underline opacity-0 sm:opacity-100 hover:opacity-100">
+                                Chọn bài này →
+                              </span>
+                            )}
+                          </button>
+                        );
+                      })
+                    )}
+                  </div>
+                </div>
+              )}
             </div>
 
             {/* Các Bước Thực Hiện Trên Máy Tính */}
