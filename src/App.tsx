@@ -11,6 +11,7 @@ import { exportSubmissionsToExcel, exportSingleSubmissionToExcel } from './utils
 import {
   saveSubmissionsSafely,
   loadSubmissionsSafely,
+  sanitizeSubmission,
   getTodayDateString,
   isSubmittedToday,
   pruneOldSubmissions,
@@ -78,6 +79,64 @@ export default function App() {
   const [isProjectorOpen, setIsProjectorOpen] = useState<boolean>(false);
   const [isClassResultsOpen, setIsClassResultsOpen] = useState<boolean>(false);
 
+  // Role: 'teacher' (Giáo viên) vs 'student' (Học sinh) - Mặc định trên máy mới là Học sinh (chỉ chuyển Giáo viên khi nhập mã PIN)
+  const [isTeacherRole, setIsTeacherRole] = useState<boolean>(() => {
+    const saved = localStorage.getItem('labgrade_user_role');
+    return saved === 'teacher';
+  });
+
+  // Submission Permission: Cho phép học sinh nộp bài hay đang khóa
+  const [allowSubmission, setAllowSubmission] = useState<boolean>(true);
+
+  // Persist role
+  useEffect(() => {
+    localStorage.setItem('labgrade_user_role', isTeacherRole ? 'teacher' : 'student');
+  }, [isTeacherRole]);
+
+  // Fetch session status & sync submissions with network timeout protection
+  const refreshSubmissionsAndStatus = async () => {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 4000);
+    try {
+      const res = await fetch('/api/submissions', { signal: controller.signal });
+      clearTimeout(timer);
+      if (res.ok) {
+        const data = await res.json();
+        if (typeof data.allowSubmission === 'boolean') {
+          setAllowSubmission(data.allowSubmission);
+        }
+        if (Array.isArray(data.submissions) && data.submissions.length > 0) {
+          setSubmissions((prev) => {
+            const map = new Map<string, Submission>();
+            (prev || []).forEach((s) => {
+              if (s && s.id) map.set(s.id, s);
+            });
+            data.submissions.forEach((raw: any) => {
+              const clean = sanitizeSubmission(raw);
+              map.set(clean.id, clean);
+            });
+            return Array.from(map.values());
+          });
+        }
+      }
+    } catch {
+      clearTimeout(timer);
+      // offline or network congestion resilience in busy computer lab
+    }
+  };
+
+  // Toggle submission lock handler
+  const handleToggleSubmissionPermission = async (allow: boolean) => {
+    setAllowSubmission(allow);
+    try {
+      await fetch('/api/session-status', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ allow }),
+      });
+    } catch {}
+  };
+
   // Persist assignments to localStorage
   useEffect(() => {
     try {
@@ -97,27 +156,13 @@ export default function App() {
     localStorage.setItem(STORAGE_KEY_CLASS, userClassName);
   }, [userClassName]);
 
-  // Background fetch from server to sync lab submissions if server has any
+  // Background fetch from server to sync lab submissions if server has any & poll every 4 seconds
   useEffect(() => {
-    const fetchServerSubmissions = async () => {
-      try {
-        const res = await fetch('/api/submissions');
-        if (res.ok) {
-          const data = await res.json();
-          if (Array.isArray(data.submissions) && data.submissions.length > 0) {
-            setSubmissions((prev) => {
-              const map = new Map<string, Submission>();
-              prev.forEach((s) => map.set(s.id, s));
-              data.submissions.forEach((s: Submission) => map.set(s.id, s));
-              return Array.from(map.values());
-            });
-          }
-        }
-      } catch {
-        // offline or standalone
-      }
-    };
-    fetchServerSubmissions();
+    refreshSubmissionsAndStatus();
+    const interval = setInterval(() => {
+      refreshSubmissionsAndStatus();
+    }, 4000);
+    return () => clearInterval(interval);
   }, []);
 
   const activeAssignment =
@@ -138,13 +183,16 @@ export default function App() {
 
     // KIỂM TRA BÀI NỘP CỦA HÔM NAY (Yêu cầu 3: không lưu dồn với ngày trước, sang ngày mới/tuần sau tính phiên mới)
     // Nếu cùng số máy nhưng KHÁC tên học sinh/nhóm trưởng -> Đây là 2 nhóm khác nhau, không ghi đè mất bài của nhau!
+    const cleanLeader = (data.studentLeader || '').trim().toLowerCase();
     const existingSubmission = submissions.find(
       (s) =>
+        s &&
         s.assignmentId === data.assignmentId &&
         s.className === data.className &&
-        (s.studentLeader.trim().toLowerCase() === data.studentLeader.trim().toLowerCase() ||
+        ((s.studentLeader || '').trim().toLowerCase() === cleanLeader ||
           (s.machineNumber === data.machineNumber &&
-            s.groupMembers.some((m) => m.trim().toLowerCase() === data.studentLeader.trim().toLowerCase()))) &&
+            Array.isArray(s.groupMembers) &&
+            s.groupMembers.some((m) => (m || '').trim().toLowerCase() === cleanLeader))) &&
         (s.practiceDate === todayStr || isSubmittedToday(s.latestSubmittedAt, todayStr))
     );
 
@@ -285,12 +333,18 @@ export default function App() {
     });
   };
 
-  // Export Excel handler for active class
-  const handleExportClassExcel = () => {
+  // Export Excel handler for active class or specified class (Hỗ trợ lọc theo ngày bất kỳ hoặc ngày gần nhất)
+  const handleExportClassExcel = (
+    customClass?: string,
+    targetDate?: string | null,
+    dateMode: 'all' | 'latest' | 'custom' = 'all'
+  ) => {
     exportSubmissionsToExcel({
-      className: userClassName,
+      className: typeof customClass === 'string' && customClass ? customClass : userClassName,
       assignment: activeAssignment,
       submissions,
+      targetDate,
+      dateMode,
     });
   };
 
@@ -318,6 +372,10 @@ export default function App() {
         onChangeClassName={handleSelectClassName}
         totalSubmissions={totalSubmissionsCount}
         perfectSubmissions={perfectCount}
+        isTeacher={isTeacherRole}
+        onToggleRole={() => setIsTeacherRole(!isTeacherRole)}
+        allowSubmission={allowSubmission}
+        onToggleSubmissionPermission={handleToggleSubmissionPermission}
       />
 
       {/* Main Student Workspace (Single focused interface without teacher management portal) */}
@@ -334,6 +392,9 @@ export default function App() {
           onExportExcel={handleExportClassExcel}
           onOpenClassResults={() => setIsClassResultsOpen(true)}
           onExportMySubmission={handleExportSingleSubmission}
+          allowSubmission={allowSubmission}
+          isTeacher={isTeacherRole}
+          onToggleSubmissionPermission={handleToggleSubmissionPermission}
         />
       </main>
 
@@ -344,6 +405,11 @@ export default function App() {
           submissions={submissions}
           onClose={() => setIsClassResultsOpen(false)}
           onExportExcel={handleExportClassExcel}
+          isTeacher={isTeacherRole}
+          allowSubmission={allowSubmission}
+          onToggleSubmissionPermission={handleToggleSubmissionPermission}
+          onChangeClassName={handleSelectClassName}
+          onRefresh={refreshSubmissionsAndStatus}
         />
       )}
 
@@ -354,6 +420,8 @@ export default function App() {
           assignment={activeAssignment}
           submissions={submissions}
           onClose={() => setIsProjectorOpen(false)}
+          onRefresh={refreshSubmissionsAndStatus}
+          allowSubmission={allowSubmission}
         />
       )}
 

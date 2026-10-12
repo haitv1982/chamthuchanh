@@ -33,6 +33,8 @@ import {
   ListChecks,
   XCircle,
   Search,
+  Lock,
+  Unlock,
 } from 'lucide-react';
 import { Assignment, Submission, SubmissionAttempt } from '../types';
 import { SCHOOL_CLASSES, getClassesByGrade } from '../data/classes';
@@ -82,6 +84,9 @@ interface StudentSubmissionViewProps {
   onExportExcel?: () => void;
   onOpenClassResults?: () => void;
   onExportMySubmission?: (sub: Submission) => void;
+  allowSubmission?: boolean;
+  isTeacher?: boolean;
+  onToggleSubmissionPermission?: (allow: boolean) => void;
 }
 
 export const StudentSubmissionView: React.FC<StudentSubmissionViewProps> = ({
@@ -96,6 +101,9 @@ export const StudentSubmissionView: React.FC<StudentSubmissionViewProps> = ({
   onExportExcel,
   onOpenClassResults,
   onExportMySubmission,
+  allowSubmission = true,
+  isTeacher = false,
+  onToggleSubmissionPermission,
 }) => {
   // Active assignment
   const activeAssignment = assignments.find((a) => a.id === activeAssignmentId) || assignments[0];
@@ -637,6 +645,12 @@ export const StudentSubmissionView: React.FC<StudentSubmissionViewProps> = ({
 
   // Submit and grade with AI
   const handleGradeWithAI = async () => {
+    // 0. KIỂM TRA QUYỀN NỘP BÀI TỪ GIÁO VIÊN (Yêu cầu 3)
+    if (!allowSubmission) {
+      setErrorMsg('🔒 Giáo viên đang khóa nhận bài nộp. Thầy/Cô chưa bật cho phép nộp bài. Em hãy hoàn thiện sản phẩm trên máy, khi thầy cô ổn định lớp và bấm cho phép nộp bài thì mới nộp nhé!');
+      return;
+    }
+
     // 1. KIỂM TRA CHỌN LỚP (Yêu cầu 1)
     if (!userClassName || !userClassName.trim()) {
       const gradeHint = selectedGradeFilter !== 'all' ? selectedGradeFilter : 'khối đã chọn';
@@ -1640,19 +1654,51 @@ export const StudentSubmissionView: React.FC<StudentSubmissionViewProps> = ({
                   </div>
                 )}
 
+                {/* Banner Quản Lý Cho Phép Nộp Bài (Yêu Cầu 3) */}
+                {!allowSubmission && (
+                  <div className="p-4 bg-rose-50 border-2 border-rose-300 rounded-2xl text-rose-950 space-y-2 animate-in fade-in duration-200">
+                    <div className="flex items-center gap-2.5 font-black text-rose-800 text-sm sm:text-base">
+                      <Lock className="w-5 h-5 text-rose-600 shrink-0" />
+                      <span>GIÁO VIÊN ĐANG KHÓA NHẬN BÀI NỘP</span>
+                    </div>
+                    <p className="text-xs sm:text-sm text-rose-900 leading-relaxed font-medium">
+                      Để tránh học sinh làm bài ở nhà nộp trước khi vào tiết, giáo viên sẽ bật nút <strong>"Cho phép nộp bài"</strong> sau khi cả lớp đã ổn định vị trí máy trong phòng thực hành. Các em hãy tiếp tục thao tác trên máy tính của mình nhé!
+                    </p>
+                    {isTeacher && onToggleSubmissionPermission && (
+                      <div className="pt-1">
+                        <button
+                          type="button"
+                          onClick={() => onToggleSubmissionPermission(true)}
+                          className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-black shadow-xs flex items-center gap-1.5 cursor-pointer"
+                        >
+                          <Unlock className="w-4 h-4" />
+                          <span>Thầy/Cô bấm vào đây để Bật Cho Phép Nộp Bài Ngay</span>
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                )}
+
                 {/* AI Grading Submit Action */}
                 <div className="pt-2">
                   <button
                     type="button"
-                    disabled={isGrading}
+                    disabled={isGrading || !allowSubmission}
                     onClick={handleGradeWithAI}
                     className={`w-full py-4 sm:py-5 px-6 rounded-2xl font-black text-lg sm:text-xl text-white flex items-center justify-center gap-3 shadow-lg transition-all active:scale-[0.99] ${
-                      isGrading
+                      !allowSubmission
+                        ? 'bg-slate-400 cursor-not-allowed opacity-90'
+                        : isGrading
                         ? 'bg-blue-400 cursor-not-allowed'
-                        : 'bg-gradient-to-r from-blue-600 via-indigo-600 to-cyan-500 hover:from-blue-700 hover:to-cyan-600 hover:shadow-xl'
+                        : 'bg-gradient-to-r from-blue-600 via-indigo-600 to-cyan-500 hover:from-blue-700 hover:to-cyan-600 hover:shadow-xl cursor-pointer'
                     }`}
                   >
-                    {isGrading ? (
+                    {!allowSubmission ? (
+                      <>
+                        <Lock className="w-6 h-6 text-white" />
+                        <span>Đang Khóa Nộp Bài (Chờ Thầy/Cô Bật Quyền Nộp)</span>
+                      </>
+                    ) : isGrading ? (
                       <>
                         <RefreshCw className="w-6 h-6 animate-spin" />
                         <span>{gradingStep || 'Hệ thống đang đối chiếu và chấm điểm AI...'}</span>
@@ -2015,27 +2061,29 @@ export const StudentSubmissionView: React.FC<StudentSubmissionViewProps> = ({
                     </div>
                   </div>
 
-                  {/* Informative notice about Excel export */}
-                  <div className="p-4 bg-blue-50/80 border border-blue-200 rounded-xl text-sm text-blue-900 space-y-3">
-                    <div className="flex items-center gap-2 font-semibold">
-                      <Sparkles className="w-4 h-4 text-blue-600 shrink-0" />
-                      <span>
-                        Báo cáo Excel xuất đầy đủ theo thứ tự <strong>Máy 01, Máy 02...</strong> và có <strong>cột Tên riêng</strong> để thầy cô dễ dàng sắp xếp theo ABC!
-                      </span>
-                    </div>
-                    {onOpenClassResults && (
+                  {/* Informative notice & button about class results (Chỉ hiển thị cho Giáo Viên) */}
+                  {isTeacher && onOpenClassResults && (
+                    <div className="p-4 bg-blue-50/80 border border-blue-200 rounded-xl text-sm text-blue-900 space-y-3">
+                      <div className="flex items-center gap-2 font-semibold">
+                        <Sparkles className="w-4 h-4 text-blue-600 shrink-0" />
+                        <span>
+                          Báo cáo Excel xuất đầy đủ theo thứ tự <strong>Máy 01, Máy 02...</strong> và có <strong>cột Tên riêng</strong> để thầy cô dễ dàng sắp xếp theo ABC!
+                        </span>
+                      </div>
                       <div>
                         <button
                           type="button"
                           onClick={onOpenClassResults}
-                          className="w-full py-3 px-4 bg-white hover:bg-blue-50 text-blue-800 border border-blue-300 rounded-xl text-sm font-black flex items-center justify-center gap-2 transition-all shadow-xs"
+                          className="w-full py-3 px-4 bg-white hover:bg-blue-50 text-blue-800 border border-blue-300 rounded-xl text-sm font-black flex items-center justify-center gap-2 transition-all shadow-xs cursor-pointer"
                         >
                           <Users className="w-4 h-4 text-blue-600" />
-                          <span>Xem Bảng Điểm & Tải Kết Quả Lớp {userClassName || 'Cả Lớp'}</span>
+                          <span>
+                            Xem Bảng Điểm & Xuất Excel Lớp {userClassName || 'Cả Lớp'}
+                          </span>
                         </button>
                       </div>
-                    )}
-                  </div>
+                    </div>
+                  )}
                 </div>
               )}
             </div>

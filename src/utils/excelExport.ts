@@ -1,5 +1,6 @@
 import * as XLSX from 'xlsx';
 import { Submission, Assignment } from '../types';
+import { formatPracticeDateVi } from './storageManager';
 
 /**
  * Tách họ tên tiếng Việt thành:
@@ -77,6 +78,8 @@ export function exportSubmissionsToExcel(params: {
   submissions: Submission[];
   teacherName?: string;
   schoolName?: string;
+  targetDate?: string | null;
+  dateMode?: 'all' | 'latest' | 'custom';
 }) {
   const {
     className,
@@ -84,6 +87,8 @@ export function exportSubmissionsToExcel(params: {
     submissions,
     teacherName = 'Giáo viên Tin học',
     schoolName = 'Trường THCS / THPT',
+    targetDate = null,
+    dateMode = 'all',
   } = params;
 
   // 1. Lọc theo lớp nếu được chỉ định
@@ -91,27 +96,67 @@ export function exportSubmissionsToExcel(params: {
     ? submissions
     : submissions.filter((s) => s.className === className);
 
-  // 2. Lọc theo bài tập nếu có
-  const filteredByAssignment = assignment
+  // 2. Tìm danh sách tất cả các ngày thực hành của lớp này (ngày mới nhất đứng đầu)
+  const availableDates = Array.from(
+    new Set(
+      filteredByClass
+        .map((s) => s.practiceDate || s.latestSubmittedAt?.slice(0, 10))
+        .filter((d): d is string => Boolean(d && /^\d{4}-\d{2}-\d{2}$/.test(d)))
+    )
+  ).sort((a, b) => b.localeCompare(a));
+
+  const latestDate = availableDates[0] || null;
+
+  // 3. Xác định ngày thực hành cần lọc và xuất (Yêu cầu 4: Ngày bất kỳ hoặc Ngày gần nhất)
+  let effectiveDate: string | null = null;
+  let dateDescription = 'Tất cả các ngày thực hành';
+
+  if (dateMode === 'latest' && latestDate) {
+    effectiveDate = latestDate;
+    dateDescription = `Ngày gần nhất (${formatPracticeDateVi(latestDate)})`;
+  } else if (dateMode === 'custom' && targetDate) {
+    effectiveDate = targetDate;
+    dateDescription = `Ngày ${formatPracticeDateVi(targetDate)}`;
+  } else if (targetDate) {
+    effectiveDate = targetDate;
+    dateDescription = `Ngày ${formatPracticeDateVi(targetDate)}`;
+  } else {
+    effectiveDate = null;
+    dateDescription = 'Tất cả các ngày thực hành';
+  }
+
+  // 4. Lọc theo bài tập nếu có danh sách bài khớp
+  const hasSubmissionsForAssignment = assignment
+    ? filteredByClass.some((s) => s.assignmentId === assignment.id)
+    : false;
+
+  const filteredByAssignment = (assignment && hasSubmissionsForAssignment)
     ? filteredByClass.filter((s) => s.assignmentId === assignment.id)
     : filteredByClass;
 
-  // 3. KHẮC PHỤC YÊU CẦU 2 & 3: Gom nhóm theo Máy / Học sinh và CHỈ LẤY LẦN NỘP CÓ KẾT QUẢ CAO NHẤT
-  // Nếu học sinh thực hành nhiều ngày hoặc nhiều lần, chỉ chọn bản ghi có kết quả cao nhất (nếu bằng điểm thì lấy bản ghi mới nhất)
+  // 5. Lọc theo ngày thực hành nếu có chỉ định (hoặc ngày gần nhất)
+  const filteredByDate = effectiveDate
+    ? filteredByAssignment.filter((s) => {
+        const d = s.practiceDate || s.latestSubmittedAt?.slice(0, 10);
+        return d === effectiveDate;
+      })
+    : filteredByAssignment;
+
+  // Nếu lọc theo ngày cụ thể mà không có dữ liệu, dùng filteredByAssignment để tránh file rỗng
+  const dataToExport = filteredByDate.length > 0 ? filteredByDate : filteredByAssignment;
+
+  // 6. Gom nhóm theo Máy / Học sinh và CHỈ LẤY LẦN NỘP CÓ KẾT QUẢ CAO NHẤT
   const bestSubmissionMap = new Map<string, Submission>();
 
-  filteredByAssignment.forEach((sub) => {
-    // Khóa định danh máy + người nộp (để tránh trùng lặp)
+  dataToExport.forEach((sub) => {
     const key = `${sub.className}__${sub.machineNumber}__${sub.studentLeader.trim().toLowerCase()}`;
     const existing = bestSubmissionMap.get(key);
     if (!existing) {
       bestSubmissionMap.set(key, sub);
     } else {
-      // So sánh điểm cao nhất
       if (sub.highestScore > existing.highestScore) {
         bestSubmissionMap.set(key, sub);
       } else if (sub.highestScore === existing.highestScore) {
-        // Nếu bằng điểm, ưu tiên lần nộp ngày sau (mới hơn)
         const timeA = new Date(sub.latestSubmittedAt || 0).getTime();
         const timeB = new Date(existing.latestSubmittedAt || 0).getTime();
         if (timeA > timeB) {
@@ -274,7 +319,7 @@ export function exportSubmissionsToExcel(params: {
     rows.push(['']);
     rows.push([titleText]);
     rows.push([subText]);
-    rows.push([`Lớp: ${className} | Bài thực hành: ${assignment ? assignment.title : 'Tất cả bài tập'} | Xuất ngày: ${nowStr}`]);
+    rows.push([`Lớp: ${className} | Buổi thực hành: ${dateDescription} | Xuất ngày: ${nowStr}`]);
     rows.push([`Giáo viên phụ trách: ${teacherName} | Tiêu chí xuất: CHỈ XUẤT LẦN NỘP CÓ KẾT QUẢ CAO NHẤT`]);
     rows.push(['']);
     rows.push(COL_HEADERS);
@@ -448,7 +493,12 @@ export function exportSubmissionsToExcel(params: {
   // Filename
   const dateFormatted = new Date().toISOString().split('T')[0];
   const safeClassName = className.replace(/[^a-zA-Z0-9_-]/g, '_');
-  const filename = `Bang_Diem_Thuc_Hanh_Lop_${safeClassName}_Theo_May_Va_Ten_ABC_${dateFormatted}.xlsx`;
+  const dateSuffix = effectiveDate
+    ? `_Ngay_${effectiveDate.replace(/-/g, '_')}`
+    : dateMode === 'latest' && latestDate
+    ? `_NgayGanNhat_${latestDate.replace(/-/g, '_')}`
+    : `_TatCaNgay_${dateFormatted}`;
+  const filename = `Bang_Diem_Thuc_Hanh_Lop_${safeClassName}${dateSuffix}.xlsx`;
 
   // Trigger download
   XLSX.writeFile(wb, filename);

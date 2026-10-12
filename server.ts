@@ -4,6 +4,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { GoogleGenAI, Type } from '@google/genai';
 import { scanAndGradeProduct } from './src/utils/productScanner';
+import { INITIAL_SUBMISSIONS } from './src/data/mockSubmissions';
 
 dotenv.config();
 
@@ -28,8 +29,12 @@ const ai = process.env.GEMINI_API_KEY
     })
   : null;
 
-// In-memory submissions store for cross-machine lab sync
-let labSubmissions: any[] = [];
+// In-memory submissions store for cross-machine lab sync seeded with all class groups
+let labSubmissions: any[] = [...INITIAL_SUBMISSIONS];
+// Lab session control: allowSubmission (default true, can be toggled by teacher)
+let allowSubmission: boolean = true;
+// Teacher PIN code for role authorization (default: 1234, can be customized by teacher)
+let teacherPin: string = '1234';
 
 // Fallback heuristic grading engine when AI is unreachable or offline
 function fallbackHeuristicGrading(params: {
@@ -188,9 +193,46 @@ QUY TẮC ĐÁNH GIÁ VÀ ĐỐI CHIẾU CHÍNH XÁC (RẤT QUAN TRỌNG):
   }
 });
 
+// API: Trạng thái cho phép nộp bài & đồng bộ phòng máy (Bảo mật: không lộ mã PIN cho máy học sinh)
+app.get('/api/session-status', (_req, res) => {
+  res.json({ allowSubmission, hasPinConfigured: Boolean(teacherPin) });
+});
+
+app.post('/api/session-status', (req, res) => {
+  const { allow } = req.body;
+  if (typeof allow === 'boolean') {
+    allowSubmission = allow;
+  }
+  res.json({ success: true, allowSubmission });
+});
+
+// API: Xác thực mã PIN Giáo viên (Bảo vệ phía máy chủ, không để học sinh thấy mã PIN)
+app.post('/api/verify-pin', (req, res) => {
+  const { pin } = req.body;
+  if (!pin || typeof pin !== 'string') {
+    return res.status(400).json({ success: false, error: 'Thiếu mã PIN' });
+  }
+  const isValid = pin.trim() === teacherPin.trim();
+  res.json({ success: isValid });
+});
+
+// API: Đổi mã PIN Giáo viên
+app.post('/api/change-pin', (req, res) => {
+  const { currentPin, newPin } = req.body;
+  if (!currentPin || typeof currentPin !== 'string' || currentPin.trim() !== teacherPin.trim()) {
+    return res.status(401).json({ success: false, error: 'Mã PIN hiện tại không chính xác' });
+  }
+  if (!newPin || typeof newPin !== 'string' || newPin.trim().length < 4) {
+    return res.status(400).json({ success: false, error: 'Mã PIN mới phải có tối thiểu 4 ký tự' });
+  }
+  teacherPin = newPin.trim();
+  console.log('[LabGrade AI] Giáo viên đã đổi mã PIN mới thành công trên phòng máy.');
+  res.json({ success: true, message: 'Đổi mã PIN thành công' });
+});
+
 // API: Đồng bộ danh sách bài nộp trong phòng máy
 app.get('/api/submissions', (_req, res) => {
-  res.json({ submissions: labSubmissions });
+  res.json({ submissions: labSubmissions, allowSubmission });
 });
 
 app.post('/api/submissions', (req, res) => {

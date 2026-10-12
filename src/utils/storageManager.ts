@@ -137,23 +137,92 @@ export function saveSubmissionsSafely(submissions: Submission[]): boolean {
 }
 
 /**
- * Tải danh sách bài nộp từ localStorage (có tương thích ngược với v1)
+ * Chuẩn hóa và làm sạch bản ghi bài nộp, đảm bảo không bao giờ bị lỗi undefined property gây màn hình trắng
  */
-export function loadSubmissionsSafely(): Submission[] {
+export function sanitizeSubmission(raw: any): Submission {
+  if (!raw || typeof raw !== 'object') {
+    return {
+      id: 'sub-' + Math.random().toString(36).substring(2, 9),
+      assignmentId: '',
+      assignmentTitle: '',
+      className: '',
+      machineNumber: 'Máy 01',
+      studentLeader: 'Học sinh',
+      groupMembers: [],
+      attempts: [],
+      highestScore: 0,
+      latestScore: 0,
+      latestSubmittedAt: new Date().toISOString(),
+      status: 'graded',
+    };
+  }
+
+  const rawMembers = Array.isArray(raw.groupMembers)
+    ? raw.groupMembers.filter((m: any) => typeof m === 'string' && m.trim()).map((m: any) => m.trim())
+    : [];
+
+  const rawAttempts = Array.isArray(raw.attempts)
+    ? raw.attempts.map((att: any, idx: number) => ({
+        attemptNumber: typeof att?.attemptNumber === 'number' ? att.attemptNumber : idx + 1,
+        timestamp: att?.timestamp || new Date().toISOString(),
+        fileName: att?.fileName || 'bai_thuc_hanh',
+        fileSize: typeof att?.fileSize === 'number' ? att.fileSize : 0,
+        fileContent: att?.fileContent || '',
+        score: typeof att?.score === 'number' ? att.score : 0,
+        aiComparisonDetails: att?.aiComparisonDetails || '',
+        criteriaResults: Array.isArray(att?.criteriaResults) ? att.criteriaResults : [],
+        strengths: Array.isArray(att?.strengths) ? att.strengths : [],
+        weaknesses: Array.isArray(att?.weaknesses) ? att.weaknesses : [],
+        howToGetTen: Array.isArray(att?.howToGetTen) ? att.howToGetTen : [],
+        stepEvaluations: Array.isArray(att?.stepEvaluations) ? att.stepEvaluations : [],
+        inspectionSummary: att?.inspectionSummary || undefined,
+        teacherNote: att?.teacherNote || '',
+      }))
+    : [];
+
+  const highestScore = typeof raw.highestScore === 'number'
+    ? raw.highestScore
+    : rawAttempts.reduce((max: number, a: any) => Math.max(max, a.score || 0), 0);
+
+  return {
+    id: String(raw.id || 'sub-' + Math.random().toString(36).substring(2, 9)),
+    assignmentId: String(raw.assignmentId || ''),
+    assignmentTitle: String(raw.assignmentTitle || ''),
+    className: String(raw.className || ''),
+    machineNumber: String(raw.machineNumber || 'Máy 01'),
+    studentLeader: String(raw.studentLeader || '').trim(),
+    groupMembers: rawMembers,
+    attempts: rawAttempts,
+    highestScore,
+    latestScore: typeof raw.latestScore === 'number' ? raw.latestScore : highestScore,
+    latestSubmittedAt: String(raw.latestSubmittedAt || new Date().toISOString()),
+    practiceDate: raw.practiceDate ? String(raw.practiceDate) : undefined,
+    status: raw.status || 'graded',
+  };
+}
+
+/**
+ * Tải danh sách bài nộp từ localStorage (an toàn 100%, tự động làm sạch và hỗ trợ fallback)
+ */
+export function loadSubmissionsSafely(fallback: Submission[] = []): Submission[] {
   try {
     const saved = localStorage.getItem(STORAGE_KEY_SUBMISSIONS);
     if (saved) {
       const parsed = JSON.parse(saved);
-      if (Array.isArray(parsed)) return parsed;
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        return parsed.map(sanitizeSubmission);
+      }
     }
     // Kiểm tra v1 cũ nếu chưa có v2
     const oldV1 = localStorage.getItem(STORAGE_KEY_OLD_V1);
     if (oldV1) {
       const parsedOld = JSON.parse(oldV1);
-      if (Array.isArray(parsedOld)) return parsedOld;
+      if (Array.isArray(parsedOld) && parsedOld.length > 0) {
+        return parsedOld.map(sanitizeSubmission);
+      }
     }
   } catch (e) {
     console.warn('Lỗi đọc submissions từ localStorage:', e);
   }
-  return [];
+  return Array.isArray(fallback) ? fallback.map(sanitizeSubmission) : [];
 }
