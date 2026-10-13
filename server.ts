@@ -6,6 +6,19 @@ import { GoogleGenAI, Type } from '@google/genai';
 import { scanAndGradeProduct } from './src/utils/productScanner';
 import { INITIAL_SUBMISSIONS } from './src/data/mockSubmissions';
 
+import {
+  initLabDatabase,
+  getAllSubmissions,
+  upsertSubmission,
+  batchSyncSubmissions,
+  deleteSubmissions,
+  getAllowSubmission,
+  setAllowSubmission,
+  getTeacherPin,
+  setTeacherPin,
+  getDatabaseMetrics,
+} from './src/server/database';
+
 dotenv.config();
 
 const __filename = fileURLToPath(import.meta.url);
@@ -16,6 +29,9 @@ const PORT = Number(process.env.PORT) || 3000;
 
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
+
+// Initialize persistent Lab Database on server startup
+initLabDatabase();
 
 // Initialize Gemini SDK with User-Agent header as required
 const ai = process.env.GEMINI_API_KEY
@@ -28,13 +44,6 @@ const ai = process.env.GEMINI_API_KEY
       },
     })
   : null;
-
-// In-memory submissions store for cross-machine lab sync seeded with all class groups
-let labSubmissions: any[] = [...INITIAL_SUBMISSIONS];
-// Lab session control: allowSubmission (default true, can be toggled by teacher)
-let allowSubmission: boolean = true;
-// Teacher PIN code for role authorization (default: 1234, can be customized by teacher)
-let teacherPin: string = '1234';
 
 // Fallback heuristic grading engine when AI is unreachable or offline
 function fallbackHeuristicGrading(params: {
@@ -195,15 +204,18 @@ QUY TẮC ĐÁNH GIÁ VÀ ĐỐI CHIẾU CHÍNH XÁC (RẤT QUAN TRỌNG):
 
 // API: Trạng thái cho phép nộp bài & đồng bộ phòng máy (Bảo mật: không lộ mã PIN cho máy học sinh)
 app.get('/api/session-status', (_req, res) => {
-  res.json({ allowSubmission, hasPinConfigured: Boolean(teacherPin) });
+  res.json({
+    allowSubmission: getAllowSubmission(),
+    hasPinConfigured: Boolean(getTeacherPin()),
+  });
 });
 
 app.post('/api/session-status', (req, res) => {
   const { allow } = req.body;
   if (typeof allow === 'boolean') {
-    allowSubmission = allow;
+    setAllowSubmission(allow);
   }
-  res.json({ success: true, allowSubmission });
+  res.json({ success: true, allowSubmission: getAllowSubmission() });
 });
 
 // API: Xác thực mã PIN Giáo viên (Bảo vệ phía máy chủ, không để học sinh thấy mã PIN)
@@ -212,69 +224,93 @@ app.post('/api/verify-pin', (req, res) => {
   if (!pin || typeof pin !== 'string') {
     return res.status(400).json({ success: false, error: 'Thiếu mã PIN' });
   }
-  const isValid = pin.trim() === teacherPin.trim();
+  const currentPin = getTeacherPin();
+  const isValid = pin.trim() === currentPin.trim();
   res.json({ success: isValid });
 });
 
 // API: Đổi mã PIN Giáo viên
 app.post('/api/change-pin', (req, res) => {
   const { currentPin, newPin } = req.body;
-  if (!currentPin || typeof currentPin !== 'string' || currentPin.trim() !== teacherPin.trim()) {
+  const currentSavedPin = getTeacherPin();
+  if (!currentPin || typeof currentPin !== 'string' || currentPin.trim() !== currentSavedPin.trim()) {
     return res.status(401).json({ success: false, error: 'Mã PIN hiện tại không chính xác' });
   }
   if (!newPin || typeof newPin !== 'string' || newPin.trim().length < 4) {
     return res.status(400).json({ success: false, error: 'Mã PIN mới phải có tối thiểu 4 ký tự' });
   }
-  teacherPin = newPin.trim();
-  console.log('[LabGrade AI] Giáo viên đã đổi mã PIN mới thành công trên phòng máy.');
+  setTeacherPin(newPin.trim());
+  console.log('[LabGrade CSDL] Giáo viên đã đổi mã PIN mới thành công.');
   res.json({ success: true, message: 'Đổi mã PIN thành công' });
 });
 
-// API: Đồng bộ danh sách bài nộp trong phòng máy
+// API: Lấy toàn bộ danh sách bài nộp và trạng thái CSDL thời gian thực
 app.get('/api/submissions', (_req, res) => {
-  res.json({ submissions: labSubmissions, allowSubmission });
+  const submissions = getAllSubmissions();
+  const dbStatus = getDatabaseMetrics();
+  res.json({
+    submissions,
+    allowSubmission: getAllowSubmission(),
+    dbStatus,
+  });
 });
 
+// API: Tự động lưu và cập nhật ngay bài nộp của học sinh vào CSDL đĩa
 app.post('/api/submissions', (req, res) => {
   const newSubmission = req.body;
-  if (!newSubmission || !newSubmission.id) {
-    return res.status(400).json({ error: 'Dữ liệu bài nộp không hợp lệ' });
+  if (!newSubmission || !newSubmission.className || !newSubmission.machineNumber) {
+    return res.status(400).json({ error: 'Dữ liệu bài nộp không hợp lệ hoặc thiếu thông tin lớp/số máy' });
   }
 
-  const existingIdx = labSubmissions.findIndex((s) => s.id === newSubmission.id);
-  if (existingIdx >= 0) {
-    labSubmissions[existingIdx] = newSubmission;
-  } else {
-    labSubmissions.unshift(newSubmission);
+  try {
+    const result = upsertSubmission(newSubmission);
+    res.json({
+      success: true,
+      count: result.totalCount,
+      submission: result.submission,
+      message: 'Đã lưu và cập nhật vào CSDL thành công',
+    });
+  } catch (err: any) {
+    console.error('[CSDL Thực Hành] Lỗi khi lưu bài nộp:', err);
+    res.status(500).json({ error: err.message || 'Lỗi lưu CSDL' });
   }
-
-  // Tự động xoá bớt các bản ghi cũ khi đầy bộ nhớ (Yêu cầu 3)
-  if (labSubmissions.length > 150) {
-    const today = new Date().toISOString().slice(0, 10);
-    const todayList = labSubmissions.filter((s) => s.practiceDate === today || s.latestSubmittedAt?.slice(0, 10) === today);
-    const pastList = labSubmissions.filter((s) => s.practiceDate !== today && s.latestSubmittedAt?.slice(0, 10) !== today);
-    pastList.sort((a, b) => new Date(b.latestSubmittedAt || 0).getTime() - new Date(a.latestSubmittedAt || 0).getTime());
-    labSubmissions = [...todayList, ...pastList.slice(0, 100)];
-  }
-
-  res.json({ success: true, count: labSubmissions.length });
 });
 
+// API: Đồng bộ hàng loạt bài nộp vào CSDL (bảo vệ khi mạng chập chờn)
+app.post('/api/submissions/sync-batch', (req, res) => {
+  const { submissions } = req.body;
+  if (!Array.isArray(submissions)) {
+    return res.status(400).json({ error: 'Dữ liệu không phải là danh sách bài nộp' });
+  }
+  const result = batchSyncSubmissions(submissions);
+  res.json(result);
+});
+
+// API: Xóa bài nộp theo lớp
 app.delete('/api/submissions', (req, res) => {
   const { className } = req.query;
-  if (className) {
-    labSubmissions = labSubmissions.filter((s) => s.className !== className);
-  } else {
-    labSubmissions = [];
-  }
-  res.json({ success: true, count: labSubmissions.length });
+  const remaining = deleteSubmissions(typeof className === 'string' ? className : undefined);
+  res.json({ success: true, count: remaining });
+});
+
+// API: Trạng thái chi tiết CSDL lưu trữ phòng máy
+app.get('/api/database/status', (_req, res) => {
+  res.json(getDatabaseMetrics());
+});
+
+// API: Tải bản sao lưu CSDL dạng JSON
+app.get('/api/database/export-json', (_req, res) => {
+  const submissions = getAllSubmissions();
+  res.setHeader('Content-Type', 'application/json');
+  res.setHeader('Content-Disposition', `attachment; filename="CSDL_BaiNop_PhongMay_${new Date().toISOString().slice(0, 10)}.json"`);
+  res.send(JSON.stringify(submissions, null, 2));
 });
 
 app.get('/api/health', (_req, res) => {
   res.json({
     status: 'ok',
     hasGeminiKey: Boolean(process.env.GEMINI_API_KEY),
-    submissionsCount: labSubmissions.length,
+    submissionsCount: getAllSubmissions().length,
     timestamp: new Date().toISOString(),
   });
 });

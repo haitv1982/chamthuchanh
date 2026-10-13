@@ -1737,6 +1737,10 @@ export const StudentSubmissionView: React.FC<StudentSubmissionViewProps> = ({
                       <div className="text-xs text-slate-400 mt-0.5">
                         Thời gian: {new Date(latestResult.timestamp).toLocaleTimeString('vi-VN')}
                       </div>
+                      <div className="inline-flex items-center gap-1.5 mt-1.5 px-2.5 py-0.5 rounded-full bg-emerald-50 text-emerald-800 border border-emerald-200 text-[11px] font-bold">
+                        <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                        <span>Đã tự động lưu vào CSDL phòng máy</span>
+                      </div>
                     </div>
 
                     {/* Score badge */}

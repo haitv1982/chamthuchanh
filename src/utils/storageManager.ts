@@ -226,3 +226,47 @@ export function loadSubmissionsSafely(fallback: Submission[] = []): Submission[]
   }
   return Array.isArray(fallback) ? fallback.map(sanitizeSubmission) : [];
 }
+
+const STORAGE_KEY_PENDING_SYNC = 'labgrade_pending_sync_queue_v1';
+
+/**
+ * Xếp hàng bài nộp vào hàng đợi offline nếu mất kết nối tạm thời tới CSDL máy chủ
+ */
+export function queuePendingSync(sub: Submission): void {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY_PENDING_SYNC);
+    const queue: Submission[] = raw ? JSON.parse(raw) : [];
+    const idx = queue.findIndex((item) => item.id === sub.id);
+    if (idx >= 0) {
+      queue[idx] = sub;
+    } else {
+      queue.push(sub);
+    }
+    localStorage.setItem(STORAGE_KEY_PENDING_SYNC, JSON.stringify(queue));
+  } catch (e) {
+    console.warn('Lỗi xếp hàng offline sync:', e);
+  }
+}
+
+/**
+ * Lấy danh sách bài nộp đang chờ đồng bộ vào CSDL
+ */
+export function getPendingSyncQueue(): Submission[] {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY_PENDING_SYNC);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) return parsed.map(sanitizeSubmission);
+    }
+  } catch {}
+  return [];
+}
+
+/**
+ * Xóa hàng đợi bài nộp sau khi đã đồng bộ thành công vào CSDL
+ */
+export function clearPendingSyncQueue(): void {
+  try {
+    localStorage.removeItem(STORAGE_KEY_PENDING_SYNC);
+  } catch {}
+}

@@ -15,6 +15,9 @@ import {
   getTodayDateString,
   isSubmittedToday,
   pruneOldSubmissions,
+  queuePendingSync,
+  getPendingSyncQueue,
+  clearPendingSyncQueue,
 } from './utils/storageManager';
 import { scanAndGradeProduct } from './utils/productScanner';
 
@@ -88,6 +91,22 @@ export default function App() {
   // Submission Permission: Cho phép học sinh nộp bài hay đang khóa
   const [allowSubmission, setAllowSubmission] = useState<boolean>(true);
 
+  // Trạng thái Cơ sở dữ liệu phòng máy (CSDL Lưu trữ thời gian thực)
+  const [dbStatus, setDbStatus] = useState<{
+    status: string;
+    isPersistent: boolean;
+    totalSubmissions: number;
+    totalAttempts: number;
+    lastUpdated?: string;
+    classes: Record<string, number>;
+  }>({
+    status: 'connected',
+    isPersistent: true,
+    totalSubmissions: submissions.length,
+    totalAttempts: 0,
+    classes: {},
+  });
+
   // Persist role
   useEffect(() => {
     localStorage.setItem('labgrade_user_role', isTeacherRole ? 'teacher' : 'student');
@@ -95,6 +114,23 @@ export default function App() {
 
   // Fetch session status & sync submissions with network timeout protection
   const refreshSubmissionsAndStatus = async () => {
+    // 1. Kiểm tra và đẩy hàng đợi bài nộp offline nếu có
+    const pendingQueue = getPendingSyncQueue();
+    if (pendingQueue.length > 0) {
+      try {
+        const batchRes = await fetch('/api/submissions/sync-batch', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ submissions: pendingQueue }),
+        });
+        if (batchRes.ok) {
+          clearPendingSyncQueue();
+          console.log('[CSDL Phòng Máy] Đã đẩy thành công các bài nộp trong hàng đợi offline lên CSDL máy chủ.');
+        }
+      } catch {}
+    }
+
+    // 2. Tải toàn bộ bài nộp và trạng thái CSDL mới nhất từ máy chủ
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 4000);
     try {
@@ -105,12 +141,17 @@ export default function App() {
         if (typeof data.allowSubmission === 'boolean') {
           setAllowSubmission(data.allowSubmission);
         }
+        if (data.dbStatus) {
+          setDbStatus(data.dbStatus);
+        }
         if (Array.isArray(data.submissions) && data.submissions.length > 0) {
           setSubmissions((prev) => {
             const map = new Map<string, Submission>();
+            // Nạp dữ liệu hiện tại
             (prev || []).forEach((s) => {
               if (s && s.id) map.set(s.id, s);
             });
+            // Đồng bộ dữ liệu CSDL máy chủ (Ưu tiên bản mới nhất từ CSDL máy chủ)
             data.submissions.forEach((raw: any) => {
               const clean = sanitizeSubmission(raw);
               map.set(clean.id, clean);
@@ -180,6 +221,8 @@ export default function App() {
     fileContent: string;
   }): Promise<SubmissionAttempt | null> => {
     const todayStr = getTodayDateString();
+    const currentAssignment =
+      assignments.find((a) => a.id === data.assignmentId) || activeAssignment;
 
     // KIỂM TRA BÀI NỘP CỦA HÔM NAY (Yêu cầu 3: không lưu dồn với ngày trước, sang ngày mới/tuần sau tính phiên mới)
     // Nếu cùng số máy nhưng KHÁC tên học sinh/nhóm trưởng -> Đây là 2 nhóm khác nhau, không ghi đè mất bài của nhau!
@@ -187,7 +230,6 @@ export default function App() {
     const existingSubmission = submissions.find(
       (s) =>
         s &&
-        s.assignmentId === data.assignmentId &&
         s.className === data.className &&
         ((s.studentLeader || '').trim().toLowerCase() === cleanLeader ||
           (s.machineNumber === data.machineNumber &&
@@ -207,7 +249,7 @@ export default function App() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          assignment: activeAssignment,
+          assignment: currentAssignment,
           fileName: data.fileName,
           fileSize: data.fileSize,
           fileContent: data.fileContent,
@@ -226,7 +268,7 @@ export default function App() {
     } catch (err: any) {
       console.warn('Call to /api/grade failed, using smart local evaluator:', err);
       gradeData = analyzeStudentWork({
-        assignment: activeAssignment,
+        assignment: currentAssignment,
         fileName: data.fileName,
         fileContent: data.fileContent,
         attemptNumber,
@@ -257,6 +299,8 @@ export default function App() {
 
       updatedSubmission = {
         ...existingSubmission,
+        assignmentId: currentAssignment.id,
+        assignmentTitle: currentAssignment.title,
         studentLeader: data.studentLeader,
         groupMembers: data.groupMembers,
         attempts: updatedAttempts,
@@ -273,8 +317,8 @@ export default function App() {
     } else {
       updatedSubmission = {
         id: `sub-${data.className}-${data.machineNumber.replace(/\s+/g, '_')}-${todayStr}-${Date.now()}`,
-        assignmentId: data.assignmentId,
-        assignmentTitle: activeAssignment.title,
+        assignmentId: currentAssignment.id,
+        assignmentTitle: currentAssignment.title,
         className: data.className,
         machineNumber: data.machineNumber,
         studentLeader: data.studentLeader,
@@ -291,12 +335,37 @@ export default function App() {
       setSubmissions((prev) => pruneOldSubmissions([updatedSubmission, ...prev]));
     }
 
-    // Sync to backend endpoint if possible
-    fetch('/api/submissions', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(updatedSubmission),
-    }).catch(() => {});
+    // Tự động lưu và cập nhật ngay lập tức vào Cơ sở dữ liệu phòng máy
+    try {
+      const syncRes = await fetch('/api/submissions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(updatedSubmission),
+      });
+      if (syncRes.ok) {
+        const syncJson = await syncRes.json();
+        if (syncJson.submission) {
+          const finalized = sanitizeSubmission(syncJson.submission);
+          setSubmissions((prev) =>
+            pruneOldSubmissions(
+              prev.map((s) =>
+                s.id === finalized.id ||
+                (s.className === finalized.className &&
+                  s.machineNumber === finalized.machineNumber &&
+                  s.studentLeader.trim().toLowerCase() === finalized.studentLeader.trim().toLowerCase())
+                  ? finalized
+                  : s
+              )
+            )
+          );
+        }
+      } else {
+        queuePendingSync(updatedSubmission);
+      }
+    } catch (netErr) {
+      console.warn('Lỗi mạng khi lưu CSDL, đưa vào hàng đợi offline:', netErr);
+      queuePendingSync(updatedSubmission);
+    }
 
     return newAttempt;
   };
@@ -410,6 +479,7 @@ export default function App() {
           onToggleSubmissionPermission={handleToggleSubmissionPermission}
           onChangeClassName={handleSelectClassName}
           onRefresh={refreshSubmissionsAndStatus}
+          dbStatus={dbStatus}
         />
       )}
 

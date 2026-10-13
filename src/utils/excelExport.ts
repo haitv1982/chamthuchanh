@@ -80,6 +80,7 @@ export function exportSubmissionsToExcel(params: {
   schoolName?: string;
   targetDate?: string | null;
   dateMode?: 'all' | 'latest' | 'custom';
+  filterByAssignmentOnly?: boolean;
 }) {
   const {
     className,
@@ -89,6 +90,7 @@ export function exportSubmissionsToExcel(params: {
     schoolName = 'Trường THCS / THPT',
     targetDate = null,
     dateMode = 'all',
+    filterByAssignmentOnly = false,
   } = params;
 
   // 1. Lọc theo lớp nếu được chỉ định
@@ -125,25 +127,25 @@ export function exportSubmissionsToExcel(params: {
     dateDescription = 'Tất cả các ngày thực hành';
   }
 
-  // 4. Lọc theo bài tập nếu có danh sách bài khớp
-  const hasSubmissionsForAssignment = assignment
-    ? filteredByClass.some((s) => s.assignmentId === assignment.id)
-    : false;
-
-  const filteredByAssignment = (assignment && hasSubmissionsForAssignment)
-    ? filteredByClass.filter((s) => s.assignmentId === assignment.id)
-    : filteredByClass;
+  // 4. Lọc theo bài tập CHỈ KHI được yêu cầu cụ thể (mặc định xuất toàn bộ học sinh cả lớp)
+  let baseClassSubmissions = filteredByClass;
+  if (params.filterByAssignmentOnly && assignment) {
+    const matching = filteredByClass.filter((s) => s.assignmentId === assignment.id);
+    if (matching.length > 0) {
+      baseClassSubmissions = matching;
+    }
+  }
 
   // 5. Lọc theo ngày thực hành nếu có chỉ định (hoặc ngày gần nhất)
   const filteredByDate = effectiveDate
-    ? filteredByAssignment.filter((s) => {
+    ? baseClassSubmissions.filter((s) => {
         const d = s.practiceDate || s.latestSubmittedAt?.slice(0, 10);
         return d === effectiveDate;
       })
-    : filteredByAssignment;
+    : baseClassSubmissions;
 
-  // Nếu lọc theo ngày cụ thể mà không có dữ liệu, dùng filteredByAssignment để tránh file rỗng
-  const dataToExport = filteredByDate.length > 0 ? filteredByDate : filteredByAssignment;
+  // Nếu lọc theo ngày cụ thể mà không có dữ liệu, dùng baseClassSubmissions để tránh file rỗng
+  const dataToExport = filteredByDate.length > 0 ? filteredByDate : baseClassSubmissions;
 
   // 6. Gom nhóm theo Máy / Học sinh và CHỈ LẤY LẦN NỘP CÓ KẾT QUẢ CAO NHẤT
   const bestSubmissionMap = new Map<string, Submission>();

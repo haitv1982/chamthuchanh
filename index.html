@@ -12,6 +12,34 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+    <script>
+      // Đảm bảo window.fetch có cả getter và setter để các tiện ích mở rộng trình duyệt (extension)
+      // không bị lỗi "TypeError: Cannot set property fetch of #<Window> which has only a getter"
+      (function() {
+        try {
+          var initialFetch = window.fetch;
+          var activeFetch = initialFetch;
+          Object.defineProperty(window, 'fetch', {
+            configurable: true,
+            enumerable: true,
+            get: function() { return activeFetch; },
+            set: function(fn) { activeFetch = fn; }
+          });
+        } catch (e) {}
+
+        // Chặn các lỗi phát sinh ngoài ý muốn từ tiện ích mở rộng Chrome/trình duyệt
+        window.addEventListener('error', function(event) {
+          if (event && (
+            (event.filename && event.filename.indexOf('chrome-extension://') !== -1) ||
+            (event.message && event.message.indexOf('Cannot set property fetch') !== -1)
+          )) {
+            event.preventDefault();
+            event.stopPropagation();
+            return false;
+          }
+        }, true);
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>
