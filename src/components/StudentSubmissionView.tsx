@@ -303,54 +303,37 @@ export const StudentSubmissionView: React.FC<StudentSubmissionViewProps> = ({
         {/* CỘT TRÁI (8 COLS): KHU VỰC THAO TÁC THỰC HÀNH CỦA HỌC SINH     */}
         {/* ============================================================== */}
         <section className="lg:col-span-8 xl:col-span-8 space-y-3">
-          {/* 1. THANH THÔNG TIN HỌC SINH / NHÓM TRÊN MÁY (Gọn gàng 1 dòng) */}
-          <div
-            className={`p-2.5 sm:p-3 rounded-2xl border transition-all flex flex-wrap items-center justify-between gap-2 shadow-2xs ${
-              hasStudentInfo
-                ? 'bg-gradient-to-r from-blue-50/90 via-indigo-50/50 to-emerald-50/40 border-blue-200'
-                : 'bg-amber-50/95 border-2 border-amber-300 text-amber-950 animate-pulse'
-            }`}
-          >
-            <div className="flex items-center gap-2 flex-wrap text-xs sm:text-sm font-bold min-w-0">
-              {hasStudentInfo ? (
-                <>
-                  <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-lg bg-blue-600 text-white font-black text-xs shadow-2xs">
-                    {userClassName}
+          {/* 1. THANH THÔNG TIN HỌC SINH / NHÓM TRÊN MÁY (Chỉ hiển thị khi đã nhập, không hiển thị nhắc nhở thừa vì đã có nút Nhập thông tin) */}
+          {hasStudentInfo && (
+            <div className="p-2.5 sm:p-3 rounded-2xl border transition-all flex flex-wrap items-center justify-between gap-2 shadow-2xs bg-gradient-to-r from-blue-50/90 via-indigo-50/50 to-emerald-50/40 border-blue-200 animate-in fade-in">
+              <div className="flex items-center gap-2 flex-wrap text-xs sm:text-sm font-bold min-w-0">
+                <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-lg bg-blue-600 text-white font-black text-xs shadow-2xs">
+                  {userClassName}
+                </span>
+                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg bg-indigo-100 text-indigo-900 font-bold text-xs">
+                  🖥️ {machineNumber}
+                </span>
+                <span className="text-slate-800 font-extrabold flex items-center gap-1 truncate max-w-[200px] sm:max-w-none">
+                  <UserCheck className="w-4 h-4 text-emerald-600 shrink-0" />
+                  {studentLeader}
+                </span>
+                {groupMembers.length > 0 && (
+                  <span className="text-blue-700 font-semibold text-xs hidden md:inline">
+                    👥 +{groupMembers.length} bạn ({groupMembers.join(', ')})
                   </span>
-                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-lg bg-indigo-100 text-indigo-900 font-bold text-xs">
-                    🖥️ {machineNumber}
-                  </span>
-                  <span className="text-slate-800 font-extrabold flex items-center gap-1 truncate max-w-[200px] sm:max-w-none">
-                    <UserCheck className="w-4 h-4 text-emerald-600 shrink-0" />
-                    {studentLeader}
-                  </span>
-                  {groupMembers.length > 0 && (
-                    <span className="text-blue-700 font-semibold text-xs hidden md:inline">
-                      👥 +{groupMembers.length} bạn ({groupMembers.join(', ')})
-                    </span>
-                  )}
-                </>
-              ) : (
-                <div className="flex items-center gap-2 text-amber-900 font-black text-xs sm:text-sm">
-                  <AlertCircle className="w-4 h-4 text-amber-600 shrink-0" />
-                  <span>Em chưa nhập thông tin học sinh (Khối, Lớp, Số máy, Họ và Tên).</span>
-                </div>
-              )}
-            </div>
+                )}
+              </div>
 
-            <button
-              type="button"
-              onClick={onOpenStudentInfoModal}
-              className={`px-3 py-1 rounded-xl text-xs font-black transition-all flex items-center gap-1 cursor-pointer shrink-0 ${
-                hasStudentInfo
-                  ? 'bg-white hover:bg-blue-600 hover:text-white text-blue-700 border border-blue-200 shadow-2xs'
-                  : 'bg-amber-600 hover:bg-amber-700 text-white shadow-xs'
-              }`}
-            >
-              <Edit3 className="w-3.5 h-3.5" />
-              <span>{hasStudentInfo ? 'Sửa thông tin' : 'Nhập thông tin ngay'}</span>
-            </button>
-          </div>
+              <button
+                type="button"
+                onClick={onOpenStudentInfoModal}
+                className="px-3 py-1 rounded-xl text-xs font-black transition-all flex items-center gap-1 cursor-pointer shrink-0 bg-white hover:bg-blue-600 hover:text-white text-blue-700 border border-blue-200 shadow-2xs"
+              >
+                <Edit3 className="w-3.5 h-3.5" />
+                <span>Sửa thông tin</span>
+              </button>
+            </div>
+          )}
 
           {/* 2. CHỌN SẢN PHẨM / BÀI THỰC HÀNH (Dropdown gọn gàng) */}
           <div className="relative" ref={productDropdownRef}>
