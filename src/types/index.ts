@@ -98,3 +98,9 @@ export interface LabStats {
     poor: number;      // <5
   };
 }
+
+export interface StudentRecord {
+  stt?: number | string;
+  fullName: string;
+  className: string;
+}

@@ -14,6 +14,7 @@ import {
 } from 'lucide-react';
 import { SCHOOL_CLASSES, getClassesByGrade } from '../data/classes';
 import { validateVietnameseFullName } from '../utils/storageManager';
+import { StudentRecord } from '../types';
 
 interface StudentInfoModalProps {
   isOpen: boolean;
@@ -29,6 +30,7 @@ interface StudentInfoModalProps {
   groupMembers: string[];
   onChangeGroupMembers: (members: string[]) => void;
   onSavedNotice?: (msg: string) => void;
+  roster?: StudentRecord[];
 }
 
 const GRADE_OPTIONS = [
@@ -52,6 +54,7 @@ export const StudentInfoModal: React.FC<StudentInfoModalProps> = ({
   groupMembers,
   onChangeGroupMembers,
   onSavedNotice,
+  roster = [],
 }) => {
   const [tempGrade, setTempGrade] = useState<string>(selectedGrade || 'Lớp 8');
   const [tempClass, setTempClass] = useState<string>(className || '8A2');
@@ -59,6 +62,7 @@ export const StudentInfoModal: React.FC<StudentInfoModalProps> = ({
   const [tempLeader, setTempLeader] = useState<string>(studentLeader || '');
   const [tempMembers, setTempMembers] = useState<string[]>(groupMembers || []);
   const [newMemberInput, setNewMemberInput] = useState<string>('');
+  const [selectedGroupMemberOption, setSelectedGroupMemberOption] = useState<string>('');
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
   // Sync state when modal opens
@@ -78,6 +82,11 @@ export const StudentInfoModal: React.FC<StudentInfoModalProps> = ({
 
   // Lấy danh sách lớp tương ứng với khối đang chọn
   const availableClasses = getClassesByGrade(tempGrade);
+
+  // Lấy danh sách học sinh thuộc lớp đang chọn (được Giáo viên tải lên từ Excel)
+  const classStudents = roster.filter(
+    (s) => s.className && s.className.toUpperCase() === tempClass.trim().toUpperCase()
+  );
 
   // Khi bấm đổi khối trong modal
   const handleGradeChange = (newGrade: string) => {
@@ -277,27 +286,66 @@ export const StudentInfoModal: React.FC<StudentInfoModalProps> = ({
             </div>
           </div>
 
-          {/* 3. HỌ VÀ TÊN HỌC SINH / TRƯỞNG NHÓM */}
+          {/* 3. HỌ VÀ TÊN HỌC SINH / TRƯỞNG NHÓM (DẠNG LIST CHỌN NẾU ĐÃ CÓ DANH SÁCH LỚP) */}
           <div className="space-y-1.5">
             <div className="flex items-center justify-between">
               <label className="text-xs sm:text-sm font-black uppercase tracking-wider text-slate-700 flex items-center gap-1.5">
                 <UserCheck className="w-4 h-4 text-blue-600" />
                 <span>4. Họ và Tên Học Sinh (Người nộp bài):</span>
               </label>
-              <span className="text-[11px] font-bold text-rose-600 bg-rose-50 px-2 py-0.5 rounded-md">
-                Bắt buộc cả Họ và Tên
-              </span>
+              {classStudents.length > 0 ? (
+                <span className="text-[11px] font-black text-emerald-700 bg-emerald-50 border border-emerald-200 px-2.5 py-0.5 rounded-md flex items-center gap-1">
+                  <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
+                  DS Lớp {tempClass} ({classStudents.length} HS)
+                </span>
+              ) : (
+                <span className="text-[11px] font-bold text-rose-600 bg-rose-50 px-2 py-0.5 rounded-md">
+                  Bắt buộc cả Họ và Tên
+                </span>
+              )}
             </div>
-            <input
-              type="text"
-              placeholder="Ví dụ: Nguyễn Văn An (Nhập đầy đủ cả Họ và Tên)"
-              value={tempLeader}
-              onChange={(e) => {
-                setTempLeader(e.target.value);
-                setErrorMsg(null);
-              }}
-              className="w-full bg-slate-50 border-2 border-slate-200 focus:border-blue-500 focus:bg-white rounded-xl px-3.5 py-2.5 text-sm sm:text-base font-bold text-slate-900 transition outline-none"
-            />
+
+            {classStudents.length > 0 ? (
+              /* DẠNG LIST CHỌN TỪ FILE EXCEL GIÁO VIÊN ĐÃ TẢI LÊN */
+              <div className="space-y-1">
+                <select
+                  value={tempLeader}
+                  onChange={(e) => {
+                    setTempLeader(e.target.value);
+                    setErrorMsg(null);
+                  }}
+                  className="w-full bg-slate-50 border-2 border-slate-200 focus:border-blue-500 focus:bg-white rounded-xl px-3.5 py-2.5 text-sm sm:text-base font-bold text-slate-900 transition outline-none cursor-pointer"
+                >
+                  <option value="">-- Nháy vào đây để chọn tên em trong danh sách lớp {tempClass} --</option>
+                  {classStudents.map((s, idx) => (
+                    <option key={idx} value={s.fullName}>
+                      {s.stt ? `${s.stt}. ` : ''}{s.fullName}
+                    </option>
+                  ))}
+                </select>
+                <p className="text-[11px] text-emerald-800 font-semibold flex items-center gap-1">
+                  <span>💡 Danh sách học sinh chính thức do Thầy/Cô tải lên từ Excel. Em chỉ cần chọn đúng tên mình.</span>
+                </p>
+              </div>
+            ) : (
+              /* DẠNG NHẬP CHỮ KHI LỚP CHƯA CÓ FILE EXCEL TẢI LÊN */
+              <div className="space-y-1">
+                <input
+                  type="text"
+                  placeholder="Ví dụ: Nguyễn Văn An (Nhập đầy đủ cả Họ và Tên)"
+                  value={tempLeader}
+                  onChange={(e) => {
+                    setTempLeader(e.target.value);
+                    setErrorMsg(null);
+                  }}
+                  className="w-full bg-slate-50 border-2 border-slate-200 focus:border-blue-500 focus:bg-white rounded-xl px-3.5 py-2.5 text-sm sm:text-base font-bold text-slate-900 transition outline-none"
+                />
+                <p className="text-[11px] text-slate-500 font-medium">
+                  (Lớp {tempClass} chưa có file Excel từ Giáo viên. Em nhập trực tiếp cả Họ và Tên).
+                </p>
+              </div>
+            )}
+
             {tempLeader.trim() && tempLeader.trim().split(/\s+/).length < 2 && (
               <p className="text-xs font-bold text-amber-700 flex items-center gap-1">
                 <AlertCircle className="w-3.5 h-3.5 text-amber-600 shrink-0" />
@@ -306,7 +354,7 @@ export const StudentInfoModal: React.FC<StudentInfoModalProps> = ({
             )}
           </div>
 
-          {/* 4. THÀNH VIÊN CÙNG NHÓM (NẾU CÓ) */}
+          {/* 4. THÀNH VIÊN CÙNG NHÓM (DẠNG LIST CHỌN NẾU ĐÃ CÓ DANH SÁCH LỚP) */}
           <div className="pt-2 border-t border-slate-100 space-y-2">
             <div className="flex items-center justify-between">
               <label className="text-xs sm:text-sm font-black uppercase tracking-wider text-slate-700 flex items-center gap-1.5">
@@ -316,32 +364,68 @@ export const StudentInfoModal: React.FC<StudentInfoModalProps> = ({
               <span className="text-[11px] text-slate-500 font-medium">Làm 1 mình: để trống</span>
             </div>
 
-            <div className="flex gap-2">
-              <input
-                type="text"
-                placeholder="Nhập Họ và Tên bạn cùng nhóm (vd: Trần Thị Bình)..."
-                value={newMemberInput}
-                onChange={(e) => {
-                  setNewMemberInput(e.target.value);
-                  setErrorMsg(null);
-                }}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') {
-                    e.preventDefault();
-                    handleAddMember();
-                  }
-                }}
-                className="flex-1 bg-slate-50 border border-slate-200 focus:border-blue-500 focus:bg-white rounded-xl px-3 py-2 text-xs sm:text-sm font-bold text-slate-900 outline-none"
-              />
-              <button
-                type="button"
-                onClick={handleAddMember}
-                className="px-3.5 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs sm:text-sm font-bold flex items-center gap-1 transition shadow-xs cursor-pointer shrink-0"
-              >
-                <Plus className="w-4 h-4" />
-                <span>Thêm</span>
-              </button>
-            </div>
+            {classStudents.length > 0 ? (
+              /* DẠNG LIST CHỌN BẠN CÙNG NHÓM TRONG LỚP */
+              <div className="flex gap-2">
+                <select
+                  value={selectedGroupMemberOption}
+                  onChange={(e) => setSelectedGroupMemberOption(e.target.value)}
+                  className="flex-1 bg-slate-50 border border-slate-200 focus:border-blue-500 focus:bg-white rounded-xl px-3 py-2 text-xs sm:text-sm font-bold text-slate-900 outline-none cursor-pointer"
+                >
+                  <option value="">-- Chọn bạn cùng nhóm trong lớp {tempClass} --</option>
+                  {classStudents
+                    .filter((s) => s.fullName !== tempLeader && !tempMembers.includes(s.fullName))
+                    .map((s, idx) => (
+                      <option key={idx} value={s.fullName}>
+                        {s.stt ? `${s.stt}. ` : ''}{s.fullName}
+                      </option>
+                    ))}
+                </select>
+                <button
+                  type="button"
+                  disabled={!selectedGroupMemberOption}
+                  onClick={() => {
+                    if (!selectedGroupMemberOption) return;
+                    if (tempMembers.includes(selectedGroupMemberOption)) return;
+                    setTempMembers((prev) => [...prev, selectedGroupMemberOption]);
+                    setSelectedGroupMemberOption('');
+                    setErrorMsg(null);
+                  }}
+                  className="px-3.5 py-2 bg-blue-600 hover:bg-blue-700 disabled:opacity-40 text-white rounded-xl text-xs sm:text-sm font-bold flex items-center gap-1 transition shadow-xs cursor-pointer shrink-0"
+                >
+                  <Plus className="w-4 h-4" />
+                  <span>Thêm</span>
+                </button>
+              </div>
+            ) : (
+              /* DẠNG NHẬP CHỮ NẾU CHƯA CÓ DANH SÁCH */
+              <div className="flex gap-2">
+                <input
+                  type="text"
+                  placeholder="Nhập Họ và Tên bạn cùng nhóm (vd: Trần Thị Bình)..."
+                  value={newMemberInput}
+                  onChange={(e) => {
+                    setNewMemberInput(e.target.value);
+                    setErrorMsg(null);
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      e.preventDefault();
+                      handleAddMember();
+                    }
+                  }}
+                  className="flex-1 bg-slate-50 border border-slate-200 focus:border-blue-500 focus:bg-white rounded-xl px-3 py-2 text-xs sm:text-sm font-bold text-slate-900 outline-none"
+                />
+                <button
+                  type="button"
+                  onClick={handleAddMember}
+                  className="px-3.5 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs sm:text-sm font-bold flex items-center gap-1 transition shadow-xs cursor-pointer shrink-0"
+                >
+                  <Plus className="w-4 h-4" />
+                  <span>Thêm</span>
+                </button>
+              </div>
+            )}
 
             {tempMembers.length > 0 && (
               <div className="flex flex-wrap gap-1.5 pt-1">
@@ -354,7 +438,7 @@ export const StudentInfoModal: React.FC<StudentInfoModalProps> = ({
                     <button
                       type="button"
                       onClick={() => handleRemoveMember(idx)}
-                      className="text-slate-400 hover:text-rose-600 transition"
+                      className="text-slate-400 hover:text-rose-600 transition cursor-pointer"
                       title="Xóa"
                     >
                       <Trash2 className="w-3.5 h-3.5" />

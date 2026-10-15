@@ -2,7 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { INITIAL_SUBMISSIONS } from '../data/mockSubmissions';
-import { Submission, SubmissionAttempt } from '../types';
+import { Submission, SubmissionAttempt, StudentRecord } from '../types';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -11,6 +11,7 @@ const __dirname = path.dirname(__filename);
 const DATA_DIR = path.resolve(process.cwd(), 'data');
 const DB_FILE = path.join(DATA_DIR, 'submissions_database.json');
 const BACKUP_FILE = path.join(DATA_DIR, 'submissions_database.backup.json');
+const ROSTER_FILE = path.join(DATA_DIR, 'student_roster.json');
 
 export interface DatabaseState {
   version: string;
@@ -289,4 +290,124 @@ export function getDatabaseMetrics() {
     classes: classCounts,
     timestamp: new Date().toISOString(),
   };
+}
+
+// ==============================================================
+// QUẢN LÝ DANH SÁCH HỌC SINH TỪNG LỚP (TẢI LÊN TỪ EXCEL)
+// ==============================================================
+let studentRosterState: StudentRecord[] = [];
+
+// Khởi tạo danh sách học sinh từ đĩa
+function loadStudentRoster(): StudentRecord[] {
+  try {
+    ensureDataDir();
+    if (fs.existsSync(ROSTER_FILE)) {
+      const raw = fs.readFileSync(ROSTER_FILE, 'utf-8');
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) {
+        studentRosterState = parsed;
+        console.log(`[CSDL Học Sinh] Đã tải ${studentRosterState.length} học sinh từ tệp: ${ROSTER_FILE}`);
+        return studentRosterState;
+      }
+    }
+  } catch (err) {
+    console.warn('[CSDL Học Sinh] Lỗi khi nạp danh sách học sinh:', err);
+  }
+  studentRosterState = [];
+  return studentRosterState;
+}
+
+// Lưu danh sách học sinh ra đĩa
+function flushStudentRosterToDisk(): boolean {
+  try {
+    ensureDataDir();
+    const tempFile = `${ROSTER_FILE}.tmp.${Date.now()}`;
+    fs.writeFileSync(tempFile, JSON.stringify(studentRosterState, null, 2), 'utf-8');
+    fs.renameSync(tempFile, ROSTER_FILE);
+    return true;
+  } catch (err) {
+    console.error('[CSDL Học Sinh] Lỗi khi lưu danh sách học sinh ra đĩa:', err);
+    return false;
+  }
+}
+
+// Nạp danh sách khi khởi động
+loadStudentRoster();
+
+// Lấy toàn bộ danh sách học sinh
+export function getAllStudents(): StudentRecord[] {
+  if (studentRosterState.length === 0) {
+    loadStudentRoster();
+  }
+  return studentRosterState;
+}
+
+// Lưu danh sách học sinh từ Excel
+export function saveStudentRoster(
+  records: StudentRecord[],
+  mode: 'replace' | 'upsert' = 'replace'
+): { success: boolean; total: number; classes: string[] } {
+  if (!Array.isArray(records)) {
+    return { success: false, total: studentRosterState.length, classes: [] };
+  }
+
+  // Chuẩn hóa bản ghi
+  const cleaned: StudentRecord[] = records
+    .filter((r) => r && typeof r.fullName === 'string' && r.fullName.trim() && r.className)
+    .map((r, idx) => ({
+      stt: r.stt !== undefined && r.stt !== null ? r.stt : idx + 1,
+      fullName: r.fullName.trim(),
+      className: r.className.trim().toUpperCase(),
+    }));
+
+  if (mode === 'replace') {
+    // Thay thế toàn bộ hoặc thay thế theo các lớp có trong tệp tải lên
+    const incomingClasses = new Set(cleaned.map((c) => c.className));
+    const retained = studentRosterState.filter((s) => !incomingClasses.has(s.className));
+    studentRosterState = [...retained, ...cleaned];
+  } else {
+    // Upsert tránh trùng lặp
+    const map = new Map<string, StudentRecord>();
+    studentRosterState.forEach((s) => {
+      const key = `${s.className}___${s.fullName.toLowerCase()}`;
+      map.set(key, s);
+    });
+    cleaned.forEach((s) => {
+      const key = `${s.className}___${s.fullName.toLowerCase()}`;
+      map.set(key, s);
+    });
+    studentRosterState = Array.from(map.values());
+  }
+
+  // Sắp xếp theo lớp rồi theo STT hoặc họ tên
+  studentRosterState.sort((a, b) => {
+    if (a.className !== b.className) return a.className.localeCompare(b.className);
+    const sttA = Number(a.stt) || 999;
+    const sttB = Number(b.stt) || 999;
+    if (sttA !== sttB) return sttA - sttB;
+    return a.fullName.localeCompare(b.fullName, 'vi');
+  });
+
+  flushStudentRosterToDisk();
+
+  const classes = Array.from(new Set(studentRosterState.map((s) => s.className)));
+  console.log(`[CSDL Học Sinh] Đã cập nhật ${studentRosterState.length} học sinh thuộc ${classes.length} lớp.`);
+
+  return {
+    success: true,
+    total: studentRosterState.length,
+    classes,
+  };
+}
+
+// Xóa danh sách học sinh theo lớp hoặc toàn bộ
+export function deleteStudentRoster(className?: string): { success: boolean; count: number } {
+  if (className) {
+    const norm = className.trim().toUpperCase();
+    studentRosterState = studentRosterState.filter((s) => s.className !== norm);
+  } else {
+    studentRosterState = [];
+  }
+  flushStudentRosterToDisk();
+  return { success: true, count: studentRosterState.length };
 }

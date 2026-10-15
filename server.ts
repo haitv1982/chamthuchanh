@@ -17,6 +17,9 @@ import {
   getTeacherPin,
   setTeacherPin,
   getDatabaseMetrics,
+  getAllStudents,
+  saveStudentRoster,
+  deleteStudentRoster,
 } from './src/server/database';
 
 dotenv.config();
@@ -338,6 +341,29 @@ app.get('/api/database/export-json', (_req, res) => {
   res.setHeader('Content-Type', 'application/json');
   res.setHeader('Content-Disposition', `attachment; filename="CSDL_BaiNop_PhongMay_${new Date().toISOString().slice(0, 10)}.json"`);
   res.send(JSON.stringify(submissions, null, 2));
+});
+
+// API: Lấy danh sách học sinh các lớp (tải lên từ Excel)
+app.get('/api/student-roster', (_req, res) => {
+  const students = getAllStudents();
+  res.json({ success: true, count: students.length, students });
+});
+
+// API: Cập nhật danh sách học sinh từ Excel (Giáo viên tải lên)
+app.post('/api/student-roster', (req, res) => {
+  const { students, mode = 'replace' } = req.body;
+  if (!Array.isArray(students)) {
+    return res.status(400).json({ error: 'Dữ liệu không phải là danh sách học sinh' });
+  }
+  const result = saveStudentRoster(students, mode);
+  res.json(result);
+});
+
+// API: Xóa danh sách học sinh (toàn bộ hoặc theo lớp)
+app.delete('/api/student-roster', (req, res) => {
+  const { className } = req.query;
+  const result = deleteStudentRoster(typeof className === 'string' ? className : undefined);
+  res.json(result);
 });
 
 app.get('/api/health', (_req, res) => {

@@ -22,6 +22,7 @@ import {
   Check,
   Globe,
   UserCheck,
+  FileSpreadsheet,
 } from 'lucide-react';
 import { StitchThumbsUp, StitchDetective } from './StitchMascot';
 import computerLabBg from '../assets/images/computer_lab_bg_1791628253579.jpg';
@@ -65,6 +66,7 @@ interface HeaderProps {
   };
   onRefreshDb?: () => Promise<void>;
   onSyncAllLocalSubmissionsToDb?: () => Promise<{ success: boolean; count: number; error?: string }>;
+  onOpenStudentRosterModal?: () => void;
 }
 
 export const Header: React.FC<HeaderProps> = ({
@@ -81,6 +83,7 @@ export const Header: React.FC<HeaderProps> = ({
   dbStatus,
   onRefreshDb,
   onSyncAllLocalSubmissionsToDb,
+  onOpenStudentRosterModal,
 }) => {
   // Quản lý mã PIN bảo vệ quyền Giáo viên
   const [teacherPin, setTeacherPin] = useState<string>(() => {
@@ -428,6 +431,19 @@ export const Header: React.FC<HeaderProps> = ({
               >
                 <KeyRound className="w-3.5 h-3.5 text-amber-300" />
                 <span className="hidden md:inline">Đổi Mã PIN</span>
+              </button>
+            )}
+
+            {/* Nút Danh Sách Học Sinh Các Lớp (Tải lên từ file Excel 3 cột) */}
+            {isTeacher && onOpenStudentRosterModal && (
+              <button
+                type="button"
+                onClick={onOpenStudentRosterModal}
+                className="flex items-center gap-1.5 px-3 py-1.5 sm:py-2 rounded-xl text-xs sm:text-sm font-bold bg-emerald-500/20 hover:bg-emerald-500/35 text-emerald-200 border border-emerald-300/40 transition-all shadow-xs cursor-pointer"
+                title="Tải lên và quản lý danh sách học sinh các lớp từ tệp Excel 3 cột (TT, Họ và tên, Lớp)"
+              >
+                <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-300" />
+                <span className="hidden sm:inline">DS Học Sinh (Excel)</span>
               </button>
             )}
 

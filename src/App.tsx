@@ -2,12 +2,13 @@ import React, { useState, useEffect } from 'react';
 import { Header } from './components/Header';
 import { StudentSubmissionView } from './components/StudentSubmissionView';
 import { StudentInfoModal } from './components/StudentInfoModal';
+import { StudentRosterModal } from './components/StudentRosterModal';
 import { ClassResultsModal } from './components/ClassResultsModal';
 import { ProjectorLiveBoard } from './components/ProjectorLiveBoard';
 import { DEFAULT_ASSIGNMENTS } from './data/defaultAssignments';
 import { INITIAL_SUBMISSIONS } from './data/mockSubmissions';
 import { SCHOOL_CLASSES } from './data/classes';
-import { Assignment, Submission, SubmissionAttempt } from './types';
+import { Assignment, Submission, SubmissionAttempt, StudentRecord } from './types';
 import { exportSubmissionsToExcel, exportSingleSubmissionToExcel } from './utils/excelExport';
 import {
   saveSubmissionsSafely,
@@ -105,6 +106,39 @@ export default function App() {
   const [isStudentInfoModalOpen, setIsStudentInfoModalOpen] = useState<boolean>(false);
   const [isProjectorOpen, setIsProjectorOpen] = useState<boolean>(false);
   const [isClassResultsOpen, setIsClassResultsOpen] = useState<boolean>(false);
+  const [isStudentRosterModalOpen, setIsStudentRosterModalOpen] = useState<boolean>(false);
+
+  // Danh sách học sinh các lớp (được tải lên từ file Excel 3 cột)
+  const [studentRoster, setStudentRoster] = useState<StudentRecord[]>(() => {
+    try {
+      const saved = localStorage.getItem('labgrade_student_roster');
+      if (saved) return JSON.parse(saved);
+    } catch {}
+    return [];
+  });
+
+  // Tự động lưu danh sách học sinh vào localStorage
+  useEffect(() => {
+    try {
+      localStorage.setItem('labgrade_student_roster', JSON.stringify(studentRoster));
+    } catch {}
+  }, [studentRoster]);
+
+  // Tải danh sách học sinh từ máy chủ khi mở ứng dụng
+  useEffect(() => {
+    const fetchRoster = async () => {
+      try {
+        const res = await apiFetch('/api/student-roster');
+        if (res.ok) {
+          const data = await res.json();
+          if (Array.isArray(data.students) && data.students.length > 0) {
+            setStudentRoster(data.students);
+          }
+        }
+      } catch {}
+    };
+    fetchRoster();
+  }, []);
 
   // Role: 'teacher' (Giáo viên) vs 'student' (Học sinh) - Mặc định trên máy mới là Học sinh (chỉ chuyển Giáo viên khi nhập mã PIN)
   const [isTeacherRole, setIsTeacherRole] = useState<boolean>(() => {
@@ -139,6 +173,9 @@ export default function App() {
         bc.onmessage = (event) => {
           if (event.data?.type === 'SUBMISSION_PERMISSION_CHANGED' && typeof event.data.allow === 'boolean') {
             setAllowSubmission(event.data.allow);
+          }
+          if (event.data?.type === 'ROSTER_UPDATED' && Array.isArray(event.data.students)) {
+            setStudentRoster(event.data.students);
           }
         };
       } catch {}
@@ -276,6 +313,91 @@ export default function App() {
     } catch (err) {
       console.warn('Lỗi gửi trạng thái khóa nộp bài tới máy chủ:', err);
     }
+  };
+
+  // Cập nhật danh sách học sinh (từ Excel do Giáo viên tải lên)
+  const handleSaveStudentRoster = async (
+    students: StudentRecord[],
+    mode: 'replace' | 'upsert' = 'replace'
+  ) => {
+    let resTotal = students.length;
+    let resClasses: string[] = [];
+
+    try {
+      const res = await apiFetch('/api/student-roster', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ students, mode }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        resTotal = data.total;
+        resClasses = data.classes || [];
+      }
+    } catch (err) {
+      console.warn('Lỗi mạng khi lưu danh sách học sinh lên máy chủ:', err);
+    }
+
+    // Cập nhật state cục bộ ngay lập tức
+    if (mode === 'replace') {
+      const incomingClasses = new Set(students.map((c) => c.className.toUpperCase()));
+      setStudentRoster((prev) => {
+        const retained = prev.filter((s) => !incomingClasses.has(s.className.toUpperCase()));
+        const updated = [...retained, ...students];
+        try {
+          if (typeof BroadcastChannel !== 'undefined') {
+            const bc = new BroadcastChannel('labgrade_session_channel');
+            bc.postMessage({ type: 'ROSTER_UPDATED', students: updated });
+            bc.close();
+          }
+        } catch {}
+        return updated;
+      });
+    } else {
+      setStudentRoster((prev) => {
+        const map = new Map<string, StudentRecord>();
+        prev.forEach((s) => map.set(`${s.className}___${s.fullName.toLowerCase()}`, s));
+        students.forEach((s) => map.set(`${s.className}___${s.fullName.toLowerCase()}`, s));
+        const updated = Array.from(map.values());
+        try {
+          if (typeof BroadcastChannel !== 'undefined') {
+            const bc = new BroadcastChannel('labgrade_session_channel');
+            bc.postMessage({ type: 'ROSTER_UPDATED', students: updated });
+            bc.close();
+          }
+        } catch {}
+        return updated;
+      });
+    }
+
+    return { success: true, total: resTotal, classes: resClasses };
+  };
+
+  // Xóa danh sách học sinh
+  const handleDeleteStudentRoster = async (className?: string) => {
+    try {
+      const url = className
+        ? `/api/student-roster?className=${encodeURIComponent(className)}`
+        : '/api/student-roster';
+      await apiFetch(url, { method: 'DELETE' });
+    } catch (err) {
+      console.warn('Lỗi mạng khi xóa danh sách học sinh trên máy chủ:', err);
+    }
+
+    setStudentRoster((prev) => {
+      const updated = className
+        ? prev.filter((s) => s.className.toUpperCase() !== className.toUpperCase())
+        : [];
+      try {
+        if (typeof BroadcastChannel !== 'undefined') {
+          const bc = new BroadcastChannel('labgrade_session_channel');
+          bc.postMessage({ type: 'ROSTER_UPDATED', students: updated });
+          bc.close();
+        }
+      } catch {}
+      return updated;
+    });
+    return true;
   };
 
   // Persist assignments to localStorage
@@ -596,6 +718,7 @@ export default function App() {
         dbStatus={dbStatus}
         onRefreshDb={refreshSubmissionsAndStatus}
         onSyncAllLocalSubmissionsToDb={handleSyncAllLocalSubmissionsToDb}
+        onOpenStudentRosterModal={() => setIsStudentRosterModalOpen(true)}
       />
 
       {/* Main Student Workspace (Single focused interface without scrolling) */}
@@ -666,6 +789,16 @@ export default function App() {
             localStorage.setItem('labgrade_group_members', JSON.stringify(mems));
           } catch {}
         }}
+        roster={studentRoster}
+      />
+
+      {/* Student Roster Modal - Quản lý và Tải lên Danh Sách Học Sinh từ File Excel 3 Cột (Chỉ Giáo Viên) */}
+      <StudentRosterModal
+        isOpen={isStudentRosterModalOpen}
+        onClose={() => setIsStudentRosterModalOpen(false)}
+        roster={studentRoster}
+        onSaveRoster={handleSaveStudentRoster}
+        onDeleteRoster={handleDeleteStudentRoster}
       />
 
       {/* Class Results Modal - View and download during practice */}
