@@ -207,18 +207,10 @@ export function sanitizeSubmission(raw: any): Submission {
 export function loadSubmissionsSafely(fallback: Submission[] = []): Submission[] {
   try {
     const saved = localStorage.getItem(STORAGE_KEY_SUBMISSIONS);
-    if (saved) {
+    if (saved !== null) {
       const parsed = JSON.parse(saved);
-      if (Array.isArray(parsed) && parsed.length > 0) {
+      if (Array.isArray(parsed)) {
         return parsed.map(sanitizeSubmission);
-      }
-    }
-    // Kiểm tra v1 cũ nếu chưa có v2
-    const oldV1 = localStorage.getItem(STORAGE_KEY_OLD_V1);
-    if (oldV1) {
-      const parsedOld = JSON.parse(oldV1);
-      if (Array.isArray(parsedOld) && parsedOld.length > 0) {
-        return parsedOld.map(sanitizeSubmission);
       }
     }
   } catch (e) {

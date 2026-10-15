@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { Header } from './components/Header';
 import { StudentSubmissionView } from './components/StudentSubmissionView';
+import { StudentInfoModal } from './components/StudentInfoModal';
 import { ClassResultsModal } from './components/ClassResultsModal';
 import { ProjectorLiveBoard } from './components/ProjectorLiveBoard';
 import { DEFAULT_ASSIGNMENTS } from './data/defaultAssignments';
@@ -20,6 +21,7 @@ import {
   clearPendingSyncQueue,
 } from './utils/storageManager';
 import { scanAndGradeProduct } from './utils/productScanner';
+import { apiFetch, getApiUrl } from './utils/apiConfig';
 
 const STORAGE_KEY_ASSIGNMENTS = 'labgrade_assignments_v7_grade6_grade7_grade8_grade9';
 const STORAGE_KEY_CLASS = 'labgrade_current_class_v1';
@@ -71,14 +73,36 @@ export default function App() {
     localStorage.setItem(STORAGE_KEY_CLASS, newClass);
   };
 
-  // Load initial submissions safely
+  // Load initial submissions safely (khởi tạo rỗng theo yêu cầu người dùng)
   const [submissions, setSubmissions] = useState<Submission[]>(() => {
-    const loaded = loadSubmissionsSafely();
-    if (loaded && loaded.length > 0) return loaded;
-    return INITIAL_SUBMISSIONS;
+    return loadSubmissionsSafely([]);
+  });
+
+  // Student Info State (Lớp, Khối, Số máy, Trưởng nhóm, Thành viên)
+  const [machineNumber, setMachineNumber] = useState<string>(() => {
+    return localStorage.getItem('labgrade_machine_number') || 'Máy 05';
+  });
+  const [studentLeader, setStudentLeader] = useState<string>(() => {
+    return localStorage.getItem('labgrade_student_leader') || '';
+  });
+  const [groupMembers, setGroupMembers] = useState<string[]>(() => {
+    try {
+      const saved = localStorage.getItem('labgrade_group_members');
+      if (saved) return JSON.parse(saved);
+    } catch {}
+    return [];
+  });
+  const [selectedGrade, setSelectedGrade] = useState<string>(() => {
+    const saved = localStorage.getItem('labgrade_selected_grade');
+    if (saved) return saved;
+    if (userClassName.startsWith('9')) return 'Lớp 9';
+    if (userClassName.startsWith('8')) return 'Lớp 8';
+    if (userClassName.startsWith('7')) return 'Lớp 7';
+    return 'Lớp 6';
   });
 
   // Modals & Overlays
+  const [isStudentInfoModalOpen, setIsStudentInfoModalOpen] = useState<boolean>(false);
   const [isProjectorOpen, setIsProjectorOpen] = useState<boolean>(false);
   const [isClassResultsOpen, setIsClassResultsOpen] = useState<boolean>(false);
 
@@ -88,8 +112,50 @@ export default function App() {
     return saved === 'teacher';
   });
 
-  // Submission Permission: Cho phép học sinh nộp bài hay đang khóa
-  const [allowSubmission, setAllowSubmission] = useState<boolean>(true);
+  // Submission Permission: Cho phép học sinh nộp bài hay đang khóa (đọc từ localStorage khi mở trang)
+  const [allowSubmission, setAllowSubmission] = useState<boolean>(() => {
+    try {
+      const saved = localStorage.getItem('labgrade_allow_submission');
+      if (saved !== null) {
+        return saved === 'true';
+      }
+    } catch {}
+    return true;
+  });
+
+  // Tự động lưu trạng thái quyền nộp bài vào localStorage
+  useEffect(() => {
+    try {
+      localStorage.setItem('labgrade_allow_submission', String(allowSubmission));
+    } catch {}
+  }, [allowSubmission]);
+
+  // Đồng bộ trạng thái khóa nộp bài tức thời giữa các tab/cửa sổ trên cùng máy
+  useEffect(() => {
+    let bc: BroadcastChannel | null = null;
+    if (typeof BroadcastChannel !== 'undefined') {
+      try {
+        bc = new BroadcastChannel('labgrade_session_channel');
+        bc.onmessage = (event) => {
+          if (event.data?.type === 'SUBMISSION_PERMISSION_CHANGED' && typeof event.data.allow === 'boolean') {
+            setAllowSubmission(event.data.allow);
+          }
+        };
+      } catch {}
+    }
+
+    const handleStorageChange = (e: StorageEvent) => {
+      if (e.key === 'labgrade_allow_submission' && e.newValue !== null) {
+        setAllowSubmission(e.newValue === 'true');
+      }
+    };
+    window.addEventListener('storage', handleStorageChange);
+
+    return () => {
+      if (bc) bc.close();
+      window.removeEventListener('storage', handleStorageChange);
+    };
+  }, []);
 
   // Trạng thái Cơ sở dữ liệu phòng máy (CSDL Lưu trữ thời gian thực)
   const [dbStatus, setDbStatus] = useState<{
@@ -118,11 +184,11 @@ export default function App() {
     const pendingQueue = getPendingSyncQueue();
     if (pendingQueue.length > 0) {
       try {
-        const batchRes = await fetch('/api/submissions/sync-batch', {
+        const batchRes = await apiFetch('/api/submissions/sync-batch', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ submissions: pendingQueue }),
-        });
+        }, 5000);
         if (batchRes.ok) {
           clearPendingSyncQueue();
           console.log('[CSDL Phòng Máy] Đã đẩy thành công các bài nộp trong hàng đợi offline lên CSDL máy chủ.');
@@ -131,11 +197,8 @@ export default function App() {
     }
 
     // 2. Tải toàn bộ bài nộp và trạng thái CSDL mới nhất từ máy chủ
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 4000);
     try {
-      const res = await fetch('/api/submissions', { signal: controller.signal });
-      clearTimeout(timer);
+      const res = await apiFetch('/api/submissions', { method: 'GET' }, 6000);
       if (res.ok) {
         const data = await res.json();
         if (typeof data.allowSubmission === 'boolean') {
@@ -161,8 +224,31 @@ export default function App() {
         }
       }
     } catch {
-      clearTimeout(timer);
       // offline or network congestion resilience in busy computer lab
+    }
+  };
+
+  // Đồng bộ toàn bộ bài nộp trên máy này lên CSDL trung tâm
+  const handleSyncAllLocalSubmissionsToDb = async (): Promise<{ success: boolean; count: number; error?: string }> => {
+    try {
+      const currentList = loadSubmissionsSafely(submissions);
+      if (!currentList || currentList.length === 0) {
+        return { success: true, count: 0 };
+      }
+      const res = await apiFetch('/api/submissions/sync-batch', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ submissions: currentList, isTeacherSync: true }),
+      }, 8000);
+      if (res.ok) {
+        const json = await res.json();
+        clearPendingSyncQueue();
+        await refreshSubmissionsAndStatus();
+        return { success: true, count: json.addedCount ?? currentList.length };
+      }
+      return { success: false, count: 0, error: `Máy chủ phản hồi mã ${res.status}` };
+    } catch (err: any) {
+      return { success: false, count: 0, error: err.message || 'Lỗi kết nối CSDL' };
     }
   };
 
@@ -170,12 +256,26 @@ export default function App() {
   const handleToggleSubmissionPermission = async (allow: boolean) => {
     setAllowSubmission(allow);
     try {
-      await fetch('/api/session-status', {
+      localStorage.setItem('labgrade_allow_submission', String(allow));
+      if (typeof BroadcastChannel !== 'undefined') {
+        const bc = new BroadcastChannel('labgrade_session_channel');
+        bc.postMessage({ type: 'SUBMISSION_PERMISSION_CHANGED', allow });
+        bc.close();
+      }
+    } catch {}
+
+    try {
+      const res = await apiFetch('/api/session-status', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ allow }),
-      });
-    } catch {}
+      }, 4000);
+      if (res.ok) {
+        console.log(`[Quyền Nộp Bài] Đã cập nhật lên máy chủ trung tâm: ${allow ? 'MỞ CHO PHÉP' : 'ĐÃ KHÓA'}`);
+      }
+    } catch (err) {
+      console.warn('Lỗi gửi trạng thái khóa nộp bài tới máy chủ:', err);
+    }
   };
 
   // Persist assignments to localStorage
@@ -197,12 +297,12 @@ export default function App() {
     localStorage.setItem(STORAGE_KEY_CLASS, userClassName);
   }, [userClassName]);
 
-  // Background fetch from server to sync lab submissions if server has any & poll every 4 seconds
+  // Background fetch from server to sync lab submissions if server has any & poll every 2.5 seconds
   useEffect(() => {
     refreshSubmissionsAndStatus();
     const interval = setInterval(() => {
       refreshSubmissionsAndStatus();
-    }, 4000);
+    }, 2500);
     return () => clearInterval(interval);
   }, []);
 
@@ -223,6 +323,32 @@ export default function App() {
     const todayStr = getTodayDateString();
     const currentAssignment =
       assignments.find((a) => a.id === data.assignmentId) || activeAssignment;
+
+    // 0. BẢO VỆ CHẶT CHẼ: KIỂM TRA QUYỀN NỘP BÀI TỪ GIÁO VIÊN (Yêu cầu khóa nộp bài)
+    if (!allowSubmission) {
+      throw new Error('🔒 Giáo viên đang KHÓA nhận bài nộp phòng thực hành. Thầy/Cô chưa mở quyền nộp bài cho phiên này. Em hãy chờ thầy/cô thông báo nhé!');
+    }
+
+    // Kiểm tra trực tiếp thời gian thực với máy chủ xem giáo viên có vừa bấm khóa không
+    try {
+      const checkRes = await apiFetch('/api/session-status', { method: 'GET' }, 2000);
+      if (checkRes.ok) {
+        const checkData = await checkRes.json();
+        if (typeof checkData.allowSubmission === 'boolean') {
+          setAllowSubmission(checkData.allowSubmission);
+          try {
+            localStorage.setItem('labgrade_allow_submission', String(checkData.allowSubmission));
+          } catch {}
+          if (!checkData.allowSubmission) {
+            throw new Error('🔒 Giáo viên vừa KHÓA nhận bài nộp phòng thực hành. Thầy/Cô chưa cho phép nộp bài lúc này!');
+          }
+        }
+      }
+    } catch (checkErr: any) {
+      if (checkErr?.message && (checkErr.message.includes('KHÓA') || checkErr.message.includes('khóa'))) {
+        throw checkErr;
+      }
+    }
 
     // KIỂM TRA BÀI NỘP CỦA HÔM NAY (Yêu cầu 3: không lưu dồn với ngày trước, sang ngày mới/tuần sau tính phiên mới)
     // Nếu cùng số máy nhưng KHÁC tên học sinh/nhóm trưởng -> Đây là 2 nhóm khác nhau, không ghi đè mất bài của nhau!
@@ -245,7 +371,7 @@ export default function App() {
     // Send to grading endpoint
     let gradeData: any;
     try {
-      const response = await fetch('/api/grade', {
+      const response = await apiFetch('/api/grade', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -262,10 +388,18 @@ export default function App() {
       });
 
       if (!response.ok) {
-        throw new Error(`Lỗi máy chủ (${response.status})`);
+        const errorJson = await response.json().catch(() => ({}));
+        if (response.status === 403 || errorJson.locked || (errorJson.error && errorJson.error.includes('KHÓA'))) {
+          throw new Error(errorJson.error || '🔒 Giáo viên hiện đang KHÓA nhận bài nộp phòng thực hành.');
+        }
+        throw new Error(errorJson.error || `Lỗi máy chủ (${response.status})`);
       }
       gradeData = await response.json();
     } catch (err: any) {
+      // TUYỆT ĐỐI KHÔNG FALLBACK NẾU GIÁO VIÊN ĐANG KHÓA NỘP BÀI!
+      if (err?.message && (err.message.includes('KHÓA') || err.message.includes('khóa') || err.message.includes('locked'))) {
+        throw err;
+      }
       console.warn('Call to /api/grade failed, using smart local evaluator:', err);
       gradeData = analyzeStudentWork({
         assignment: currentAssignment,
@@ -337,11 +471,11 @@ export default function App() {
 
     // Tự động lưu và cập nhật ngay lập tức vào Cơ sở dữ liệu phòng máy
     try {
-      const syncRes = await fetch('/api/submissions', {
+      const syncRes = await apiFetch('/api/submissions', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(updatedSubmission),
-      });
+      }, 7000);
       if (syncRes.ok) {
         const syncJson = await syncRes.json();
         if (syncJson.submission) {
@@ -360,9 +494,16 @@ export default function App() {
           );
         }
       } else {
+        const syncErrJson = await syncRes.json().catch(() => ({}));
+        if (syncRes.status === 403 || syncErrJson.locked || (syncErrJson.error && syncErrJson.error.includes('KHÓA'))) {
+          throw new Error(syncErrJson.error || '🔒 Giáo viên hiện đang KHÓA nhận bài nộp phòng thực hành.');
+        }
         queuePendingSync(updatedSubmission);
       }
-    } catch (netErr) {
+    } catch (netErr: any) {
+      if (netErr?.message && (netErr.message.includes('KHÓA') || netErr.message.includes('khóa'))) {
+        throw netErr;
+      }
       console.warn('Lỗi mạng khi lưu CSDL, đưa vào hàng đợi offline:', netErr);
       queuePendingSync(updatedSubmission);
     }
@@ -391,7 +532,7 @@ export default function App() {
           studentLeader: data.studentLeader,
           groupMembers: data.groupMembers,
         };
-        fetch('/api/submissions', {
+        apiFetch('/api/submissions', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify(updated[matchIdx]),
@@ -434,6 +575,13 @@ export default function App() {
     <div className="min-h-screen bg-gradient-to-b from-blue-50/50 via-slate-100 to-slate-100 flex flex-col font-sans text-slate-900 selection:bg-blue-200">
       {/* Top Header */}
       <Header
+        onOpenStudentInfoModal={() => setIsStudentInfoModalOpen(true)}
+        studentInfo={{
+          className: userClassName,
+          machineNumber,
+          studentLeader,
+          groupMembers,
+        }}
         onOpenProjector={() => setIsProjectorOpen(true)}
         onOpenClassResults={() => setIsClassResultsOpen(true)}
         onExportExcel={handleExportClassExcel}
@@ -445,27 +593,80 @@ export default function App() {
         onToggleRole={() => setIsTeacherRole(!isTeacherRole)}
         allowSubmission={allowSubmission}
         onToggleSubmissionPermission={handleToggleSubmissionPermission}
+        dbStatus={dbStatus}
+        onRefreshDb={refreshSubmissionsAndStatus}
+        onSyncAllLocalSubmissionsToDb={handleSyncAllLocalSubmissionsToDb}
       />
 
-      {/* Main Student Workspace (Single focused interface without teacher management portal) */}
-      <main className="flex-1 pb-16">
+      {/* Main Student Workspace (Single focused interface without scrolling) */}
+      <main className="flex-1 pb-10">
         <StudentSubmissionView
           assignments={assignments}
           activeAssignmentId={activeAssignmentId}
           onSelectAssignment={(id) => setActiveAssignmentId(id)}
+          selectedGrade={selectedGrade}
+          onSelectGrade={(g) => {
+            setSelectedGrade(g);
+            try {
+              localStorage.setItem('labgrade_selected_grade', g);
+            } catch {}
+            const firstA = assignments.find((a) => a.gradeLevel === g);
+            if (firstA) setActiveAssignmentId(firstA.id);
+          }}
           userClassName={userClassName}
           onChangeClassName={handleSelectClassName}
+          machineNumber={machineNumber}
+          onChangeMachineNumber={setMachineNumber}
+          studentLeader={studentLeader}
+          onChangeStudentLeader={setStudentLeader}
+          groupMembers={groupMembers}
+          onChangeGroupMembers={setGroupMembers}
           mySubmissions={submissions}
           onSubmitWork={handleStudentSubmitWork}
-          onUpdateGroupMembers={handleUpdateGroupMembers}
-          onExportExcel={handleExportClassExcel}
-          onOpenClassResults={() => setIsClassResultsOpen(true)}
-          onExportMySubmission={handleExportSingleSubmission}
+          onOpenStudentInfoModal={() => setIsStudentInfoModalOpen(true)}
           allowSubmission={allowSubmission}
           isTeacher={isTeacherRole}
           onToggleSubmissionPermission={handleToggleSubmissionPermission}
         />
       </main>
+
+      {/* Student Info Modal - Nhập Khối, Lớp, Số máy, Trưởng nhóm và Thành viên */}
+      <StudentInfoModal
+        isOpen={isStudentInfoModalOpen}
+        onClose={() => setIsStudentInfoModalOpen(false)}
+        selectedGrade={selectedGrade}
+        onSelectGrade={(g) => {
+          setSelectedGrade(g);
+          try {
+            localStorage.setItem('labgrade_selected_grade', g);
+          } catch {}
+          const firstA = assignments.find((a) => a.gradeLevel === g);
+          if (firstA) setActiveAssignmentId(firstA.id);
+        }}
+        className={userClassName}
+        onSelectClassName={handleSelectClassName}
+        machineNumber={machineNumber}
+        onChangeMachineNumber={(m) => {
+          setMachineNumber(m);
+          try {
+            localStorage.setItem('labgrade_machine_number', m);
+          } catch {}
+        }}
+        studentLeader={studentLeader}
+        onChangeStudentLeader={(l) => {
+          setStudentLeader(l);
+          try {
+            localStorage.setItem('labgrade_student_leader', l);
+          } catch {}
+        }}
+        groupMembers={groupMembers}
+        onChangeGroupMembers={(mems) => {
+          setGroupMembers(mems);
+          try {
+            localStorage.setItem('labgrade_group_members', JSON.stringify(mems));
+          } catch {}
+        }}
+      />
 
       {/* Class Results Modal - View and download during practice */}
       {isClassResultsOpen && (

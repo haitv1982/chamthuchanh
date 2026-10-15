@@ -66,7 +66,7 @@ export function initLabDatabase(): DatabaseState {
     try {
       const raw = fs.readFileSync(DB_FILE, 'utf-8');
       const parsed = JSON.parse(raw);
-      if (parsed && Array.isArray(parsed.submissions) && parsed.submissions.length > 0) {
+      if (parsed && Array.isArray(parsed.submissions)) {
         dbState = {
           version: parsed.version || '2.0.0',
           lastUpdated: parsed.lastUpdated || new Date().toISOString(),
@@ -74,7 +74,7 @@ export function initLabDatabase(): DatabaseState {
           teacherPin: typeof parsed.teacherPin === 'string' && parsed.teacherPin ? parsed.teacherPin : '1234',
           submissions: parsed.submissions,
         };
-        console.log(`[CSDL Thực Hành] Khôi phục thành công ${dbState.submissions.length} bài nộp từ CSDL đĩa: ${DB_FILE}`);
+        console.log(`[CSDL Thực Hành] Khôi phục thành công ${dbState.submissions.length} bài nộp từ CSDL đĩa: ${DB_FILE} (Cho phép nộp: ${dbState.allowSubmission ? 'BẬT' : 'KHÓA'})`);
         return dbState;
       }
     } catch (err) {

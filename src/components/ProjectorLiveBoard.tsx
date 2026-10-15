@@ -17,6 +17,7 @@ import {
 } from 'lucide-react';
 import { Submission, Assignment } from '../types';
 import { SCHOOL_CLASSES } from '../data/classes';
+import { apiFetch } from '../utils/apiConfig';
 
 interface ProjectorLiveBoardProps {
   className: string;
@@ -65,7 +66,7 @@ export const ProjectorLiveBoard: React.FC<ProjectorLiveBoardProps> = ({
     let isMounted = true;
     const fetchLabUpdates = async () => {
       try {
-        const res = await fetch('/api/submissions');
+        const res = await apiFetch('/api/submissions');
         if (res.ok) {
           const data = await res.json();
           if (isMounted && Array.isArray(data.submissions)) {

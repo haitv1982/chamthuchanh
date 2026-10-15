@@ -24,7 +24,7 @@ import {
   getMachineSortNumber,
   splitVietnameseName,
 } from '../utils/excelExport';
-import { formatPracticeDateVi } from '../utils/storageManager';
+import { formatPracticeDateVi, getTodayDateString } from '../utils/storageManager';
 import { SCHOOL_CLASSES } from '../data/classes';
 
 interface ClassResultsModalProps {
@@ -265,14 +265,25 @@ export const ClassResultsModal: React.FC<ClassResultsModalProps> = ({
                   </span>
                 </button>
 
-                <a
-                  href="/api/database/export-json"
-                  download={`CSDL_PhongMay_BaiNop_${new Date().toISOString().slice(0, 10)}.json`}
-                  className="p-2 text-slate-300 hover:text-white rounded-xl bg-slate-800 hover:bg-slate-700 transition-colors border border-slate-700 hidden sm:flex items-center"
+                <button
+                  type="button"
+                  onClick={() => {
+                    const jsonStr = JSON.stringify(submissions, null, 2);
+                    const blob = new Blob([jsonStr], { type: 'application/json' });
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = url;
+                    a.download = `CSDL_PhongMay_BaiNop_${new Date().toISOString().slice(0, 10)}.json`;
+                    document.body.appendChild(a);
+                    a.click();
+                    document.body.removeChild(a);
+                    URL.revokeObjectURL(url);
+                  }}
+                  className="p-2 text-slate-300 hover:text-white rounded-xl bg-slate-800 hover:bg-slate-700 transition-colors border border-slate-700 hidden sm:flex items-center cursor-pointer"
                   title="Tải về bản sao lưu Cơ sở dữ liệu đầy đủ (.JSON) của phòng máy để lưu trữ an toàn"
                 >
                   <Download className="w-4 h-4 text-cyan-400" />
-                </a>
+                </button>
               </div>
             ) : (
               <div
@@ -323,6 +334,24 @@ export const ClassResultsModal: React.FC<ClassResultsModalProps> = ({
               }`}
             >
               Tất cả các ngày
+            </button>
+
+            {/* Nút: Hôm nay */}
+            <button
+              type="button"
+              onClick={() => {
+                setDateFilterMode('custom');
+                setCustomDate(getTodayDateString());
+              }}
+              className={`px-3 py-1 rounded-xl font-bold transition-all flex items-center gap-1 cursor-pointer ${
+                dateFilterMode === 'custom' && customDate === getTodayDateString()
+                  ? 'bg-emerald-400 text-slate-950 shadow-xs'
+                  : 'bg-emerald-950/70 hover:bg-emerald-900/80 text-emerald-300 border border-emerald-500/40'
+              }`}
+              title="Lọc bài nộp trong ngày thực hành hôm nay"
+            >
+              <Calendar className="w-3.5 h-3.5" />
+              <span>Hôm nay ({formatPracticeDateVi(getTodayDateString())})</span>
             </button>
 
             {/* Nút: Ngày gần nhất của lớp */}

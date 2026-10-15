@@ -30,6 +30,17 @@ const PORT = Number(process.env.PORT) || 3000;
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
+// Middleware CORS hỗ trợ liên thông từ GitHub Pages (haitv198.github.io), mạng LAN và các máy trạm học sinh
+app.use((req, res, next) => {
+  res.header('Access-Control-Allow-Origin', '*');
+  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+  res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept, Authorization');
+  if (req.method === 'OPTIONS') {
+    return res.sendStatus(204);
+  }
+  next();
+});
+
 // Initialize persistent Lab Database on server startup
 initLabDatabase();
 
@@ -58,6 +69,14 @@ function fallbackHeuristicGrading(params: {
 // API: Chấm điểm bài thực hành (Gemini AI + Fallback)
 app.post('/api/grade', async (req, res) => {
   try {
+    // 0. BẢO VỆ CHẶT CHẼ: KIỂM TRA QUYỀN NỘP BÀI TỪ GIÁO VIÊN
+    if (!getAllowSubmission()) {
+      return res.status(403).json({
+        error: '🔒 Giáo viên hiện đang KHÓA nhận bài nộp phòng thực hành. Thầy/Cô chưa mở quyền nộp bài cho phiên này. Em hãy tiếp tục hoàn thiện trên máy tính của mình nhé!',
+        locked: true,
+      });
+    }
+
     const {
       assignment,
       fileName,
@@ -257,6 +276,13 @@ app.get('/api/submissions', (_req, res) => {
 
 // API: Tự động lưu và cập nhật ngay bài nộp của học sinh vào CSDL đĩa
 app.post('/api/submissions', (req, res) => {
+  if (!getAllowSubmission()) {
+    return res.status(403).json({
+      error: '🔒 Giáo viên hiện đang KHÓA nhận bài nộp phòng thực hành. Không thể lưu bài nộp vào CSDL lúc này.',
+      locked: true,
+    });
+  }
+
   const newSubmission = req.body;
   if (!newSubmission || !newSubmission.className || !newSubmission.machineNumber) {
     return res.status(400).json({ error: 'Dữ liệu bài nộp không hợp lệ hoặc thiếu thông tin lớp/số máy' });
@@ -278,6 +304,14 @@ app.post('/api/submissions', (req, res) => {
 
 // API: Đồng bộ hàng loạt bài nộp vào CSDL (bảo vệ khi mạng chập chờn)
 app.post('/api/submissions/sync-batch', (req, res) => {
+  const isTeacherSync = req.body && req.body.isTeacherSync === true;
+  if (!getAllowSubmission() && !isTeacherSync) {
+    return res.status(403).json({
+      error: '🔒 Giáo viên hiện đang KHÓA nhận bài nộp phòng thực hành. Không thể đồng bộ bài nộp lúc này.',
+      locked: true,
+    });
+  }
+
   const { submissions } = req.body;
   if (!Array.isArray(submissions)) {
     return res.status(400).json({ error: 'Dữ liệu không phải là danh sách bài nộp' });
