@@ -15,6 +15,7 @@ import {
 } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import { StudentRecord } from '../types';
+import { parseStudentExcel } from '../utils/excelRosterParser';
 
 interface StudentRosterModalProps {
   isOpen: boolean;
@@ -36,7 +37,7 @@ export const StudentRosterModal: React.FC<StudentRosterModalProps> = ({
   const [parseError, setParseError] = useState<string | null>(null);
   const [parseSuccessMsg, setParseSuccessMsg] = useState<string | null>(null);
   const [isSaving, setIsSaving] = useState(false);
-  const [activeTab, setActiveTab] = useState<'upload' | 'view'>('upload');
+  const [activeTab, setActiveTab] = useState<'upload' | 'view'>(roster.length > 0 ? 'view' : 'upload');
   const [viewClassFilter, setViewClassFilter] = useState<string>('all');
   const [viewSearchTerm, setViewSearchTerm] = useState<string>('');
 
@@ -97,125 +98,68 @@ export const StudentRosterModal: React.FC<StudentRosterModalProps> = ({
       { stt: 2, fullName: 'Hoàng Thu Giang', className: '8A2' },
       { stt: 3, fullName: 'Ngô Văn Hùng', className: '8A2' },
       { stt: 4, fullName: 'Mai Thanh Hương', className: '8A2' },
+      { stt: 5, fullName: 'Đỗ Quốc Khánh', className: '8A2' },
       { stt: 1, fullName: 'Vũ Minh Hải', className: '9A1' },
       { stt: 2, fullName: 'Đỗ Phương Linh', className: '9A1' },
       { stt: 3, fullName: 'Bùi Quốc Tuấn', className: '9A1' },
     ];
 
     setIsSaving(true);
+    setParseError(null);
     try {
-      await onSaveRoster(demoData, 'replace');
-      setParseSuccessMsg('Đã nạp 12 học sinh mẫu (8A1, 8A2, 9A1) vào hệ thống thành công!');
+      const res = await onSaveRoster(demoData, 'replace');
+      setParseSuccessMsg(`Đã nạp ${res.total} học sinh mẫu (8A1, 8A2, 9A1) vào CSDL hệ thống thành công!`);
       setActiveTab('view');
+    } catch (err: any) {
+      setParseError(err.message || 'Lỗi khi nạp danh sách mẫu');
     } finally {
       setIsSaving(false);
     }
   };
 
-  // Xử lý đọc tệp Excel học sinh do giáo viên tải lên
-  const handleProcessExcel = (file: File) => {
+  // Xử lý đọc tệp Excel học sinh do giáo viên tải lên VÀ LƯU NGAY VÀO CSDL HỆ THỐNG
+  const handleProcessExcel = async (file: File) => {
     setSelectedFile(file);
     setParseError(null);
     setParseSuccessMsg(null);
     setParsedStudents([]);
+    setIsSaving(true);
 
-    const reader = new FileReader();
-    reader.onload = (e) => {
-      try {
-        const buffer = new Uint8Array(e.target?.result as ArrayBuffer);
-        const workbook = XLSX.read(buffer, { type: 'array' });
-        const firstSheetName = workbook.SheetNames[0];
-        if (!firstSheetName) {
-          throw new Error('Tệp Excel không có trang tính nào.');
-        }
+    try {
+      const buffer = await file.arrayBuffer();
+      // Phân tích thông minh với trình parser chuyên dụng
+      const result = parseStudentExcel(buffer);
+      setParsedStudents(result.students);
 
-        const worksheet = workbook.Sheets[firstSheetName];
-        const rawRows: any[][] = XLSX.utils.sheet_to_json(worksheet, { header: 1, defval: '' });
-
-        if (!rawRows || rawRows.length < 2) {
-          throw new Error('Tệp Excel cần có ít nhất 1 dòng tiêu đề và 1 dòng dữ liệu học sinh.');
-        }
-
-        // Tìm dòng tiêu đề (chứa "họ và tên" hoặc "họ tên" hoặc "stt")
-        let headerRowIdx = -1;
-        let ttColIdx = 0;
-        let nameColIdx = 1;
-        let classColIdx = 2;
-
-        for (let r = 0; r < Math.min(rawRows.length, 10); r++) {
-          const row = rawRows[r].map((cell: any) => String(cell || '').trim().toLowerCase());
-          const foundName = row.findIndex((c: string) => c.includes('họ') || c.includes('tên') || c.includes('name'));
-          const foundClass = row.findIndex((c: string) => c.includes('lớp') || c.includes('class'));
-          const foundTT = row.findIndex((c: string) => c === 'tt' || c === 'stt' || c.includes('thứ tự'));
-
-          if (foundName !== -1 && foundClass !== -1) {
-            headerRowIdx = r;
-            nameColIdx = foundName;
-            classColIdx = foundClass;
-            ttColIdx = foundTT !== -1 ? foundTT : (foundName === 0 ? 2 : 0);
-            break;
-          }
-        }
-
-        const startIdx = headerRowIdx !== -1 ? headerRowIdx + 1 : 1;
-        const extracted: StudentRecord[] = [];
-
-        for (let i = startIdx; i < rawRows.length; i++) {
-          const row = rawRows[i];
-          if (!row || row.length === 0) continue;
-
-          const rawTT = row[ttColIdx];
-          const rawName = String(row[nameColIdx] || '').trim();
-          const rawClass = String(row[classColIdx] || '').trim().toUpperCase();
-
-          // Bỏ qua dòng trống hoặc dòng lặp tiêu đề
-          if (!rawName || !rawClass) continue;
-          if (rawName.toLowerCase().includes('họ và tên') || rawName.toLowerCase().includes('họ tên')) continue;
-
-          // Chuẩn hóa tên lớp (loại bỏ từ "LỚP " nếu có: "LỚP 8A1" -> "8A1")
-          const cleanClass = rawClass.replace(/^LỚP\s+/i, '').replace(/^LOP\s+/i, '').trim();
-
-          extracted.push({
-            stt: rawTT !== undefined && rawTT !== '' ? rawTT : extracted.length + 1,
-            fullName: rawName,
-            className: cleanClass,
-          });
-        }
-
-        if (extracted.length === 0) {
-          throw new Error('Không đọc được học sinh nào từ tệp. Vui lòng kiểm tra lại 3 cột: TT, Họ và tên, Lớp.');
-        }
-
-        setParsedStudents(extracted);
-
-        // Thống kê các lớp tìm thấy
-        const detectedClasses = Array.from(new Set(extracted.map((s) => s.className)));
-        const summary = detectedClasses.map((c) => `${c} (${extracted.filter((s) => s.className === c).length} HS)`).join(', ');
-
+      // TỰ ĐỘNG LƯU TRỰC TIẾP VÀO CSDL NGAY KHI TẢI LÊN
+      const saveRes = await onSaveRoster(result.students, 'replace');
+      if (saveRes.success) {
         setParseSuccessMsg(
-          `Đã đọc thành công ${extracted.length} học sinh thuộc ${detectedClasses.length} lớp: ${summary}. Nhấn 'Lưu danh sách' bên dưới để áp dụng.`
+          `Đã tải lên & lưu thành công ${result.students.length} học sinh thuộc ${saveRes.classes.length} lớp (${saveRes.classes.join(', ')}) vào CSDL hệ thống!`
         );
-      } catch (err: any) {
-        setParseError(err.message || 'Lỗi khi xử lý tệp Excel.');
-        setParsedStudents([]);
+        setTimeout(() => {
+          setActiveTab('view');
+        }, 1200);
+      } else {
+        setParseError('Đã đọc được dữ liệu nhưng không thể lưu vào CSDL máy chủ. Vui lòng kiểm tra lại kết nối mạng.');
       }
-    };
-
-    reader.onerror = () => {
-      setParseError('Lỗi đọc tệp từ máy tính.');
-    };
-
-    reader.readAsArrayBuffer(file);
+    } catch (err: any) {
+      setParseError(err.message || 'Lỗi khi xử lý tệp Excel.');
+      setParsedStudents([]);
+    } finally {
+      setIsSaving(false);
+      if (fileInputRef.current) fileInputRef.current.value = '';
+    }
   };
 
-  // Lưu danh sách học sinh vào hệ thống
-  const handleSaveParsedStudents = async () => {
+  // Lưu thủ công nếu cần
+  const handleManualSave = async () => {
     if (parsedStudents.length === 0) return;
     setIsSaving(true);
     try {
       const res = await onSaveRoster(parsedStudents, 'replace');
       if (res.success) {
-        setParseSuccessMsg(`Đã lưu thành công ${res.total} học sinh vào hệ thống!`);
+        setParseSuccessMsg(`Đã lưu thành công ${res.total} học sinh vào CSDL hệ thống!`);
         setParsedStudents([]);
         setSelectedFile(null);
         setTimeout(() => {
@@ -255,7 +199,7 @@ export const StudentRosterModal: React.FC<StudentRosterModalProps> = ({
                 Danh Sách Học Sinh Các Lớp (Từ Excel)
               </h3>
               <p className="text-xs text-emerald-100 font-medium">
-                Tải lên tệp Excel 3 cột để học sinh chọn đúng tên trong lớp khi nộp bài
+                Tải lên tệp Excel 3 cột (TT, Họ và tên, Lớp) lưu vào CSDL hệ thống phòng máy
               </p>
             </div>
           </div>
@@ -294,7 +238,7 @@ export const StudentRosterModal: React.FC<StudentRosterModalProps> = ({
             }`}
           >
             <Users className="w-4 h-4 text-emerald-600" />
-            <span>Danh Sách Hiện Tại ({roster.length} HS)</span>
+            <span>Danh Sách Hiện Có ({roster.length} HS)</span>
           </button>
         </div>
 
@@ -320,7 +264,7 @@ export const StudentRosterModal: React.FC<StudentRosterModalProps> = ({
                 </div>
 
                 <p className="text-emerald-950 font-medium leading-relaxed">
-                  Tệp Excel chỉ cần <strong>3 cột</strong> đơn giản:
+                  Tệp Excel chỉ cần <strong>3 cột</strong> đơn giản (hỗ trợ cả file mẫu từ VnEdu / SMAS):
                 </p>
                 <div className="grid grid-cols-3 gap-2 bg-white/90 p-2.5 rounded-xl border border-emerald-200 text-center font-bold text-xs">
                   <div className="p-1.5 bg-emerald-50 rounded-lg text-emerald-800">Cột 1: <strong>TT</strong> (hoặc STT)</div>
@@ -328,7 +272,7 @@ export const StudentRosterModal: React.FC<StudentRosterModalProps> = ({
                   <div className="p-1.5 bg-emerald-50 rounded-lg text-emerald-800">Cột 3: <strong>Lớp</strong> (vd: 8A1, 9A2...)</div>
                 </div>
                 <p className="text-[11px] text-emerald-800">
-                  💡 Thầy/Cô có thể đưa nhiều lớp trong cùng một tệp hoặc mỗi lớp một tệp riêng. Hệ thống sẽ tự động phân loại theo tên lớp.
+                  💡 Hệ thống tự động nhận diện ô gộp (merged cells), tên Sheet theo lớp và tự động lưu thẳng vào CSDL.
                 </p>
               </div>
 
@@ -345,18 +289,28 @@ export const StudentRosterModal: React.FC<StudentRosterModalProps> = ({
               />
 
               <div
-                onClick={() => fileInputRef.current?.click()}
-                className="border-2 border-dashed border-emerald-300 hover:border-emerald-500 hover:bg-emerald-50/50 bg-slate-50/70 rounded-2xl p-6 flex flex-col items-center justify-center gap-2 cursor-pointer transition text-center group"
+                onClick={() => !isSaving && fileInputRef.current?.click()}
+                className={`border-2 border-dashed border-emerald-300 hover:border-emerald-500 hover:bg-emerald-50/50 bg-slate-50/70 rounded-2xl p-6 flex flex-col items-center justify-center gap-2 cursor-pointer transition text-center group ${
+                  isSaving ? 'opacity-50 cursor-wait' : ''
+                }`}
               >
                 <div className="w-12 h-12 rounded-2xl bg-emerald-100 text-emerald-700 flex items-center justify-center group-hover:scale-110 transition-transform">
-                  <FileSpreadsheet className="w-6 h-6" />
+                  {isSaving ? (
+                    <RefreshCw className="w-6 h-6 animate-spin text-emerald-700" />
+                  ) : (
+                    <FileSpreadsheet className="w-6 h-6" />
+                  )}
                 </div>
                 <div>
                   <div className="text-sm font-black text-slate-800 group-hover:text-emerald-700">
-                    {selectedFile ? selectedFile.name : 'Nháy vào đây để chọn tệp Excel danh sách học sinh'}
+                    {isSaving
+                      ? 'Đang đọc và lưu tệp vào CSDL hệ thống...'
+                      : selectedFile
+                      ? selectedFile.name
+                      : 'Nháy vào đây để chọn tệp Excel danh sách học sinh'}
                   </div>
                   <p className="text-xs text-slate-500 mt-0.5">
-                    Hỗ trợ định dạng .xlsx, .xls (chứa 3 cột TT, Họ và tên, Lớp)
+                    Hỗ trợ định dạng .xlsx, .xls • Tự động nạp vào CSDL ngay khi chọn tệp
                   </p>
                 </div>
               </div>
@@ -369,20 +323,22 @@ export const StudentRosterModal: React.FC<StudentRosterModalProps> = ({
                 </div>
               )}
 
-              {/* Thông báo thành công và xem trước */}
+              {/* Thông báo thành công */}
               {parseSuccessMsg && (
-                <div className="p-3 bg-emerald-50 border border-emerald-300 rounded-xl text-emerald-900 text-xs sm:text-sm font-semibold flex items-start gap-2 animate-in fade-in">
+                <div className="p-3 bg-emerald-50 border border-emerald-300 rounded-xl text-emerald-900 text-xs sm:text-sm font-bold flex items-start gap-2 animate-in fade-in">
                   <CheckCircle2 className="w-4 h-4 shrink-0 text-emerald-600 mt-0.5" />
                   <span>{parseSuccessMsg}</span>
                 </div>
               )}
 
-              {/* Bảng xem trước dữ liệu vừa đọc từ Excel */}
+              {/* Bảng xem trước dữ liệu vừa đọc */}
               {parsedStudents.length > 0 && (
                 <div className="space-y-2 border border-slate-200 rounded-2xl p-3 bg-slate-50/50">
                   <div className="flex items-center justify-between text-xs font-black text-slate-700 uppercase">
-                    <span>Xem trước dữ liệu ({parsedStudents.length} học sinh):</span>
-                    <span className="text-emerald-700 font-bold">Sẵn sàng lưu</span>
+                    <span>Dữ liệu đã nạp ({parsedStudents.length} học sinh):</span>
+                    <span className="text-emerald-700 font-bold flex items-center gap-1">
+                      <CheckCircle2 className="w-3.5 h-3.5" /> Đã lưu vào CSDL
+                    </span>
                   </div>
 
                   <div className="max-h-44 overflow-y-auto space-y-1 pr-1 text-xs divide-y divide-slate-100 bg-white rounded-xl border border-slate-200">
@@ -409,23 +365,12 @@ export const StudentRosterModal: React.FC<StudentRosterModalProps> = ({
                   <div className="pt-2 flex items-center justify-end gap-2">
                     <button
                       type="button"
-                      onClick={() => {
-                        setParsedStudents([]);
-                        setSelectedFile(null);
-                        setParseSuccessMsg(null);
-                      }}
-                      className="px-3 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-xs font-bold transition cursor-pointer"
-                    >
-                      Hủy tệp này
-                    </button>
-                    <button
-                      type="button"
                       disabled={isSaving}
-                      onClick={handleSaveParsedStudents}
-                      className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white rounded-xl text-xs sm:text-sm font-black transition shadow-md flex items-center gap-1.5 cursor-pointer active:scale-95"
+                      onClick={handleManualSave}
+                      className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs sm:text-sm font-black transition shadow-md flex items-center gap-1.5 cursor-pointer active:scale-95"
                     >
                       {isSaving ? <RefreshCw className="w-4 h-4 animate-spin" /> : <CheckCircle2 className="w-4 h-4" />}
-                      <span>Lưu Danh Sách Vào Hệ Thống</span>
+                      <span>Lưu Lại Vào CSDL Hệ Thống</span>
                     </button>
                   </div>
                 </div>
@@ -441,9 +386,10 @@ export const StudentRosterModal: React.FC<StudentRosterModalProps> = ({
                     type="button"
                     onClick={handleLoadDemoRoster}
                     disabled={isSaving}
-                    className="px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-bold shrink-0 transition shadow-2xs cursor-pointer"
+                    className="px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-lg font-bold shrink-0 transition shadow-2xs cursor-pointer flex items-center gap-1"
                   >
-                    Nạp DS Mẫu
+                    <Sparkles className="w-3.5 h-3.5" />
+                    <span>Nạp DS Mẫu</span>
                   </button>
                 </div>
               )}
@@ -523,7 +469,7 @@ export const StudentRosterModal: React.FC<StudentRosterModalProps> = ({
                   <button
                     type="button"
                     onClick={() => setActiveTab('upload')}
-                    className="px-3 py-1 bg-emerald-50 text-emerald-700 font-bold text-xs rounded-lg hover:bg-emerald-100"
+                    className="px-3 py-1 bg-emerald-50 text-emerald-700 font-bold text-xs rounded-lg hover:bg-emerald-100 cursor-pointer"
                   >
                     + Tải lên từ file Excel ngay
                   </button>

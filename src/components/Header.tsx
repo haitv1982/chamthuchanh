@@ -435,11 +435,11 @@ export const Header: React.FC<HeaderProps> = ({
             )}
 
             {/* Nút Danh Sách Học Sinh Các Lớp (Tải lên từ file Excel 3 cột) */}
-            {isTeacher && onOpenStudentRosterModal && (
+            {onOpenStudentRosterModal && (
               <button
                 type="button"
                 onClick={onOpenStudentRosterModal}
-                className="flex items-center gap-1.5 px-3 py-1.5 sm:py-2 rounded-xl text-xs sm:text-sm font-bold bg-emerald-500/20 hover:bg-emerald-500/35 text-emerald-200 border border-emerald-300/40 transition-all shadow-xs cursor-pointer"
+                className="flex items-center gap-1.5 px-3 py-1.5 sm:py-2 rounded-xl text-xs sm:text-sm font-bold bg-emerald-500/25 hover:bg-emerald-500/40 text-emerald-100 border border-emerald-300/40 transition-all shadow-xs cursor-pointer"
                 title="Tải lên và quản lý danh sách học sinh các lớp từ tệp Excel 3 cột (TT, Họ và tên, Lớp)"
               >
                 <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-300" />

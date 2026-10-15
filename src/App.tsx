@@ -333,6 +333,18 @@ export default function App() {
         const data = await res.json();
         resTotal = data.total;
         resClasses = data.classes || [];
+        if (Array.isArray(data.students) && data.students.length > 0) {
+          setStudentRoster(data.students);
+          try {
+            localStorage.setItem('labgrade_student_roster', JSON.stringify(data.students));
+            if (typeof BroadcastChannel !== 'undefined') {
+              const bc = new BroadcastChannel('labgrade_session_channel');
+              bc.postMessage({ type: 'ROSTER_UPDATED', students: data.students });
+              bc.close();
+            }
+          } catch {}
+          return { success: true, total: resTotal, classes: resClasses };
+        }
       }
     } catch (err) {
       console.warn('Lỗi mạng khi lưu danh sách học sinh lên máy chủ:', err);
@@ -790,6 +802,8 @@ export default function App() {
           } catch {}
         }}
         roster={studentRoster}
+        onSaveRoster={handleSaveStudentRoster}
+        onOpenStudentRosterModal={() => setIsStudentRosterModalOpen(true)}
       />
 
       {/* Student Roster Modal - Quản lý và Tải lên Danh Sách Học Sinh từ File Excel 3 Cột (Chỉ Giáo Viên) */}

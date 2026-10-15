@@ -346,9 +346,9 @@ export function getAllStudents(): StudentRecord[] {
 export function saveStudentRoster(
   records: StudentRecord[],
   mode: 'replace' | 'upsert' = 'replace'
-): { success: boolean; total: number; classes: string[] } {
+): { success: boolean; total: number; classes: string[]; students: StudentRecord[] } {
   if (!Array.isArray(records)) {
-    return { success: false, total: studentRosterState.length, classes: [] };
+    return { success: false, total: studentRosterState.length, classes: [], students: studentRosterState };
   }
 
   // Chuẩn hóa bản ghi
@@ -397,11 +397,12 @@ export function saveStudentRoster(
     success: true,
     total: studentRosterState.length,
     classes,
+    students: studentRosterState,
   };
 }
 
 // Xóa danh sách học sinh theo lớp hoặc toàn bộ
-export function deleteStudentRoster(className?: string): { success: boolean; count: number } {
+export function deleteStudentRoster(className?: string): { success: boolean; count: number; students: StudentRecord[] } {
   if (className) {
     const norm = className.trim().toUpperCase();
     studentRosterState = studentRosterState.filter((s) => s.className !== norm);
@@ -409,5 +410,5 @@ export function deleteStudentRoster(className?: string): { success: boolean; cou
     studentRosterState = [];
   }
   flushStudentRosterToDisk();
-  return { success: true, count: studentRosterState.length };
+  return { success: true, count: studentRosterState.length, students: studentRosterState };
 }
