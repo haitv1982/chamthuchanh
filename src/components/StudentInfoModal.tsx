@@ -14,6 +14,8 @@ import {
   Sparkles,
   BookOpen,
   RefreshCw,
+  Edit2,
+  Settings,
 } from 'lucide-react';
 import { SCHOOL_CLASSES, getClassesByGrade } from '../data/classes';
 import { StudentRecord } from '../types';
@@ -34,8 +36,11 @@ interface StudentInfoModalProps {
   onChangeGroupMembers: (members: string[]) => void;
   onSavedNotice?: (msg: string) => void;
   roster?: StudentRecord[];
-  onSaveRoster?: (students: StudentRecord[], mode: 'replace' | 'upsert') => Promise<{ success: boolean; total: number; classes: string[] }>;
+  onSaveRoster?: (students: StudentRecord[], mode?: 'accumulate' | 'upsert' | 'replace') => Promise<{ success: boolean; total: number; classes: string[] }>;
+  onDeleteRoster?: (className?: string) => Promise<boolean>;
+  onRenameClass?: (oldName: string, newName: string) => Promise<boolean>;
   onOpenStudentRosterModal?: () => void;
+  isTeacher?: boolean;
 }
 
 const GRADE_OPTIONS = [
@@ -58,76 +63,92 @@ export const StudentInfoModal: React.FC<StudentInfoModalProps> = ({
   onChangeStudentLeader,
   groupMembers,
   onChangeGroupMembers,
-  onSavedNotice,
   roster = [],
   onSaveRoster,
+  onDeleteRoster,
+  onRenameClass,
   onOpenStudentRosterModal,
+  isTeacher = false,
 }) => {
-  const [tempGrade, setTempGrade] = useState<string>(selectedGrade || 'Lớp 8');
-  const [tempClass, setTempClass] = useState<string>(className || '8A2');
-  const [tempMachine, setTempMachine] = useState<string>(machineNumber || 'Máy 05');
-  const [tempLeader, setTempLeader] = useState<string>(studentLeader || '');
+  const [tempGrade, setTempGrade] = useState(selectedGrade || 'Lớp 6');
+  const [tempClass, setTempClass] = useState(className || '6A2');
+  const [tempMachine, setTempMachine] = useState(machineNumber || 'Máy 01');
+  const [tempLeader, setTempLeader] = useState(studentLeader || '');
   const [tempMembers, setTempMembers] = useState<string[]>(groupMembers || []);
   const [selectedGroupMemberOption, setSelectedGroupMemberOption] = useState<string>('');
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [uploadNotice, setUploadNotice] = useState<string | null>(null);
   const [isUploading, setIsUploading] = useState<boolean>(false);
+  const [isActionLoading, setIsActionLoading] = useState<boolean>(false);
+
+  // Modal xác nhận xóa danh sách lớp này
+  const [isConfirmDeleteClassOpen, setIsConfirmDeleteClassOpen] = useState<boolean>(false);
+
+  // Modal đổi tên lớp nhanh (ví dụ sửa nhầm 6B2 thành 6A2)
+  const [isRenameClassOpen, setIsRenameClassOpen] = useState<boolean>(false);
+  const [renameInput, setRenameInput] = useState<string>('');
 
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // Sync state when modal opens
   useEffect(() => {
     if (isOpen) {
-      setTempGrade(selectedGrade || (className.startsWith('9') ? 'Lớp 9' : className.startsWith('8') ? 'Lớp 8' : className.startsWith('7') ? 'Lớp 7' : 'Lớp 6'));
-      setTempClass(className || '8A2');
-      setTempMachine(machineNumber || 'Máy 05');
+      setTempGrade(selectedGrade || 'Lớp 6');
+      setTempClass(className || '6A2');
+      setTempMachine(machineNumber || 'Máy 01');
       setTempLeader(studentLeader || '');
       setTempMembers(groupMembers || []);
       setSelectedGroupMemberOption('');
       setErrorMsg(null);
       setUploadNotice(null);
+      setIsConfirmDeleteClassOpen(false);
+      setIsRenameClassOpen(false);
     }
   }, [isOpen, selectedGrade, className, machineNumber, studentLeader, groupMembers]);
 
   if (!isOpen) return null;
 
-  // Lấy danh sách lớp tương ứng với khối đang chọn (kết hợp các lớp thực tế trong CSDL nếu có)
-  const baseClasses = getClassesByGrade(tempGrade);
-  const rosterClassesForGrade = Array.from(
-    new Set(
-      roster
-        .map((s) => s.className.toUpperCase())
-        .filter((c) => {
-          if (tempGrade === 'Lớp 6') return c.startsWith('6');
-          if (tempGrade === 'Lớp 7') return c.startsWith('7');
-          if (tempGrade === 'Lớp 8') return c.startsWith('8');
-          if (tempGrade === 'Lớp 9') return c.startsWith('9');
-          return true;
-        })
-    )
-  );
+  // Lọc danh sách lớp học sinh phù hợp với khối đã chọn
+  const defaultClasses = getClassesByGrade(tempGrade);
+  // Các lớp đã có danh sách trong hệ thống CSDL
+  const rosterClasses = Array.from(new Set(roster.map((s) => s.className)));
+  const combinedClasses = Array.from(
+    new Set([...defaultClasses, ...rosterClasses.filter((c) => {
+      if (tempGrade === 'Lớp 6') return c.startsWith('6');
+      if (tempGrade === 'Lớp 7') return c.startsWith('7');
+      if (tempGrade === 'Lớp 8') return c.startsWith('8');
+      if (tempGrade === 'Lớp 9') return c.startsWith('9');
+      return true;
+    })])
+  ).sort();
 
-  const combinedClasses = Array.from(new Set([...baseClasses, ...rosterClassesForGrade])).sort();
-
-  // Lấy danh sách học sinh thuộc lớp đang chọn (được Giáo viên tải lên từ Excel)
-  const classStudents = roster.filter(
-    (s) => s.className && s.className.trim().toUpperCase() === tempClass.trim().toUpperCase()
-  );
-
-  // Khi bấm đổi khối trong modal
+  // Đổi khối thì tự động chọn lớp đầu tiên của khối đó
   const handleGradeChange = (newGrade: string) => {
     setTempGrade(newGrade);
     const classesForNewGrade = getClassesByGrade(newGrade);
-    if (!classesForNewGrade.includes(tempClass as any)) {
-      setTempClass(classesForNewGrade[0] || '');
-    }
+    const fallbackClass = classesForNewGrade[0] || (newGrade.includes('6') ? '6A2' : newGrade.includes('7') ? '7A2' : newGrade.includes('8') ? '8A2' : '9A2');
+    setTempClass(fallbackClass);
     setTempLeader('');
     setTempMembers([]);
     setErrorMsg(null);
   };
 
-  // Xử lý tải trực tiếp tệp Excel danh sách học sinh ngay trong modal này
+  // Danh sách học sinh của lớp đang chọn (chuẩn hóa không phân biệt hoa thường và tiền tố 'Lớp')
+  const classStudents = roster
+    .filter((s) => {
+      const sCls = (s.className || '').trim().toUpperCase().replace(/^LỚP\s*|^LOP\s*/i, '');
+      const tCls = (tempClass || '').trim().toUpperCase().replace(/^LỚP\s*|^LOP\s*/i, '');
+      return sCls === tCls || (s.className || '').trim().toUpperCase() === (tempClass || '').trim().toUpperCase();
+    })
+    .sort((a, b) => {
+      const sttA = Number(a.stt) || 999;
+      const sttB = Number(b.stt) || 999;
+      if (sttA !== sttB) return sttA - sttB;
+      return a.fullName.localeCompare(b.fullName, 'vi');
+    });
+
+  // Tải lên tệp Excel danh sách học sinh trực tiếp tại modal (CHỈ GIÁO VIÊN)
   const handleUploadExcelDirect = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (!isTeacher) return;
     const file = e.target.files?.[0];
     if (!file || !onSaveRoster) return;
 
@@ -136,17 +157,22 @@ export const StudentInfoModal: React.FC<StudentInfoModalProps> = ({
     setUploadNotice(null);
 
     try {
-      const arrayBuffer = await file.arrayBuffer();
-      const result = parseStudentExcel(arrayBuffer);
+      const buffer = await file.arrayBuffer();
+      const parsed = parseStudentExcel(buffer);
 
-      const saveRes = await onSaveRoster(result.students, 'replace');
+      if (parsed.students.length === 0) {
+        throw new Error('Không đọc được học sinh nào từ tệp. Vui lòng kiểm tra định dạng 3 cột TT, Họ và tên, Lớp.');
+      }
+
+      // Lưu ngay vào CSDL hệ thống
+      const saveRes = await onSaveRoster(parsed.students, 'accumulate');
       if (saveRes.success) {
         setUploadNotice(
-          `Đã tải lên và lưu ${result.students.length} học sinh (${saveRes.classes.join(', ')}) vào CSDL hệ thống thành công!`
+          `Đã tải lên và lưu thành công ${parsed.students.length} học sinh thuộc các lớp: ${saveRes.classes.join(', ')} vào CSDL!`
         );
-
-        // Nếu lớp hiện tại nằm trong danh sách vừa tải lên, giữ nguyên; nếu không chuyển tới lớp đầu tiên
-        if (saveRes.classes.length > 0 && !saveRes.classes.includes(tempClass.toUpperCase())) {
+        if (saveRes.classes.includes(tempClass)) {
+          // Lớp hiện tại đã có học sinh
+        } else if (saveRes.classes.length > 0) {
           setTempClass(saveRes.classes[0]);
         }
       } else {
@@ -160,9 +186,9 @@ export const StudentInfoModal: React.FC<StudentInfoModalProps> = ({
     }
   };
 
-  // Nạp danh sách học sinh mẫu chuẩn để dùng ngay
+  // Nạp danh sách học sinh mẫu chuẩn để dùng ngay (CHỈ GIÁO VIÊN)
   const handleLoadDemoRoster = async () => {
-    if (!onSaveRoster) return;
+    if (!isTeacher || !onSaveRoster) return;
     setIsUploading(true);
     setErrorMsg(null);
     try {
@@ -181,12 +207,53 @@ export const StudentInfoModal: React.FC<StudentInfoModalProps> = ({
         { stt: 2, fullName: 'Đỗ Phương Linh', className: '9A1' },
         { stt: 3, fullName: 'Bùi Quốc Tuấn', className: '9A1' },
       ];
-      await onSaveRoster(demoData, 'replace');
+      await onSaveRoster(demoData, 'accumulate');
       setUploadNotice('Đã nạp 13 học sinh mẫu (8A1, 8A2, 9A1) vào CSDL hệ thống thành công!');
     } catch (err: any) {
       setErrorMsg(err.message || 'Lỗi nạp danh sách mẫu.');
     } finally {
       setIsUploading(false);
+    }
+  };
+
+  // XÓA DANH SÁCH LỚP NÀY KHỎI CSDL (CHỈ GIÁO VIÊN - Học sinh tuyệt đối không có quyền)
+  const handleExecuteDeleteCurrentClass = async () => {
+    if (!isTeacher || !onDeleteRoster || !tempClass) return;
+    setIsActionLoading(true);
+    setErrorMsg(null);
+    try {
+      await onDeleteRoster(tempClass);
+      setTempLeader('');
+      setTempMembers([]);
+      setUploadNotice(`Đã xóa vĩnh viễn toàn bộ danh sách học sinh Lớp ${tempClass} khỏi CSDL hệ thống!`);
+      setIsConfirmDeleteClassOpen(false);
+    } catch (err: any) {
+      setErrorMsg(err.message || 'Lỗi khi xóa danh sách lớp.');
+    } finally {
+      setIsActionLoading(false);
+    }
+  };
+
+  // ĐỔI TÊN LỚP NHANH TRONG CSDL (CHỈ GIÁO VIÊN)
+  const handleExecuteRenameCurrentClass = async () => {
+    if (!isTeacher || !onRenameClass || !tempClass || !renameInput.trim()) return;
+    const targetNewName = renameInput.trim().toUpperCase().replace(/^LỚP\s*|^LOP\s*/i, '');
+    if (targetNewName === tempClass.trim().toUpperCase()) {
+      setIsRenameClassOpen(false);
+      return;
+    }
+
+    setIsActionLoading(true);
+    setErrorMsg(null);
+    try {
+      await onRenameClass(tempClass, targetNewName);
+      setTempClass(targetNewName);
+      setUploadNotice(`Đã đổi tên toàn bộ ${classStudents.length} học sinh từ Lớp ${tempClass} sang Lớp ${targetNewName} trong CSDL thành công!`);
+      setIsRenameClassOpen(false);
+    } catch (err: any) {
+      setErrorMsg(err.message || 'Lỗi khi đổi tên lớp.');
+    } finally {
+      setIsActionLoading(false);
     }
   };
 
@@ -251,18 +318,14 @@ export const StudentInfoModal: React.FC<StudentInfoModalProps> = ({
       localStorage.setItem('labgrade_selected_grade', tempGrade);
     } catch {}
 
-    if (onSavedNotice) {
-      onSavedNotice(`Đã cập nhật: Lớp ${tempClass} - ${tempMachine} - ${tempLeader}`);
-    }
-
     onClose();
   };
 
   return (
     <div className="fixed inset-0 z-50 bg-slate-950/75 backdrop-blur-xs flex items-center justify-center p-3 sm:p-4 overflow-y-auto animate-in fade-in duration-200">
-      <div className="bg-white rounded-3xl max-w-xl w-full shadow-2xl border border-slate-200 overflow-hidden transform transition-all scale-100 max-h-[92vh] flex flex-col my-auto">
+      <div className="bg-white rounded-3xl max-w-xl w-full shadow-2xl border border-slate-200 overflow-hidden transform transition-all scale-100 max-h-[92vh] flex flex-col my-auto relative">
         {/* Header Modal */}
-        <div className="bg-gradient-to-r from-blue-700 via-indigo-700 to-cyan-600 px-5 sm:px-6 py-4 text-white flex items-center justify-between shrink-0 shadow-sm">
+        <div className="bg-gradient-to-r from-blue-700 via-indigo-700 to-cyan-700 px-5 sm:px-6 py-4 text-white flex items-center justify-between shrink-0 shadow-sm">
           <div className="flex items-center gap-3">
             <div className="w-10 h-10 rounded-2xl bg-white/20 backdrop-blur-md flex items-center justify-center text-white shadow-inner">
               <UserCheck className="w-5 h-5 text-cyan-200" />
@@ -334,10 +397,27 @@ export const StudentInfoModal: React.FC<StudentInfoModalProps> = ({
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
             {/* Lớp Học */}
             <div className="space-y-1.5">
-              <label className="text-xs sm:text-sm font-black uppercase tracking-wider text-slate-700 flex items-center gap-1.5">
-                <BookOpen className="w-4 h-4 text-blue-600" />
-                <span>2. Chọn Lớp Học:</span>
-              </label>
+              <div className="flex items-center justify-between">
+                <label className="text-xs sm:text-sm font-black uppercase tracking-wider text-slate-700 flex items-center gap-1.5">
+                  <BookOpen className="w-4 h-4 text-blue-600" />
+                  <span>2. Chọn Lớp Học:</span>
+                </label>
+                {isTeacher && onOpenStudentRosterModal && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      onClose();
+                      onOpenStudentRosterModal();
+                    }}
+                    className="text-[11px] font-bold text-emerald-700 hover:text-emerald-800 flex items-center gap-1 cursor-pointer"
+                    title="Mở cửa sổ Quản lý & Tải lên DS Học Sinh"
+                  >
+                    <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-600" />
+                    <span>Quản lý file Excel</span>
+                  </button>
+                )}
+              </div>
+
               <select
                 value={tempClass}
                 onChange={(e) => {
@@ -345,14 +425,18 @@ export const StudentInfoModal: React.FC<StudentInfoModalProps> = ({
                   setTempLeader('');
                   setTempMembers([]);
                   setErrorMsg(null);
+                  setUploadNotice(null);
                 }}
                 className="w-full bg-slate-50 border-2 border-slate-200 focus:border-blue-500 focus:bg-white rounded-xl px-3.5 py-2.5 text-sm sm:text-base font-bold text-slate-900 transition outline-none cursor-pointer"
               >
-                {combinedClasses.map((c) => (
-                  <option key={c} value={c}>
-                    Lớp {c} ({tempGrade})
-                  </option>
-                ))}
+                {combinedClasses.map((c) => {
+                  const count = roster.filter((s) => s.className.toUpperCase() === c.toUpperCase()).length;
+                  return (
+                    <option key={c} value={c}>
+                      Lớp {c} ({tempGrade}){count > 0 ? ` • ${count} HS trong CSDL` : ' • Chưa có DS'}
+                    </option>
+                  );
+                })}
               </select>
             </div>
 
@@ -384,18 +468,67 @@ export const StudentInfoModal: React.FC<StudentInfoModalProps> = ({
 
           {/* 3. HỌ VÀ TÊN HỌC SINH (CHỈ DẠNG LIST CHỌN ĐỂ TRÁNH NHẬP NGOÀI DANH SÁCH LỚP) */}
           <div className="space-y-2 pt-1">
-            <div className="flex items-center justify-between">
+            <div className="flex items-center justify-between flex-wrap gap-2">
               <label className="text-xs sm:text-sm font-black uppercase tracking-wider text-slate-700 flex items-center gap-1.5">
                 <UserCheck className="w-4 h-4 text-blue-600" />
                 <span>4. Họ và Tên Học Sinh (Người nộp bài):</span>
               </label>
+
               {classStudents.length > 0 && (
-                <span className="text-[11px] font-black text-emerald-700 bg-emerald-50 border border-emerald-200 px-2.5 py-0.5 rounded-md flex items-center gap-1">
+                <span className="text-[11px] font-black text-emerald-800 bg-emerald-50 border border-emerald-200 px-2.5 py-0.5 rounded-md flex items-center gap-1">
                   <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
                   DS Lớp {tempClass} ({classStudents.length} HS)
                 </span>
               )}
             </div>
+
+            {/* Thanh công cụ quản lý nhanh CHỈ DÀNH CHO GIÁO VIÊN (Học sinh tuyệt đối KHÔNG có quyền xóa hay sửa CSDL lớp) */}
+            {isTeacher && classStudents.length > 0 && (
+              <div className="flex items-center justify-between flex-wrap gap-2 p-2.5 bg-emerald-50/80 border border-emerald-300 rounded-xl text-xs">
+                <div className="text-emerald-950 font-bold flex items-center gap-1.5">
+                  <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+                  <span>CSDL Lớp {tempClass} đã kết nối ({classStudents.length} học sinh)</span>
+                </div>
+
+                <div className="flex items-center gap-1.5 flex-wrap">
+                  {onRenameClass && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const suggested = tempClass.startsWith('6B')
+                          ? tempClass.replace('6B', '6A')
+                          : tempClass.startsWith('7B')
+                          ? tempClass.replace('7B', '7A')
+                          : tempClass.startsWith('8B')
+                          ? tempClass.replace('8B', '8A')
+                          : tempClass.startsWith('9B')
+                          ? tempClass.replace('9B', '9A')
+                          : tempClass;
+                        setRenameInput(suggested);
+                        setIsRenameClassOpen(true);
+                      }}
+                      className="px-2.5 py-1 bg-white hover:bg-blue-50 text-blue-700 font-bold rounded-lg border border-blue-200 shadow-2xs flex items-center gap-1 transition cursor-pointer"
+                      title={`Đổi tên Lớp ${tempClass} (ví dụ sửa nhầm 6B2 thành 6A2)`}
+                    >
+                      <Edit2 className="w-3 h-3 text-blue-600" />
+                      <span>Sửa tên lớp</span>
+                    </button>
+                  )}
+
+                  {onDeleteRoster && (
+                    <button
+                      type="button"
+                      onClick={() => setIsConfirmDeleteClassOpen(true)}
+                      className="px-2.5 py-1 bg-white hover:bg-rose-50 text-rose-700 font-bold rounded-lg border border-rose-200 shadow-2xs flex items-center gap-1 transition cursor-pointer"
+                      title={`Xóa danh sách Lớp ${tempClass} khỏi CSDL`}
+                    >
+                      <Trash2 className="w-3 h-3 text-rose-600" />
+                      <span>Xóa DS lớp {tempClass}</span>
+                    </button>
+                  )}
+                </div>
+              </div>
+            )}
 
             {/* Dropdown danh sách học sinh */}
             <select
@@ -421,80 +554,80 @@ export const StudentInfoModal: React.FC<StudentInfoModalProps> = ({
                 </>
               ) : (
                 <option value="">
-                  -- Chưa có danh sách học sinh lớp {tempClass} (Tải file Excel để chọn tên) --
+                  -- Chưa có danh sách học sinh lớp {tempClass} --
                 </option>
               )}
             </select>
 
-            {/* Khu vực nạp tệp Excel nhanh cho Giáo viên nếu lớp chưa có danh sách */}
+            {/* Khu vực nạp tệp Excel (chỉ Giáo viên) hoặc thông báo nhắc nhở (đối với Học sinh) */}
             {classStudents.length === 0 && (
-              <div className="p-3 bg-slate-50 border border-slate-200 rounded-2xl space-y-2">
-                <div className="flex items-center justify-between flex-wrap gap-2 text-xs">
-                  <span className="font-bold text-slate-700 flex items-center gap-1">
-                    <FileSpreadsheet className="w-4 h-4 text-emerald-600" />
-                    <span>Lớp {tempClass} chưa có danh sách trong hệ thống:</span>
-                  </span>
-                  <div className="flex items-center gap-1.5 flex-wrap">
-                    <input
-                      type="file"
-                      ref={fileInputRef}
-                      accept=".xlsx,.xls,.csv"
-                      className="hidden"
-                      onChange={handleUploadExcelDirect}
-                    />
-                    <button
-                      type="button"
-                      disabled={isUploading}
-                      onClick={() => fileInputRef.current?.click()}
-                      className="px-2.5 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg font-bold text-xs flex items-center gap-1 transition shadow-xs cursor-pointer active:scale-95"
-                    >
-                      {isUploading ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <UploadCloud className="w-3.5 h-3.5" />}
-                      <span>Tải Excel (3 Cột)</span>
-                    </button>
-                    <button
-                      type="button"
-                      disabled={isUploading}
-                      onClick={handleLoadDemoRoster}
-                      className="px-2.5 py-1.5 bg-blue-50 hover:bg-blue-100 text-blue-700 border border-blue-200 rounded-lg font-bold text-xs flex items-center gap-1 transition cursor-pointer"
-                    >
-                      <Sparkles className="w-3.5 h-3.5 text-blue-600" />
-                      <span>Nạp DS Mẫu</span>
-                    </button>
-                    {onOpenStudentRosterModal && (
+              isTeacher ? (
+                <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-2xl space-y-2.5">
+                  <div className="flex items-center justify-between flex-wrap gap-2 text-xs">
+                    <span className="font-bold text-slate-700 flex items-center gap-1">
+                      <FileSpreadsheet className="w-4 h-4 text-emerald-600" />
+                      <span>Lớp {tempClass} chưa có danh sách trong hệ thống:</span>
+                    </span>
+                    <div className="flex items-center gap-1.5 flex-wrap">
+                      <input
+                        type="file"
+                        ref={fileInputRef}
+                        accept=".xlsx,.xls,.csv"
+                        className="hidden"
+                        onChange={handleUploadExcelDirect}
+                      />
                       <button
                         type="button"
-                        onClick={onOpenStudentRosterModal}
-                        className="px-2.5 py-1.5 bg-slate-200 hover:bg-slate-300 text-slate-700 rounded-lg font-bold text-xs transition cursor-pointer"
+                        disabled={isUploading}
+                        onClick={() => fileInputRef.current?.click()}
+                        className="px-2.5 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg font-bold text-xs flex items-center gap-1 transition shadow-xs cursor-pointer active:scale-95"
                       >
-                        Quản lý DS
+                        {isUploading ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <UploadCloud className="w-3.5 h-3.5" />}
+                        <span>Tải Excel (3 Cột)</span>
                       </button>
-                    )}
+                      <button
+                        type="button"
+                        disabled={isUploading}
+                        onClick={handleLoadDemoRoster}
+                        className="px-2.5 py-1.5 bg-blue-50 hover:bg-blue-100 text-blue-700 border border-blue-200 rounded-lg font-bold text-xs flex items-center gap-1 transition cursor-pointer"
+                      >
+                        <Sparkles className="w-3.5 h-3.5 text-blue-600" />
+                        <span>Nạp DS Mẫu</span>
+                      </button>
+                    </div>
                   </div>
+                  <p className="text-[11px] text-slate-500 leading-relaxed">
+                    💡 Thầy/Cô chỉ cần tải file Excel gồm 3 cột (TT, Họ và tên, Lớp). Mỗi lớp sẽ tự động lưu vào CSDL riêng, không bị ghi đè.
+                  </p>
                 </div>
-                <p className="text-[11px] text-slate-500">
-                  💡 Tệp Excel 3 cột: <strong>TT</strong>, <strong>Họ và tên</strong>, <strong>Lớp</strong> (hỗ trợ tệp gộp hoặc riêng từng lớp).
-                </p>
-              </div>
+              ) : (
+                <div className="p-3 bg-amber-50/80 border border-amber-200 rounded-xl text-xs text-amber-900 font-medium flex items-center gap-2">
+                  <AlertCircle className="w-4 h-4 text-amber-600 shrink-0" />
+                  <span>Lớp {tempClass} chưa có danh sách học sinh. Em hãy báo Thầy/Cô nạp danh sách vào hệ thống nhé!</span>
+                </div>
+              )
             )}
           </div>
 
-          {/* 4. BẠN CÙNG NHÓM (DẠNG LIST CHỌN TRONG LỚP) */}
-          <div className="pt-2 border-t border-slate-100 space-y-2">
+          {/* 4. CHỌN BẠN CÙNG NHÓM (CHỈ CHỌN TỪ DANH SÁCH LỚP) */}
+          <div className="space-y-2 pt-1 border-t border-slate-100">
             <div className="flex items-center justify-between">
               <label className="text-xs sm:text-sm font-black uppercase tracking-wider text-slate-700 flex items-center gap-1.5">
                 <Users className="w-4 h-4 text-blue-600" />
-                <span>5. Bạn Cùng Nhóm (nếu làm 2 - 3 bạn/máy):</span>
+                <span>5. Bạn Cùng Nhóm (Nếu làm nhóm):</span>
               </label>
-              <span className="text-[11px] text-slate-500 font-medium">Làm 1 mình: để trống</span>
+              <span className="text-xs text-slate-400 font-medium">
+                {tempMembers.length > 0 ? `${tempMembers.length} thành viên` : 'Tùy chọn'}
+              </span>
             </div>
 
-            {/* DẠNG LIST CHỌN BẠN CÙNG NHÓM TRONG LỚP */}
-            <div className="flex gap-2">
+            {/* Chọn thành viên nhóm từ Dropdown danh sách lớp */}
+            <div className="flex items-center gap-2">
               <select
                 value={selectedGroupMemberOption}
                 onChange={(e) => setSelectedGroupMemberOption(e.target.value)}
                 disabled={classStudents.length === 0}
-                className="flex-1 bg-slate-50 border border-slate-200 focus:border-blue-500 focus:bg-white rounded-xl px-3 py-2 text-xs sm:text-sm font-bold text-slate-900 outline-none cursor-pointer disabled:opacity-60"
+                className="flex-1 bg-slate-50 border-2 border-slate-200 focus:border-blue-500 focus:bg-white rounded-xl px-3 py-2 text-xs sm:text-sm font-bold text-slate-900 transition outline-none disabled:opacity-50 cursor-pointer"
               >
                 <option value="">
                   {classStudents.length > 0
@@ -561,6 +694,105 @@ export const StudentInfoModal: React.FC<StudentInfoModalProps> = ({
             </button>
           </div>
         </form>
+
+        {/* MODAL XÁC NHẬN XÓA LỚP HIỆN TẠI NGAY TẠI GIAO DIỆN NHẬP THÔNG TIN (CHỈ GIÁO VIÊN) */}
+        {isTeacher && isConfirmDeleteClassOpen && (
+          <div className="fixed inset-0 z-60 bg-slate-950/70 backdrop-blur-xs flex items-center justify-center p-4 animate-in fade-in duration-150">
+            <div className="bg-white rounded-3xl max-w-sm w-full p-5 shadow-2xl border border-slate-200 space-y-4">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-2xl bg-rose-100 text-rose-700 flex items-center justify-center shrink-0">
+                  <Trash2 className="w-5 h-5" />
+                </div>
+                <div>
+                  <h4 className="font-black text-slate-900 text-base">Xóa CSDL Lớp {tempClass}</h4>
+                  <p className="text-xs text-slate-500 font-medium">
+                    Kết nối trực tiếp CSDL hệ thống
+                  </p>
+                </div>
+              </div>
+
+              <p className="text-xs text-slate-600 leading-relaxed font-medium">
+                Thầy/Cô có chắc chắn muốn xóa toàn bộ <strong>{classStudents.length} học sinh</strong> của Lớp <strong>{tempClass}</strong> khỏi CSDL phòng máy không? Danh sách các lớp khác vẫn được giữ nguyên vẹn.
+              </p>
+
+              <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-100">
+                <button
+                  type="button"
+                  disabled={isActionLoading}
+                  onClick={() => setIsConfirmDeleteClassOpen(false)}
+                  className="px-3.5 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold rounded-xl text-xs transition cursor-pointer"
+                >
+                  Hủy bỏ
+                </button>
+                <button
+                  type="button"
+                  disabled={isActionLoading}
+                  onClick={handleExecuteDeleteCurrentClass}
+                  className="px-4 py-2 bg-rose-600 hover:bg-rose-700 text-white font-black rounded-xl text-xs flex items-center gap-1.5 transition shadow-sm cursor-pointer"
+                >
+                  {isActionLoading ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Trash2 className="w-3.5 h-3.5" />}
+                  <span>Xóa Ngay Khỏi CSDL</span>
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* MODAL ĐỔI TÊN LỚP (CHỈ GIÁO VIÊN) */}
+        {isTeacher && isRenameClassOpen && (
+          <div className="fixed inset-0 z-60 bg-slate-950/70 backdrop-blur-xs flex items-center justify-center p-4 animate-in fade-in duration-150">
+            <div className="bg-white rounded-3xl max-w-sm w-full p-5 shadow-2xl border border-slate-200 space-y-4">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-2xl bg-blue-100 text-blue-700 flex items-center justify-center shrink-0">
+                  <Edit2 className="w-5 h-5" />
+                </div>
+                <div>
+                  <h4 className="font-black text-slate-900 text-base">Đổi Tên Lớp Trong CSDL</h4>
+                  <p className="text-xs text-slate-500 font-medium">
+                    Lớp {tempClass} ({classStudents.length} học sinh)
+                  </p>
+                </div>
+              </div>
+
+              <div className="space-y-1.5">
+                <label className="text-xs font-bold text-slate-700">
+                  Tên lớp chính xác (ví dụ đổi {tempClass} thành 6A2):
+                </label>
+                <input
+                  type="text"
+                  autoFocus
+                  value={renameInput}
+                  onChange={(e) => setRenameInput(e.target.value.toUpperCase())}
+                  placeholder="Nhập tên lớp đúng (vd: 6A2)..."
+                  className="w-full bg-slate-50 border-2 border-slate-300 focus:border-blue-500 focus:bg-white rounded-xl px-3 py-2 text-sm font-black text-slate-900 outline-none uppercase"
+                />
+                <p className="text-[11px] text-slate-500">
+                  💡 Toàn bộ {classStudents.length} học sinh của Lớp {tempClass} sẽ được chuyển ngay sang tên lớp mới trong CSDL phòng máy.
+                </p>
+              </div>
+
+              <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-100">
+                <button
+                  type="button"
+                  disabled={isActionLoading}
+                  onClick={() => setIsRenameClassOpen(false)}
+                  className="px-3.5 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold rounded-xl text-xs transition cursor-pointer"
+                >
+                  Hủy bỏ
+                </button>
+                <button
+                  type="button"
+                  disabled={isActionLoading || !renameInput.trim()}
+                  onClick={handleExecuteRenameCurrentClass}
+                  className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white font-black rounded-xl text-xs flex items-center gap-1.5 transition shadow-sm cursor-pointer disabled:opacity-50"
+                >
+                  {isActionLoading ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <CheckCircle2 className="w-3.5 h-3.5" />}
+                  <span>Đổi Tên Ngay</span>
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );

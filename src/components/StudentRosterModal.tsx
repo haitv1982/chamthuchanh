@@ -12,6 +12,8 @@ import {
   Sparkles,
   RefreshCw,
   Info,
+  Edit2,
+  FolderOpen,
 } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import { StudentRecord } from '../types';
@@ -21,8 +23,9 @@ interface StudentRosterModalProps {
   isOpen: boolean;
   onClose: () => void;
   roster: StudentRecord[];
-  onSaveRoster: (students: StudentRecord[], mode: 'replace' | 'upsert') => Promise<{ success: boolean; total: number; classes: string[] }>;
+  onSaveRoster: (students: StudentRecord[], mode?: 'accumulate' | 'upsert' | 'replace') => Promise<{ success: boolean; total: number; classes: string[] }>;
   onDeleteRoster: (className?: string) => Promise<boolean>;
+  onRenameClass?: (oldName: string, newName: string) => Promise<boolean>;
 }
 
 export const StudentRosterModal: React.FC<StudentRosterModalProps> = ({
@@ -31,15 +34,24 @@ export const StudentRosterModal: React.FC<StudentRosterModalProps> = ({
   roster,
   onSaveRoster,
   onDeleteRoster,
+  onRenameClass,
 }) => {
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [parsedStudents, setParsedStudents] = useState<StudentRecord[]>([]);
   const [parseError, setParseError] = useState<string | null>(null);
   const [parseSuccessMsg, setParseSuccessMsg] = useState<string | null>(null);
   const [isSaving, setIsSaving] = useState(false);
+  const [isDeleting, setIsDeleting] = useState(false);
   const [activeTab, setActiveTab] = useState<'upload' | 'view'>(roster.length > 0 ? 'view' : 'upload');
   const [viewClassFilter, setViewClassFilter] = useState<string>('all');
   const [viewSearchTerm, setViewSearchTerm] = useState<string>('');
+
+  // Trạng thái modal xác nhận xóa (không dùng window.confirm để tránh lỗi chặn trong iframe)
+  const [confirmDeleteTarget, setConfirmDeleteTarget] = useState<string | null>(null);
+
+  // Trạng thái modal đổi tên lớp nhanh (ví dụ đổi 6B2 thành 6A2 trong 1 giây)
+  const [renameTargetClass, setRenameTargetClass] = useState<string | null>(null);
+  const [newClassNameInput, setNewClassNameInput] = useState<string>('');
 
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -107,7 +119,7 @@ export const StudentRosterModal: React.FC<StudentRosterModalProps> = ({
     setIsSaving(true);
     setParseError(null);
     try {
-      const res = await onSaveRoster(demoData, 'replace');
+      const res = await onSaveRoster(demoData, 'accumulate');
       setParseSuccessMsg(`Đã nạp ${res.total} học sinh mẫu (8A1, 8A2, 9A1) vào CSDL hệ thống thành công!`);
       setActiveTab('view');
     } catch (err: any) {
@@ -131,8 +143,8 @@ export const StudentRosterModal: React.FC<StudentRosterModalProps> = ({
       const result = parseStudentExcel(buffer);
       setParsedStudents(result.students);
 
-      // TỰ ĐỘNG LƯU TRỰC TIẾP VÀO CSDL NGAY KHI TẢI LÊN
-      const saveRes = await onSaveRoster(result.students, 'replace');
+      // TỰ ĐỘNG LƯU TRỰC TIẾP VÀO CSDL NGAY KHI TẢI LÊN (TÍCH LŨY THÊM VÀO, KHÔNG ĐÈ MẤT LỚP CŨ)
+      const saveRes = await onSaveRoster(result.students, 'accumulate');
       if (saveRes.success) {
         setParseSuccessMsg(
           `Đã tải lên & lưu thành công ${result.students.length} học sinh thuộc ${saveRes.classes.length} lớp (${saveRes.classes.join(', ')}) vào CSDL hệ thống!`
@@ -152,24 +164,69 @@ export const StudentRosterModal: React.FC<StudentRosterModalProps> = ({
     }
   };
 
-  // Lưu thủ công nếu cần
-  const handleManualSave = async () => {
-    if (parsedStudents.length === 0) return;
-    setIsSaving(true);
+  // Thực hiện XÓA LỚP hoặc XÓA TOÀN BỘ (kết nối trực tiếp máy chủ CSDL, không dùng window.confirm)
+  const handleExecuteDelete = async () => {
+    if (!confirmDeleteTarget) return;
+    setIsDeleting(true);
+    setParseError(null);
+
+    const targetClass = confirmDeleteTarget === 'all' ? undefined : confirmDeleteTarget;
+
     try {
-      const res = await onSaveRoster(parsedStudents, 'replace');
-      if (res.success) {
-        setParseSuccessMsg(`Đã lưu thành công ${res.total} học sinh vào CSDL hệ thống!`);
-        setParsedStudents([]);
-        setSelectedFile(null);
-        setTimeout(() => {
-          setActiveTab('view');
-        }, 800);
-      } else {
-        setParseError('Có lỗi xảy ra khi lưu vào máy chủ.');
+      await onDeleteRoster(targetClass);
+
+      setParseSuccessMsg(
+        confirmDeleteTarget === 'all'
+          ? 'Đã xóa toàn bộ danh sách học sinh của tất cả các lớp khỏi CSDL hệ thống!'
+          : `Đã xóa thành công toàn bộ danh sách Lớp ${confirmDeleteTarget} khỏi CSDL hệ thống!`
+      );
+
+      if (viewClassFilter === confirmDeleteTarget || confirmDeleteTarget === 'all') {
+        setViewClassFilter('all');
       }
+
+      setConfirmDeleteTarget(null);
     } catch (err: any) {
-      setParseError(err.message || 'Lỗi lưu danh sách.');
+      setParseError(err.message || 'Lỗi khi xóa danh sách khỏi CSDL.');
+    } finally {
+      setIsDeleting(false);
+    }
+  };
+
+  // Thực hiện ĐỔI TÊN LỚP NHANH (ví dụ đổi 6B2 thành 6A2 mà không cần xóa rồi tải lại)
+  const handleExecuteRename = async () => {
+    if (!renameTargetClass || !newClassNameInput.trim()) return;
+    const newName = newClassNameInput.trim().toUpperCase().replace(/^LỚP\s*|^LOP\s*/i, '');
+
+    if (newName === renameTargetClass.toUpperCase()) {
+      setRenameTargetClass(null);
+      return;
+    }
+
+    setIsSaving(true);
+    setParseError(null);
+
+    try {
+      if (onRenameClass) {
+        await onRenameClass(renameTargetClass, newName);
+      } else {
+        const studentsToRename = roster
+          .filter((s) => s.className.toUpperCase() === renameTargetClass.toUpperCase())
+          .map((s) => ({ ...s, className: newName }));
+
+        if (studentsToRename.length === 0) {
+          throw new Error(`Không tìm thấy học sinh nào trong Lớp ${renameTargetClass}`);
+        }
+
+        await onSaveRoster(studentsToRename, 'accumulate');
+        await onDeleteRoster(renameTargetClass);
+      }
+
+      setParseSuccessMsg(`Đã đổi tên toàn bộ học sinh từ Lớp ${renameTargetClass} sang Lớp ${newName} trong CSDL thành công!`);
+      setViewClassFilter(newName);
+      setRenameTargetClass(null);
+    } catch (err: any) {
+      setParseError(err.message || 'Lỗi khi đổi tên lớp.');
     } finally {
       setIsSaving(false);
     }
@@ -185,9 +242,102 @@ export const StudentRosterModal: React.FC<StudentRosterModalProps> = ({
     return true;
   });
 
+  // Render thẻ danh sách lớp cho cả 2 tab (đặc biệt hỗ trợ xóa nhanh lớp tải nhầm như 6B2)
+  const renderClassCards = () => (
+    <div className="p-3.5 bg-emerald-50/70 border border-emerald-200 rounded-2xl space-y-2.5">
+      <div className="flex items-center justify-between text-xs flex-wrap gap-1">
+        <span className="font-bold text-emerald-950 flex items-center gap-1.5">
+          <FileSpreadsheet className="w-4 h-4 text-emerald-700" />
+          <span>CSDL Từng Lớp Hiện Có ({existingClasses.length} lớp • {roster.length} HS):</span>
+        </span>
+        <span className="text-[11px] text-emerald-800 font-medium">
+          Bấm nút <strong>Xóa lớp này</strong> để xóa lớp tải nhầm (như 6B2)
+        </span>
+      </div>
+
+      <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2.5">
+        {existingClasses.map((cls) => {
+          const isSelected = viewClassFilter === cls;
+          return (
+            <div
+              key={cls}
+              className={`p-3 rounded-2xl border transition-all flex flex-col justify-between gap-2 shadow-2xs ${
+                isSelected
+                  ? 'bg-emerald-700 text-white border-emerald-700 ring-2 ring-emerald-300'
+                  : 'bg-white hover:bg-emerald-50/70 text-slate-800 border-slate-200'
+              }`}
+            >
+              <div
+                onClick={() => {
+                  setViewClassFilter(isSelected ? 'all' : cls);
+                  setActiveTab('view');
+                }}
+                className="cursor-pointer"
+              >
+                <div className="flex items-center justify-between">
+                  <span className={`font-black text-sm ${isSelected ? 'text-white' : 'text-slate-900'}`}>
+                    Lớp {cls}
+                  </span>
+                  <span
+                    className={`text-[11px] px-2 py-0.5 rounded-full font-black ${
+                      isSelected ? 'bg-white/20 text-white' : 'bg-emerald-100 text-emerald-800'
+                    }`}
+                  >
+                    {classCounts[cls]} HS
+                  </span>
+                </div>
+                <div className={`text-[10px] mt-0.5 truncate ${isSelected ? 'text-emerald-100' : 'text-slate-400'}`}>
+                  📁 CSDL: roster_{cls}.json
+                </div>
+              </div>
+
+              {/* 2 Nút thao tác cực kỳ thuận tiện: Đổi tên lớp & Xóa riêng lớp này */}
+              <div className={`flex items-center gap-1.5 pt-2 border-t ${isSelected ? 'border-white/20' : 'border-slate-100'}`}>
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setRenameTargetClass(cls);
+                    setNewClassNameInput(cls.startsWith('6B') ? cls.replace('6B', '6A') : cls.startsWith('7B') ? cls.replace('7B', '7A') : cls.startsWith('8B') ? cls.replace('8B', '8A') : cls.startsWith('9B') ? cls.replace('9B', '9A') : cls);
+                  }}
+                  className={`text-[11px] font-bold px-2 py-1 rounded-lg flex items-center gap-1 transition cursor-pointer ${
+                    isSelected
+                      ? 'bg-white/20 hover:bg-white/30 text-white'
+                      : 'bg-slate-100 hover:bg-blue-50 text-blue-700'
+                  }`}
+                  title={`Đổi tên lớp ${cls} thành tên khác (ví dụ sửa nhầm 6B2 thành 6A2)`}
+                >
+                  <Edit2 className="w-3 h-3" />
+                  <span>Sửa tên</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setConfirmDeleteTarget(cls);
+                  }}
+                  className={`text-[11px] font-bold px-2 py-1 rounded-lg flex items-center gap-1 transition cursor-pointer ml-auto ${
+                    isSelected
+                      ? 'bg-rose-500 hover:bg-rose-600 text-white'
+                      : 'bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200'
+                  }`}
+                  title={`Xóa hoàn toàn danh sách của Lớp ${cls} khỏi CSDL`}
+                >
+                  <Trash2 className="w-3 h-3" />
+                  <span>Xóa lớp này</span>
+                </button>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+
   return (
     <div className="fixed inset-0 z-50 bg-slate-950/75 backdrop-blur-xs flex items-center justify-center p-3 sm:p-4 overflow-y-auto animate-in fade-in duration-200">
-      <div className="bg-white rounded-3xl max-w-2xl w-full shadow-2xl border border-slate-200 overflow-hidden transform transition-all scale-100 max-h-[92vh] flex flex-col my-auto">
+      <div className="bg-white rounded-3xl max-w-2xl w-full shadow-2xl border border-slate-200 overflow-hidden transform transition-all scale-100 max-h-[92vh] flex flex-col my-auto relative">
         {/* Header Modal */}
         <div className="bg-gradient-to-r from-emerald-700 via-teal-700 to-cyan-700 px-5 sm:px-6 py-4 text-white flex items-center justify-between shrink-0 shadow-sm">
           <div className="flex items-center gap-3">
@@ -196,10 +346,10 @@ export const StudentRosterModal: React.FC<StudentRosterModalProps> = ({
             </div>
             <div>
               <h3 className="font-black text-lg sm:text-xl leading-tight">
-                Danh Sách Học Sinh Các Lớp (Từ Excel)
+                Danh Sách Học Sinh Các Lớp (File Excel)
               </h3>
               <p className="text-xs text-emerald-100 font-medium">
-                Tải lên tệp Excel 3 cột (TT, Họ và tên, Lớp) lưu vào CSDL hệ thống phòng máy
+                Quản lý CSDL danh sách học sinh • Lưu trữ riêng từng lớp • Thao tác xóa & sửa tên thuận tiện
               </p>
             </div>
           </div>
@@ -213,34 +363,55 @@ export const StudentRosterModal: React.FC<StudentRosterModalProps> = ({
           </button>
         </div>
 
-        {/* Tab chuyển đổi */}
-        <div className="flex items-center border-b border-slate-200 bg-slate-50/90 px-5 pt-2 gap-2 shrink-0">
+        {/* Tab Navigation */}
+        <div className="px-5 sm:px-6 pt-3 border-b border-slate-200 flex items-center gap-2 bg-slate-50/80">
           <button
             type="button"
-            onClick={() => setActiveTab('upload')}
-            className={`py-2 px-3.5 rounded-t-xl font-bold text-xs sm:text-sm flex items-center gap-1.5 transition-all cursor-pointer border-b-2 ${
+            onClick={() => {
+              setActiveTab('upload');
+              setParseError(null);
+            }}
+            className={`px-4 py-2 font-black text-xs sm:text-sm border-b-2 transition flex items-center gap-1.5 cursor-pointer ${
               activeTab === 'upload'
-                ? 'bg-white text-emerald-700 border-emerald-600 shadow-2xs font-black'
-                : 'text-slate-600 border-transparent hover:text-slate-900'
+                ? 'border-emerald-600 text-emerald-700'
+                : 'border-transparent text-slate-500 hover:text-slate-800'
             }`}
           >
-            <UploadCloud className="w-4 h-4 text-emerald-600" />
+            <UploadCloud className="w-4 h-4" />
             <span>Tải Lên File Excel</span>
           </button>
 
           <button
             type="button"
-            onClick={() => setActiveTab('view')}
-            className={`py-2 px-3.5 rounded-t-xl font-bold text-xs sm:text-sm flex items-center gap-1.5 transition-all cursor-pointer border-b-2 ${
+            onClick={() => {
+              setActiveTab('view');
+              setParseError(null);
+            }}
+            className={`px-4 py-2 font-black text-xs sm:text-sm border-b-2 transition flex items-center gap-1.5 cursor-pointer ${
               activeTab === 'view'
-                ? 'bg-white text-emerald-700 border-emerald-600 shadow-2xs font-black'
-                : 'text-slate-600 border-transparent hover:text-slate-900'
+                ? 'border-emerald-600 text-emerald-700'
+                : 'border-transparent text-slate-500 hover:text-slate-800'
             }`}
           >
-            <Users className="w-4 h-4 text-emerald-600" />
-            <span>Danh Sách Hiện Có ({roster.length} HS)</span>
+            <Users className="w-4 h-4" />
+            <span>CSDL Học Sinh Hiện Có ({roster.length} HS • {existingClasses.length} Lớp)</span>
           </button>
         </div>
+
+        {/* Alert / Notifications */}
+        {parseError && (
+          <div className="mx-5 mt-4 p-3 bg-rose-50 border border-rose-300 rounded-xl text-rose-800 text-xs sm:text-sm font-bold flex items-start gap-2 animate-in fade-in">
+            <AlertCircle className="w-4 h-4 shrink-0 text-rose-600 mt-0.5" />
+            <span>{parseError}</span>
+          </div>
+        )}
+
+        {parseSuccessMsg && (
+          <div className="mx-5 mt-4 p-3 bg-emerald-50 border border-emerald-300 rounded-xl text-emerald-900 text-xs sm:text-sm font-bold flex items-start gap-2 animate-in fade-in">
+            <CheckCircle2 className="w-4 h-4 shrink-0 text-emerald-600 mt-0.5" />
+            <span>{parseSuccessMsg}</span>
+          </div>
+        )}
 
         {/* Body Content */}
         <div className="p-5 sm:p-6 overflow-y-auto flex-1 space-y-4 text-slate-800">
@@ -269,11 +440,18 @@ export const StudentRosterModal: React.FC<StudentRosterModalProps> = ({
                 <div className="grid grid-cols-3 gap-2 bg-white/90 p-2.5 rounded-xl border border-emerald-200 text-center font-bold text-xs">
                   <div className="p-1.5 bg-emerald-50 rounded-lg text-emerald-800">Cột 1: <strong>TT</strong> (hoặc STT)</div>
                   <div className="p-1.5 bg-emerald-50 rounded-lg text-emerald-800">Cột 2: <strong>Họ và tên</strong></div>
-                  <div className="p-1.5 bg-emerald-50 rounded-lg text-emerald-800">Cột 3: <strong>Lớp</strong> (vd: 8A1, 9A2...)</div>
+                  <div className="p-1.5 bg-emerald-50 rounded-lg text-emerald-800">Cột 3: <strong>Lớp</strong> (vd: 6A2, 8A1, 9A2...)</div>
                 </div>
-                <p className="text-[11px] text-emerald-800">
-                  💡 Hệ thống tự động nhận diện ô gộp (merged cells), tên Sheet theo lớp và tự động lưu thẳng vào CSDL.
-                </p>
+
+                <div className="p-2.5 bg-white/95 rounded-xl border border-emerald-300 text-xs text-emerald-950 font-semibold space-y-1">
+                  <div className="flex items-center gap-1.5 font-bold text-emerald-800">
+                    <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+                    <span>Cơ chế CSDL riêng biệt: Lớp sau KHÔNG BAO GIỜ đè lên lớp trước!</span>
+                  </div>
+                  <p className="text-[11px] text-emerald-900 leading-relaxed font-normal">
+                    Thầy/Cô có thể tải lên lần lượt từng lớp. Mỗi lớp được hệ thống tự động lưu vào <strong>phân vùng CSDL riêng biệt</strong>, danh sách các lớp đã nạp trước đó được giữ nguyên 100%.
+                  </p>
+                </div>
               </div>
 
               {/* Vùng tải tệp Excel */}
@@ -315,21 +493,8 @@ export const StudentRosterModal: React.FC<StudentRosterModalProps> = ({
                 </div>
               </div>
 
-              {/* Thông báo lỗi nếu có */}
-              {parseError && (
-                <div className="p-3 bg-rose-50 border border-rose-300 rounded-xl text-rose-800 text-xs sm:text-sm font-bold flex items-start gap-2 animate-in fade-in">
-                  <AlertCircle className="w-4 h-4 shrink-0 text-rose-600 mt-0.5" />
-                  <span>{parseError}</span>
-                </div>
-              )}
-
-              {/* Thông báo thành công */}
-              {parseSuccessMsg && (
-                <div className="p-3 bg-emerald-50 border border-emerald-300 rounded-xl text-emerald-900 text-xs sm:text-sm font-bold flex items-start gap-2 animate-in fade-in">
-                  <CheckCircle2 className="w-4 h-4 shrink-0 text-emerald-600 mt-0.5" />
-                  <span>{parseSuccessMsg}</span>
-                </div>
-              )}
+              {/* Danh sách các lớp hiện có trong CSDL hiển thị trực tiếp ngay dưới ô tải file để xem và xóa tiện lợi */}
+              {existingClasses.length > 0 && renderClassCards()}
 
               {/* Bảng xem trước dữ liệu vừa đọc */}
               {parsedStudents.length > 0 && (
@@ -361,18 +526,6 @@ export const StudentRosterModal: React.FC<StudentRosterModalProps> = ({
                       </div>
                     )}
                   </div>
-
-                  <div className="pt-2 flex items-center justify-end gap-2">
-                    <button
-                      type="button"
-                      disabled={isSaving}
-                      onClick={handleManualSave}
-                      className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs sm:text-sm font-black transition shadow-md flex items-center gap-1.5 cursor-pointer active:scale-95"
-                    >
-                      {isSaving ? <RefreshCw className="w-4 h-4 animate-spin" /> : <CheckCircle2 className="w-4 h-4" />}
-                      <span>Lưu Lại Vào CSDL Hệ Thống</span>
-                    </button>
-                  </div>
                 </div>
               )}
 
@@ -396,14 +549,17 @@ export const StudentRosterModal: React.FC<StudentRosterModalProps> = ({
             </div>
           ) : (
             /* TAB XEM & QUẢN LÝ DANH SÁCH HIỆN CÓ */
-            <div className="space-y-3">
+            <div className="space-y-4">
+              {/* Thẻ hiển thị CSDL độc lập của từng lớp kèm nút XÓA và ĐỔI TÊN trực tiếp */}
+              {existingClasses.length > 0 && renderClassCards()}
+
               {/* Bộ lọc theo lớp & Tìm kiếm */}
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <div className="flex items-center gap-2 flex-1 min-w-[200px]">
                   <select
                     value={viewClassFilter}
                     onChange={(e) => setViewClassFilter(e.target.value)}
-                    className="px-3 py-1.5 text-xs font-bold bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:ring-1 focus:ring-emerald-500"
+                    className="px-3 py-1.5 text-xs font-bold bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:ring-1 focus:ring-emerald-500 cursor-pointer"
                   >
                     <option value="all">Tất cả các lớp ({roster.length} HS)</option>
                     {existingClasses.map((cls) => (
@@ -428,19 +584,11 @@ export const StudentRosterModal: React.FC<StudentRosterModalProps> = ({
                 {existingClasses.length > 0 && (
                   <button
                     type="button"
-                    onClick={async () => {
-                      const confirmText =
-                        viewClassFilter === 'all'
-                          ? 'Thầy/Cô có chắc chắn muốn xóa TOÀN BỘ danh sách học sinh của tất cả các lớp?'
-                          : `Thầy/Cô có chắc chắn muốn xóa danh sách học sinh của Lớp ${viewClassFilter}?`;
-                      if (window.confirm(confirmText)) {
-                        await onDeleteRoster(viewClassFilter === 'all' ? undefined : viewClassFilter);
-                      }
-                    }}
-                    className="px-2.5 py-1.5 bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 rounded-xl text-xs font-bold flex items-center gap-1 transition cursor-pointer"
+                    onClick={() => setConfirmDeleteTarget(viewClassFilter === 'all' ? 'all' : viewClassFilter)}
+                    className="px-3 py-1.5 bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 rounded-xl text-xs font-bold flex items-center gap-1 transition cursor-pointer"
                   >
                     <Trash2 className="w-3.5 h-3.5" />
-                    <span>{viewClassFilter === 'all' ? 'Xóa toàn bộ' : `Xóa lớp ${viewClassFilter}`}</span>
+                    <span>{viewClassFilter === 'all' ? 'Xóa toàn bộ các lớp' : `Xóa Lớp ${viewClassFilter}`}</span>
                   </button>
                 )}
               </div>
@@ -449,30 +597,23 @@ export const StudentRosterModal: React.FC<StudentRosterModalProps> = ({
               {filteredRoster.length > 0 ? (
                 <div className="max-h-72 overflow-y-auto space-y-1 pr-1 border border-slate-200 rounded-2xl p-2 bg-slate-50/60 divide-y divide-slate-100 text-xs">
                   {filteredRoster.map((s, idx) => (
-                    <div key={idx} className="p-2 flex items-center justify-between gap-2 bg-white rounded-xl mb-1 shadow-2xs">
+                    <div key={idx} className="p-2 flex items-center justify-between gap-2 hover:bg-white rounded-lg transition">
                       <div className="flex items-center gap-2">
-                        <span className="w-6 h-6 rounded-md bg-emerald-100 text-emerald-800 font-black flex items-center justify-center text-[10px]">
+                        <span className="w-6 h-6 rounded bg-emerald-50 text-emerald-800 font-black flex items-center justify-center text-[10px]">
                           {s.stt || idx + 1}
                         </span>
                         <span className="font-bold text-slate-900">{s.fullName}</span>
                       </div>
-                      <span className="px-2 py-0.5 bg-emerald-50 text-emerald-800 font-black rounded-md text-[11px] border border-emerald-200">
+                      <span className="px-2 py-0.5 bg-emerald-100 text-emerald-800 font-black rounded text-[11px]">
                         Lớp {s.className}
                       </span>
                     </div>
                   ))}
                 </div>
               ) : (
-                <div className="py-8 text-center text-slate-400 space-y-2 border-2 border-dashed border-slate-200 rounded-2xl">
+                <div className="text-center py-8 text-slate-400 border border-dashed border-slate-200 rounded-2xl space-y-2">
                   <Users className="w-8 h-8 mx-auto text-slate-300" />
-                  <div className="text-xs font-bold text-slate-500">Chưa có học sinh nào trong danh mục này</div>
-                  <button
-                    type="button"
-                    onClick={() => setActiveTab('upload')}
-                    className="px-3 py-1 bg-emerald-50 text-emerald-700 font-bold text-xs rounded-lg hover:bg-emerald-100 cursor-pointer"
-                  >
-                    + Tải lên từ file Excel ngay
-                  </button>
+                  <p className="text-xs font-semibold">Chưa có dữ liệu học sinh nào phù hợp bộ lọc.</p>
                 </div>
               )}
             </div>
@@ -480,9 +621,10 @@ export const StudentRosterModal: React.FC<StudentRosterModalProps> = ({
         </div>
 
         {/* Footer */}
-        <div className="p-4 bg-slate-50 border-t border-slate-200 flex items-center justify-between text-xs text-slate-500 shrink-0">
-          <div>
-            Hiện có: <strong>{roster.length}</strong> học sinh trong CSDL ({existingClasses.length} lớp)
+        <div className="p-4 bg-slate-50 border-t border-slate-200 flex items-center justify-between gap-2 shrink-0">
+          <div className="text-xs text-slate-500 font-medium">
+            Tổng cộng: <strong className="text-slate-800">{roster.length}</strong> học sinh thuộc{' '}
+            <strong className="text-slate-800">{existingClasses.length}</strong> lớp trong CSDL
           </div>
           <button
             type="button"
@@ -492,6 +634,109 @@ export const StudentRosterModal: React.FC<StudentRosterModalProps> = ({
             Đóng
           </button>
         </div>
+
+        {/* MODAL XÁC NHẬN XÓA (Thuận tiện 100%, không bị trình duyệt chặn confirm) */}
+        {confirmDeleteTarget && (
+          <div className="fixed inset-0 z-60 bg-slate-950/70 backdrop-blur-xs flex items-center justify-center p-4 animate-in fade-in duration-150">
+            <div className="bg-white rounded-3xl max-w-sm w-full p-5 shadow-2xl border border-slate-200 space-y-4">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-2xl bg-rose-100 text-rose-700 flex items-center justify-center shrink-0">
+                  <Trash2 className="w-5 h-5" />
+                </div>
+                <div>
+                  <h4 className="font-black text-slate-900 text-base">Xác Nhận Xóa CSDL Lớp</h4>
+                  <p className="text-xs text-slate-500 font-medium">
+                    {confirmDeleteTarget === 'all'
+                      ? 'Xóa toàn bộ các lớp'
+                      : `Xóa danh sách Lớp ${confirmDeleteTarget}`}
+                  </p>
+                </div>
+              </div>
+
+              <p className="text-xs text-slate-600 leading-relaxed font-medium">
+                {confirmDeleteTarget === 'all'
+                  ? 'Thầy/Cô có chắc chắn muốn xóa TOÀN BỘ danh sách học sinh của tất cả các lớp khỏi CSDL không?'
+                  : `Thầy/Cô có chắc chắn muốn xóa toàn bộ ${classCounts[confirmDeleteTarget] || 0} học sinh của Lớp ${confirmDeleteTarget} khỏi CSDL không? Các lớp khác sẽ vẫn được giữ nguyên vẹn.`}
+              </p>
+
+              <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-100">
+                <button
+                  type="button"
+                  disabled={isDeleting}
+                  onClick={() => setConfirmDeleteTarget(null)}
+                  className="px-3.5 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold rounded-xl text-xs transition cursor-pointer"
+                >
+                  Hủy bỏ
+                </button>
+                <button
+                  type="button"
+                  disabled={isDeleting}
+                  onClick={handleExecuteDelete}
+                  className="px-4 py-2 bg-rose-600 hover:bg-rose-700 text-white font-black rounded-xl text-xs flex items-center gap-1.5 transition shadow-sm cursor-pointer"
+                >
+                  {isDeleting ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Trash2 className="w-3.5 h-3.5" />}
+                  <span>Xóa Ngay Khỏi CSDL</span>
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* MODAL ĐỔI TÊN LỚP (Khắc phục khi tải nhầm tên lớp như 6B2 -> 6A2 mà không cần xóa tải lại) */}
+        {renameTargetClass && (
+          <div className="fixed inset-0 z-60 bg-slate-950/70 backdrop-blur-xs flex items-center justify-center p-4 animate-in fade-in duration-150">
+            <div className="bg-white rounded-3xl max-w-sm w-full p-5 shadow-2xl border border-slate-200 space-y-4">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-2xl bg-blue-100 text-blue-700 flex items-center justify-center shrink-0">
+                  <Edit2 className="w-5 h-5" />
+                </div>
+                <div>
+                  <h4 className="font-black text-slate-900 text-base">Sửa Tên Lớp Trong CSDL</h4>
+                  <p className="text-xs text-slate-500 font-medium">
+                    Đổi Lớp {renameTargetClass} ({classCounts[renameTargetClass] || 0} học sinh)
+                  </p>
+                </div>
+              </div>
+
+              <div className="space-y-1.5">
+                <label className="text-xs font-bold text-slate-700">
+                  Tên lớp chính xác (ví dụ đổi {renameTargetClass} thành 6A2):
+                </label>
+                <input
+                  type="text"
+                  autoFocus
+                  value={newClassNameInput}
+                  onChange={(e) => setNewClassNameInput(e.target.value.toUpperCase())}
+                  placeholder="Nhập tên lớp đúng (vd: 6A2)..."
+                  className="w-full bg-slate-50 border-2 border-slate-300 focus:border-blue-500 focus:bg-white rounded-xl px-3 py-2 text-sm font-black text-slate-900 outline-none uppercase"
+                />
+                <p className="text-[11px] text-slate-500">
+                  💡 Toàn bộ {classCounts[renameTargetClass] || 0} học sinh của Lớp {renameTargetClass} sẽ được chuyển ngay sang tên lớp mới trong CSDL.
+                </p>
+              </div>
+
+              <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-100">
+                <button
+                  type="button"
+                  disabled={isSaving}
+                  onClick={() => setRenameTargetClass(null)}
+                  className="px-3.5 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold rounded-xl text-xs transition cursor-pointer"
+                >
+                  Hủy bỏ
+                </button>
+                <button
+                  type="button"
+                  disabled={isSaving || !newClassNameInput.trim()}
+                  onClick={handleExecuteRename}
+                  className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white font-black rounded-xl text-xs flex items-center gap-1.5 transition shadow-sm cursor-pointer disabled:opacity-50"
+                >
+                  {isSaving ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <CheckCircle2 className="w-3.5 h-3.5" />}
+                  <span>Lưu Tên Mới</span>
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );

@@ -1,8 +1,40 @@
 import { Submission } from '../types';
 
-export const STORAGE_KEY_SUBMISSIONS = 'labgrade_submissions_v2';
+export const STORAGE_KEY_SUBMISSIONS = 'labgrade_submissions_v5';
+export const STORAGE_KEY_OLD_V4 = 'labgrade_submissions_v4';
+export const STORAGE_KEY_OLD_V3 = 'labgrade_submissions_v3';
+export const STORAGE_KEY_OLD_V2 = 'labgrade_submissions_v2';
 export const STORAGE_KEY_OLD_V1 = 'labgrade_submissions_v1';
+export const STORAGE_KEY_CLEANED_FLAG = 'labgrade_virtual_data_cleaned_v5';
 export const MAX_RETAINED_SUBMISSIONS = 120; // Ngưỡng an toàn lưu trữ lịch sử
+
+/**
+ * Xóa sạch toàn bộ kết quả chấm ảo các ngày trước đây và các bài nộp cũ trong localStorage
+ */
+export function purgeAllLegacySubmissions(): void {
+  try {
+    if (typeof window === 'undefined') return;
+    localStorage.removeItem(STORAGE_KEY_SUBMISSIONS);
+    localStorage.removeItem(STORAGE_KEY_OLD_V4);
+    localStorage.removeItem(STORAGE_KEY_OLD_V3);
+    localStorage.removeItem(STORAGE_KEY_OLD_V2);
+    localStorage.removeItem(STORAGE_KEY_OLD_V1);
+    localStorage.removeItem('labgrade_submissions');
+    localStorage.removeItem('labgrade_pending_sync_queue_v1');
+    localStorage.setItem(STORAGE_KEY_CLEANED_FLAG, 'true');
+    console.log('[Bộ nhớ phòng máy] ✅ Đã xóa sạch toàn bộ kết quả chấm ảo các ngày trước đây trên trình duyệt.');
+  } catch {}
+}
+
+// Tự động dọn dẹp sạch sẽ các bản ghi ảo cũ khi người dùng mở trang
+if (typeof window !== 'undefined') {
+  try {
+    const isCleaned = localStorage.getItem(STORAGE_KEY_CLEANED_FLAG);
+    if (!isCleaned) {
+      purgeAllLegacySubmissions();
+    }
+  } catch {}
+}
 
 /**
  * Lấy chuỗi ngày YYYY-MM-DD theo giờ địa phương Việt Nam
@@ -206,17 +238,26 @@ export function sanitizeSubmission(raw: any): Submission {
  */
 export function loadSubmissionsSafely(fallback: Submission[] = []): Submission[] {
   try {
+    const todayStr = getTodayDateString();
     const saved = localStorage.getItem(STORAGE_KEY_SUBMISSIONS);
     if (saved !== null) {
       const parsed = JSON.parse(saved);
       if (Array.isArray(parsed)) {
-        return parsed.map(sanitizeSubmission);
+        return parsed
+          .filter((s) => {
+            if (!s || String(s.id).startsWith('mock-')) return false;
+            // Chỉ giữ lại bài nộp của ngày thực hành hôm nay, tự động loại bỏ các kết quả ảo ngày trước
+            return s.practiceDate === todayStr || isSubmittedToday(s.latestSubmittedAt, todayStr);
+          })
+          .map(sanitizeSubmission);
       }
     }
   } catch (e) {
     console.warn('Lỗi đọc submissions từ localStorage:', e);
   }
-  return Array.isArray(fallback) ? fallback.map(sanitizeSubmission) : [];
+  return Array.isArray(fallback)
+    ? fallback.filter((s) => s && !String(s.id).startsWith('mock-')).map(sanitizeSubmission)
+    : [];
 }
 
 const STORAGE_KEY_PENDING_SYNC = 'labgrade_pending_sync_queue_v1';

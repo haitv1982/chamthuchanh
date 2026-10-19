@@ -17,6 +17,7 @@ import {
   Calendar,
   Database,
   Download,
+  Trash2,
 } from 'lucide-react';
 import { Submission } from '../types';
 import {
@@ -37,6 +38,7 @@ interface ClassResultsModalProps {
   allowSubmission?: boolean;
   onChangeClassName?: (cls: string) => void;
   onRefresh?: () => void;
+  onClearSubmissions?: (targetClass?: string) => Promise<boolean>;
   dbStatus?: {
     status: string;
     isPersistent: boolean;
@@ -57,6 +59,7 @@ export const ClassResultsModal: React.FC<ClassResultsModalProps> = ({
   allowSubmission = true,
   onChangeClassName,
   onRefresh,
+  onClearSubmissions,
   dbStatus,
 }) => {
   const [search, setSearch] = useState('');
@@ -70,6 +73,10 @@ export const ClassResultsModal: React.FC<ClassResultsModalProps> = ({
   const [customDate, setCustomDate] = useState<string>('');
   const [isSyncing, setIsSyncing] = useState<boolean>(false);
   const [syncToast, setSyncToast] = useState<string | null>(null);
+
+  // Quản lý xóa kết quả bài nộp cũ
+  const [isConfirmClearOpen, setIsConfirmClearOpen] = useState<boolean>(false);
+  const [isClearing, setIsClearing] = useState<boolean>(false);
 
   // Tự động làm mới kết quả trực tiếp từ server khi mở modal và định kỳ mỗi 3.5 giây
   useEffect(() => {
@@ -244,6 +251,19 @@ export const ClassResultsModal: React.FC<ClassResultsModalProps> = ({
               >
                 <RefreshCw className={`w-3.5 h-3.5 text-cyan-400 ${isSyncing ? 'animate-spin' : ''}`} />
                 <span>{isSyncing ? 'Đang đồng bộ...' : 'Làm mới CSDL'}</span>
+              </button>
+            )}
+
+            {/* Nút Xóa Sạch Kết Quả Cũ (Chỉ Giáo Viên) */}
+            {isTeacher && onClearSubmissions && (
+              <button
+                type="button"
+                onClick={() => setIsConfirmClearOpen(true)}
+                className="px-3 py-2 text-rose-300 hover:text-white rounded-xl bg-slate-800 hover:bg-rose-900/60 border border-slate-700 hover:border-rose-700 transition-colors text-xs font-bold flex items-center gap-1.5 cursor-pointer"
+                title="Xóa sạch toàn bộ kết quả chấm ảo hoặc bài nộp cũ để bắt đầu tiết học mới"
+              >
+                <Trash2 className="w-3.5 h-3.5 text-rose-400" />
+                <span className="hidden sm:inline">Xóa Kết Quả Cũ</span>
               </button>
             )}
 
@@ -748,6 +768,59 @@ export const ClassResultsModal: React.FC<ClassResultsModalProps> = ({
             Đóng Lại
           </button>
         </div>
+
+        {/* Modal xác nhận xóa kết quả cũ trong ClassResultsModal */}
+        {isConfirmClearOpen && (
+          <div className="fixed inset-0 z-60 bg-slate-950/80 backdrop-blur-xs flex items-center justify-center p-4 animate-in fade-in duration-150">
+            <div className="bg-slate-900 rounded-3xl max-w-md w-full p-6 shadow-2xl border border-slate-700 space-y-4 text-white">
+              <div className="flex items-center gap-3">
+                <div className="w-12 h-12 rounded-2xl bg-rose-500/20 border border-rose-500/40 text-rose-400 flex items-center justify-center shrink-0">
+                  <Trash2 className="w-6 h-6" />
+                </div>
+                <div>
+                  <h4 className="font-black text-lg text-white">Xóa Sạch Kết Quả Cũ</h4>
+                  <p className="text-xs text-slate-400">
+                    {activeClass === 'Tất cả' ? 'Toàn bộ tất cả các lớp' : `Lớp ${activeClass}`}
+                  </p>
+                </div>
+              </div>
+
+              <p className="text-sm text-slate-300 leading-relaxed">
+                Thầy/Cô có chắc chắn muốn xóa sạch toàn bộ các kết quả chấm ảo hoặc bài nộp cũ khỏi hệ thống không?
+              </p>
+
+              <div className="flex items-center justify-end gap-2.5 pt-3 border-t border-slate-800">
+                <button
+                  type="button"
+                  disabled={isClearing}
+                  onClick={() => setIsConfirmClearOpen(false)}
+                  className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 font-bold rounded-xl text-xs sm:text-sm transition cursor-pointer"
+                >
+                  Hủy bỏ
+                </button>
+                <button
+                  type="button"
+                  disabled={isClearing}
+                  onClick={async () => {
+                    setIsClearing(true);
+                    try {
+                      if (onClearSubmissions) {
+                        await onClearSubmissions(activeClass === 'Tất cả' ? undefined : activeClass);
+                      }
+                      if (onRefresh) await onRefresh();
+                      setIsConfirmClearOpen(false);
+                    } catch {}
+                    setIsClearing(false);
+                  }}
+                  className="px-4 py-2 bg-rose-600 hover:bg-rose-700 text-white font-black rounded-xl text-xs sm:text-sm flex items-center gap-1.5 transition shadow-sm cursor-pointer"
+                >
+                  {isClearing ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Trash2 className="w-4 h-4" />}
+                  <span>Xóa Sạch Ngay</span>
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );

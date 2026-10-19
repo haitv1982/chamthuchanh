@@ -12,6 +12,7 @@ const DATA_DIR = path.resolve(process.cwd(), 'data');
 const DB_FILE = path.join(DATA_DIR, 'submissions_database.json');
 const BACKUP_FILE = path.join(DATA_DIR, 'submissions_database.backup.json');
 const ROSTER_FILE = path.join(DATA_DIR, 'student_roster.json');
+const ROSTERS_DIR = path.join(DATA_DIR, 'rosters_by_class');
 
 export interface DatabaseState {
   version: string;
@@ -63,19 +64,29 @@ function flushDatabaseToDisk(): boolean {
 export function initLabDatabase(): DatabaseState {
   ensureDataDir();
 
+  const todayStr = new Date().toISOString().slice(0, 10);
+
   if (fs.existsSync(DB_FILE)) {
     try {
       const raw = fs.readFileSync(DB_FILE, 'utf-8');
       const parsed = JSON.parse(raw);
       if (parsed && Array.isArray(parsed.submissions)) {
+        // Tự động xóa sạch toàn bộ kết quả chấm ảo hoặc bài nộp cũ của các ngày trước đây
+        const cleanSubmissions = parsed.submissions.filter((s: any) => {
+          if (!s || String(s.id).startsWith('mock-')) return false;
+          const subDate = s.practiceDate || (s.latestSubmittedAt ? s.latestSubmittedAt.slice(0, 10) : '');
+          return subDate === todayStr;
+        });
+
         dbState = {
           version: parsed.version || '2.0.0',
           lastUpdated: parsed.lastUpdated || new Date().toISOString(),
           allowSubmission: typeof parsed.allowSubmission === 'boolean' ? parsed.allowSubmission : true,
           teacherPin: typeof parsed.teacherPin === 'string' && parsed.teacherPin ? parsed.teacherPin : '1234',
-          submissions: parsed.submissions,
+          submissions: cleanSubmissions,
         };
-        console.log(`[CSDL Thực Hành] Khôi phục thành công ${dbState.submissions.length} bài nộp từ CSDL đĩa: ${DB_FILE} (Cho phép nộp: ${dbState.allowSubmission ? 'BẬT' : 'KHÓA'})`);
+        flushDatabaseToDisk();
+        console.log(`[CSDL Thực Hành] Khôi phục thành công ${dbState.submissions.length} bài nộp ngày hôm nay (${todayStr}) từ CSDL đĩa: ${DB_FILE} (Cho phép nộp: ${dbState.allowSubmission ? 'BẬT' : 'KHÓA'})`);
         return dbState;
       }
     } catch (err) {
@@ -85,14 +96,19 @@ export function initLabDatabase(): DatabaseState {
           const rawBackup = fs.readFileSync(BACKUP_FILE, 'utf-8');
           const parsed = JSON.parse(rawBackup);
           if (parsed && Array.isArray(parsed.submissions)) {
+            const cleanSubmissions = parsed.submissions.filter((s: any) => {
+              if (!s || String(s.id).startsWith('mock-')) return false;
+              const subDate = s.practiceDate || (s.latestSubmittedAt ? s.latestSubmittedAt.slice(0, 10) : '');
+              return subDate === todayStr;
+            });
             dbState = {
               version: parsed.version || '2.0.0',
               lastUpdated: parsed.lastUpdated || new Date().toISOString(),
               allowSubmission: typeof parsed.allowSubmission === 'boolean' ? parsed.allowSubmission : true,
               teacherPin: typeof parsed.teacherPin === 'string' ? parsed.teacherPin : '1234',
-              submissions: parsed.submissions,
+              submissions: cleanSubmissions,
             };
-            console.log(`[CSDL Thực Hành] Đã khôi phục ${dbState.submissions.length} bản ghi từ tệp sao lưu.`);
+            console.log(`[CSDL Thực Hành] Đã khôi phục ${dbState.submissions.length} bản ghi hôm nay từ tệp sao lưu.`);
             flushDatabaseToDisk();
             return dbState;
           }
@@ -101,17 +117,17 @@ export function initLabDatabase(): DatabaseState {
     }
   }
 
-  // Khởi tạo mới với mock submissions nếu chưa có dữ liệu
+  // Khởi tạo mới sạch sẽ 100% (0 bài nộp ảo) theo yêu cầu người dùng
   dbState = {
     version: '2.0.0',
     lastUpdated: new Date().toISOString(),
     allowSubmission: true,
     teacherPin: '1234',
-    submissions: [...INITIAL_SUBMISSIONS],
+    submissions: [],
   };
 
   flushDatabaseToDisk();
-  console.log(`[CSDL Thực Hành] Đã khởi tạo mới CSDL với ${dbState.submissions.length} bài nộp tại ${DB_FILE}`);
+  console.log(`[CSDL Thực Hành] Đã khởi tạo mới CSDL sạch với 0 bài nộp tại ${DB_FILE}`);
   return dbState;
 }
 
@@ -297,16 +313,41 @@ export function getDatabaseMetrics() {
 // ==============================================================
 let studentRosterState: StudentRecord[] = [];
 
-// Khởi tạo danh sách học sinh từ đĩa
+// Khởi tạo danh sách học sinh từ đĩa (hỗ trợ nạp cả CSDL riêng từng lớp và tệp tổng hợp)
 function loadStudentRoster(): StudentRecord[] {
   try {
     ensureDataDir();
+    if (!fs.existsSync(ROSTERS_DIR)) {
+      fs.mkdirSync(ROSTERS_DIR, { recursive: true });
+    }
+
+    // 1. Kiểm tra nạp từ các tệp CSDL riêng của từng lớp
+    const classFiles = fs.readdirSync(ROSTERS_DIR).filter((f) => f.startsWith('roster_') && f.endsWith('.json'));
+    if (classFiles.length > 0) {
+      const all: StudentRecord[] = [];
+      classFiles.forEach((file) => {
+        try {
+          const content = fs.readFileSync(path.join(ROSTERS_DIR, file), 'utf-8');
+          const parsed = JSON.parse(content);
+          if (Array.isArray(parsed)) {
+            all.push(...parsed);
+          }
+        } catch {}
+      });
+      if (all.length > 0) {
+        studentRosterState = all;
+        console.log(`[CSDL Học Sinh] Đã tải ${studentRosterState.length} học sinh từ ${classFiles.length} tệp CSDL riêng từng lớp.`);
+        return studentRosterState;
+      }
+    }
+
+    // 2. Nạp từ tệp tổng hợp nếu chưa có tệp từng lớp
     if (fs.existsSync(ROSTER_FILE)) {
       const raw = fs.readFileSync(ROSTER_FILE, 'utf-8');
       const parsed = JSON.parse(raw);
       if (Array.isArray(parsed)) {
         studentRosterState = parsed;
-        console.log(`[CSDL Học Sinh] Đã tải ${studentRosterState.length} học sinh từ tệp: ${ROSTER_FILE}`);
+        console.log(`[CSDL Học Sinh] Đã tải ${studentRosterState.length} học sinh từ tệp tổng: ${ROSTER_FILE}`);
         return studentRosterState;
       }
     }
@@ -317,13 +358,47 @@ function loadStudentRoster(): StudentRecord[] {
   return studentRosterState;
 }
 
-// Lưu danh sách học sinh ra đĩa
+// Lưu danh sách học sinh ra đĩa: Lưu cả tệp tổng và CSDL RIÊNG BIỆT CHO MỖI LỚP
 function flushStudentRosterToDisk(): boolean {
   try {
     ensureDataDir();
+    if (!fs.existsSync(ROSTERS_DIR)) {
+      fs.mkdirSync(ROSTERS_DIR, { recursive: true });
+    }
+
+    // 1. Lưu tệp tổng hợp student_roster.json
     const tempFile = `${ROSTER_FILE}.tmp.${Date.now()}`;
     fs.writeFileSync(tempFile, JSON.stringify(studentRosterState, null, 2), 'utf-8');
     fs.renameSync(tempFile, ROSTER_FILE);
+
+    // 2. Phân vùng và lưu CSDL RIÊNG BIỆT CHO MỖI LỚP (roster_6A1.json, roster_6A2.json...)
+    // Đảm bảo mỗi lớp có một tệp CSDL vật lý riêng, lớp sau không bao giờ ghi đè lên lớp trước!
+    const classGroups: Record<string, StudentRecord[]> = {};
+    studentRosterState.forEach((s) => {
+      const cls = s.className.toUpperCase();
+      if (!classGroups[cls]) classGroups[cls] = [];
+      classGroups[cls].push(s);
+    });
+
+    // Ghi từng tệp lớp
+    Object.entries(classGroups).forEach(([cls, students]) => {
+      const classFilePath = path.join(ROSTERS_DIR, `roster_${cls}.json`);
+      fs.writeFileSync(classFilePath, JSON.stringify(students, null, 2), 'utf-8');
+    });
+
+    // Dọn dẹp các tệp CSDL của lớp đã bị xóa để tránh nạp lại
+    try {
+      const activeClassFiles = new Set(Object.keys(classGroups).map((cls) => `roster_${cls}.json`));
+      const onDiskFiles = fs.readdirSync(ROSTERS_DIR).filter((f) => f.startsWith('roster_') && f.endsWith('.json'));
+      onDiskFiles.forEach((f) => {
+        if (!activeClassFiles.has(f)) {
+          try {
+            fs.unlinkSync(path.join(ROSTERS_DIR, f));
+          } catch {}
+        }
+      });
+    } catch {}
+
     return true;
   } catch (err) {
     console.error('[CSDL Học Sinh] Lỗi khi lưu danh sách học sinh ra đĩa:', err);
@@ -342,10 +417,10 @@ export function getAllStudents(): StudentRecord[] {
   return studentRosterState;
 }
 
-// Lưu danh sách học sinh từ Excel
+// Lưu danh sách học sinh từ Excel (Tích lũy tự động: thêm dần từ lớp này sang lớp khác, không bị đè mất lớp cũ)
 export function saveStudentRoster(
   records: StudentRecord[],
-  mode: 'replace' | 'upsert' = 'replace'
+  mode: 'accumulate' | 'upsert' | 'replace' = 'accumulate'
 ): { success: boolean; total: number; classes: string[]; students: StudentRecord[] } {
   if (!Array.isArray(records)) {
     return { success: false, total: studentRosterState.length, classes: [], students: studentRosterState };
@@ -360,24 +435,23 @@ export function saveStudentRoster(
       className: r.className.trim().toUpperCase(),
     }));
 
-  if (mode === 'replace') {
-    // Thay thế toàn bộ hoặc thay thế theo các lớp có trong tệp tải lên
-    const incomingClasses = new Set(cleaned.map((c) => c.className));
-    const retained = studentRosterState.filter((s) => !incomingClasses.has(s.className));
-    studentRosterState = [...retained, ...cleaned];
-  } else {
-    // Upsert tránh trùng lặp
-    const map = new Map<string, StudentRecord>();
-    studentRosterState.forEach((s) => {
-      const key = `${s.className}___${s.fullName.toLowerCase()}`;
-      map.set(key, s);
-    });
-    cleaned.forEach((s) => {
-      const key = `${s.className}___${s.fullName.toLowerCase()}`;
-      map.set(key, s);
-    });
-    studentRosterState = Array.from(map.values());
-  }
+  // Cơ chế TÍCH LŨY TỰ ĐỘNG (Accumulate / Upsert):
+  // Giữ nguyên toàn bộ danh sách các lớp đã tải lên trước đó, tự động thêm tiếp các lớp mới vào CSDL.
+  const map = new Map<string, StudentRecord>();
+
+  // 1. Giữ nguyên tất cả học sinh của các lớp đã có trong hệ thống
+  studentRosterState.forEach((s) => {
+    const key = `${s.className.toUpperCase()}___${s.fullName.trim().toLowerCase()}`;
+    map.set(key, s);
+  });
+
+  // 2. Thêm hoặc cập nhật học sinh từ tệp mới tải lên
+  cleaned.forEach((s) => {
+    const key = `${s.className.toUpperCase()}___${s.fullName.trim().toLowerCase()}`;
+    map.set(key, s);
+  });
+
+  studentRosterState = Array.from(map.values());
 
   // Sắp xếp theo lớp rồi theo STT hoặc họ tên
   studentRosterState.sort((a, b) => {
@@ -401,14 +475,83 @@ export function saveStudentRoster(
   };
 }
 
-// Xóa danh sách học sinh theo lớp hoặc toàn bộ
-export function deleteStudentRoster(className?: string): { success: boolean; count: number; students: StudentRecord[] } {
-  if (className) {
-    const norm = className.trim().toUpperCase();
-    studentRosterState = studentRosterState.filter((s) => s.className !== norm);
+// Xóa danh sách học sinh theo lớp hoặc toàn bộ (xóa cả tệp CSDL riêng của lớp đó)
+export function deleteStudentRoster(className?: string): { success: boolean; count: number; classes: string[]; students: StudentRecord[] } {
+  if (className && className.trim()) {
+    const rawNorm = className.trim().toUpperCase();
+    const cleanNorm = rawNorm.replace(/^LỚP\s*|^LOP\s*/i, '');
+
+    studentRosterState = studentRosterState.filter((s) => {
+      const sCls = (s.className || '').trim().toUpperCase();
+      const sClean = sCls.replace(/^LỚP\s*|^LOP\s*/i, '');
+      return sCls !== rawNorm && sClean !== cleanNorm && sCls !== cleanNorm;
+    });
+
+    try {
+      const candidates = [
+        `roster_${rawNorm}.json`,
+        `roster_${cleanNorm}.json`,
+        `roster_LỚP_${cleanNorm}.json`,
+      ];
+      candidates.forEach((f) => {
+        const filePath = path.join(ROSTERS_DIR, f);
+        if (fs.existsSync(filePath)) {
+          fs.unlinkSync(filePath);
+        }
+      });
+    } catch {}
   } else {
     studentRosterState = [];
+    try {
+      if (fs.existsSync(ROSTERS_DIR)) {
+        const files = fs.readdirSync(ROSTERS_DIR);
+        files.forEach((f) => fs.unlinkSync(path.join(ROSTERS_DIR, f)));
+      }
+    } catch {}
   }
   flushStudentRosterToDisk();
-  return { success: true, count: studentRosterState.length, students: studentRosterState };
+  const classes = Array.from(new Set(studentRosterState.map((s) => s.className)));
+  console.log(`[CSDL Học Sinh] Đã xóa ${className ? `Lớp ${className}` : 'toàn bộ'}. Còn lại ${studentRosterState.length} học sinh thuộc ${classes.length} lớp.`);
+  return { success: true, count: studentRosterState.length, classes, students: studentRosterState };
+}
+
+// Đổi tên lớp trực tiếp trong CSDL (cực kỳ thuận lợi khi tải nhầm tên file 6B2 thay vì 6A2)
+export function renameStudentClass(
+  oldClassName: string,
+  newClassName: string
+): { success: boolean; count: number; classes: string[]; students: StudentRecord[] } {
+  if (!oldClassName || !newClassName) {
+    const classes = Array.from(new Set(studentRosterState.map((s) => s.className)));
+    return { success: false, count: studentRosterState.length, classes, students: studentRosterState };
+  }
+
+  const oldNorm = oldClassName.trim().toUpperCase();
+  const oldClean = oldNorm.replace(/^LỚP\s*|^LOP\s*/i, '');
+  const newNorm = newClassName.trim().toUpperCase().replace(/^LỚP\s*|^LOP\s*/i, '');
+
+  let modifiedCount = 0;
+  studentRosterState = studentRosterState.map((s) => {
+    const sCls = (s.className || '').trim().toUpperCase();
+    const sClean = sCls.replace(/^LỚP\s*|^LOP\s*/i, '');
+    if (sCls === oldNorm || sClean === oldClean || sCls === oldClean) {
+      modifiedCount++;
+      return { ...s, className: newNorm };
+    }
+    return s;
+  });
+
+  // Xóa tệp CSDL lớp cũ trên đĩa nếu khác tên mới
+  if (oldClean !== newNorm) {
+    try {
+      const oldFile = path.join(ROSTERS_DIR, `roster_${oldClean}.json`);
+      if (fs.existsSync(oldFile)) {
+        fs.unlinkSync(oldFile);
+      }
+    } catch {}
+  }
+
+  flushStudentRosterToDisk();
+  const classes = Array.from(new Set(studentRosterState.map((s) => s.className)));
+  console.log(`[CSDL Học Sinh] Đã đổi tên lớp từ ${oldClassName} sang ${newNorm} cho ${modifiedCount} học sinh.`);
+  return { success: true, count: studentRosterState.length, classes, students: studentRosterState };
 }

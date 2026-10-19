@@ -20,6 +20,7 @@ import {
   queuePendingSync,
   getPendingSyncQueue,
   clearPendingSyncQueue,
+  purgeAllLegacySubmissions,
 } from './utils/storageManager';
 import { scanAndGradeProduct } from './utils/productScanner';
 import { apiFetch, getApiUrl } from './utils/apiConfig';
@@ -131,7 +132,7 @@ export default function App() {
         const res = await apiFetch('/api/student-roster');
         if (res.ok) {
           const data = await res.json();
-          if (Array.isArray(data.students) && data.students.length > 0) {
+          if (Array.isArray(data.students)) {
             setStudentRoster(data.students);
           }
         }
@@ -176,6 +177,10 @@ export default function App() {
           }
           if (event.data?.type === 'ROSTER_UPDATED' && Array.isArray(event.data.students)) {
             setStudentRoster(event.data.students);
+          }
+          if (event.data?.type === 'SUBMISSIONS_CLEARED') {
+            setSubmissions([]);
+            saveSubmissionsSafely([]);
           }
         };
       } catch {}
@@ -244,20 +249,15 @@ export default function App() {
         if (data.dbStatus) {
           setDbStatus(data.dbStatus);
         }
-        if (Array.isArray(data.submissions) && data.submissions.length > 0) {
-          setSubmissions((prev) => {
-            const map = new Map<string, Submission>();
-            // Nạp dữ liệu hiện tại
-            (prev || []).forEach((s) => {
-              if (s && s.id) map.set(s.id, s);
-            });
-            // Đồng bộ dữ liệu CSDL máy chủ (Ưu tiên bản mới nhất từ CSDL máy chủ)
-            data.submissions.forEach((raw: any) => {
-              const clean = sanitizeSubmission(raw);
-              map.set(clean.id, clean);
-            });
-            return Array.from(map.values());
-          });
+        if (Array.isArray(data.submissions)) {
+          const todayStr = getTodayDateString();
+          const cleanSubs = data.submissions
+            .filter((s: any) => {
+              if (!s || String(s.id).startsWith('mock-')) return false;
+              return s.practiceDate === todayStr || isSubmittedToday(s.latestSubmittedAt, todayStr);
+            })
+            .map((raw: any) => sanitizeSubmission(raw));
+          setSubmissions(cleanSubs);
         }
       }
     } catch {
@@ -289,6 +289,46 @@ export default function App() {
     }
   };
 
+  // Xóa sạch toàn bộ kết quả chấm ảo các ngày trước đây cả trên máy chủ, bộ nhớ đệm và các máy trạm
+  const handleClearAllSubmissions = async (targetClass?: string): Promise<boolean> => {
+    try {
+      if (!targetClass || targetClass === 'Tất cả') {
+        await apiFetch('/api/submissions/clear', { method: 'POST' });
+        await apiFetch('/api/submissions', { method: 'DELETE' });
+      } else {
+        await apiFetch(`/api/submissions?className=${encodeURIComponent(targetClass)}`, { method: 'DELETE' });
+        await apiFetch('/api/submissions/delete', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ className: targetClass }),
+        });
+      }
+    } catch {}
+
+    if (!targetClass || targetClass === 'Tất cả') {
+      setSubmissions([]);
+      purgeAllLegacySubmissions();
+      saveSubmissionsSafely([]);
+    } else {
+      setSubmissions((prev) => {
+        const next = prev.filter((s) => s.className !== targetClass);
+        saveSubmissionsSafely(next);
+        return next;
+      });
+    }
+
+    if (typeof BroadcastChannel !== 'undefined') {
+      try {
+        const bc = new BroadcastChannel('labgrade_session_channel');
+        bc.postMessage({ type: 'SUBMISSIONS_CLEARED', targetClass });
+        bc.close();
+      } catch {}
+    }
+
+    await refreshSubmissionsAndStatus();
+    return true;
+  };
+
   // Toggle submission lock handler
   const handleToggleSubmissionPermission = async (allow: boolean) => {
     setAllowSubmission(allow);
@@ -315,10 +355,10 @@ export default function App() {
     }
   };
 
-  // Cập nhật danh sách học sinh (từ Excel do Giáo viên tải lên)
+  // Lưu danh sách học sinh từ Excel lên máy chủ và cập nhật state (Tích lũy từ lớp này sang lớp khác)
   const handleSaveStudentRoster = async (
     students: StudentRecord[],
-    mode: 'replace' | 'upsert' = 'replace'
+    mode: 'accumulate' | 'upsert' | 'replace' = 'accumulate'
   ) => {
     let resTotal = students.length;
     let resClasses: string[] = [];
@@ -350,65 +390,161 @@ export default function App() {
       console.warn('Lỗi mạng khi lưu danh sách học sinh lên máy chủ:', err);
     }
 
-    // Cập nhật state cục bộ ngay lập tức
-    if (mode === 'replace') {
-      const incomingClasses = new Set(students.map((c) => c.className.toUpperCase()));
-      setStudentRoster((prev) => {
-        const retained = prev.filter((s) => !incomingClasses.has(s.className.toUpperCase()));
-        const updated = [...retained, ...students];
-        try {
-          if (typeof BroadcastChannel !== 'undefined') {
-            const bc = new BroadcastChannel('labgrade_session_channel');
-            bc.postMessage({ type: 'ROSTER_UPDATED', students: updated });
-            bc.close();
-          }
-        } catch {}
-        return updated;
-      });
-    } else {
-      setStudentRoster((prev) => {
-        const map = new Map<string, StudentRecord>();
-        prev.forEach((s) => map.set(`${s.className}___${s.fullName.toLowerCase()}`, s));
-        students.forEach((s) => map.set(`${s.className}___${s.fullName.toLowerCase()}`, s));
-        const updated = Array.from(map.values());
-        try {
-          if (typeof BroadcastChannel !== 'undefined') {
-            const bc = new BroadcastChannel('labgrade_session_channel');
-            bc.postMessage({ type: 'ROSTER_UPDATED', students: updated });
-            bc.close();
-          }
-        } catch {}
-        return updated;
-      });
-    }
-
-    return { success: true, total: resTotal, classes: resClasses };
-  };
-
-  // Xóa danh sách học sinh
-  const handleDeleteStudentRoster = async (className?: string) => {
-    try {
-      const url = className
-        ? `/api/student-roster?className=${encodeURIComponent(className)}`
-        : '/api/student-roster';
-      await apiFetch(url, { method: 'DELETE' });
-    } catch (err) {
-      console.warn('Lỗi mạng khi xóa danh sách học sinh trên máy chủ:', err);
-    }
-
+    // Cập nhật state cục bộ ngay lập tức theo cơ chế tích lũy (Accumulate / Upsert)
+    let updatedRoster: StudentRecord[] = [];
     setStudentRoster((prev) => {
-      const updated = className
-        ? prev.filter((s) => s.className.toUpperCase() !== className.toUpperCase())
-        : [];
+      const map = new Map<string, StudentRecord>();
+      prev.forEach((s) => map.set(`${s.className.toUpperCase()}___${s.fullName.trim().toLowerCase()}`, s));
+      students.forEach((s) => map.set(`${s.className.toUpperCase()}___${s.fullName.trim().toLowerCase()}`, s));
+      updatedRoster = Array.from(map.values()).sort((a, b) => {
+        if (a.className !== b.className) return a.className.localeCompare(b.className);
+        const sttA = Number(a.stt) || 999;
+        const sttB = Number(b.stt) || 999;
+        if (sttA !== sttB) return sttA - sttB;
+        return a.fullName.localeCompare(b.fullName, 'vi');
+      });
       try {
+        localStorage.setItem('labgrade_student_roster', JSON.stringify(updatedRoster));
         if (typeof BroadcastChannel !== 'undefined') {
           const bc = new BroadcastChannel('labgrade_session_channel');
-          bc.postMessage({ type: 'ROSTER_UPDATED', students: updated });
+          bc.postMessage({ type: 'ROSTER_UPDATED', students: updatedRoster });
           bc.close();
         }
       } catch {}
-      return updated;
+      return updatedRoster;
     });
+
+    const finalClasses = Array.from(new Set(updatedRoster.map((s) => s.className)));
+    return { success: true, total: updatedRoster.length || resTotal, classes: finalClasses.length > 0 ? finalClasses : resClasses };
+  };
+
+  // Xóa danh sách học sinh (toàn bộ hoặc theo từng lớp - kết nối CSDL trung tâm và đồng bộ các máy)
+  const handleDeleteStudentRoster = async (className?: string): Promise<boolean> => {
+    let serverStudents: StudentRecord[] | null = null;
+    let deleteSucceeded = false;
+
+    // 1. Thử gửi DELETE
+    try {
+      const url = className && className.trim()
+        ? `/api/student-roster?className=${encodeURIComponent(className.trim())}`
+        : '/api/student-roster';
+      const res = await apiFetch(url, { method: 'DELETE' });
+      if (res.ok) {
+        const data = await res.json();
+        if (Array.isArray(data.students)) {
+          serverStudents = data.students;
+          deleteSucceeded = true;
+        }
+      }
+    } catch (err) {
+      console.warn('Lỗi mạng khi xóa danh sách học sinh (DELETE):', err);
+    }
+
+    // 2. Dự phòng: Nếu DELETE bị proxy hoặc web server chặn, gọi POST /api/student-roster/delete
+    if (!deleteSucceeded) {
+      try {
+        const res = await apiFetch('/api/student-roster/delete', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ className: className ? className.trim() : undefined }),
+        });
+        if (res.ok) {
+          const data = await res.json();
+          if (Array.isArray(data.students)) {
+            serverStudents = data.students;
+            deleteSucceeded = true;
+          }
+        }
+      } catch (err) {
+        console.warn('Lỗi mạng khi xóa danh sách học sinh (POST fallback):', err);
+      }
+    }
+
+    // 3. Cập nhật state nội bộ và localStorage ngay lập tức
+    setStudentRoster((prev) => {
+      let next: StudentRecord[];
+      if (deleteSucceeded && serverStudents) {
+        next = serverStudents;
+      } else if (className && className.trim()) {
+        const rawNorm = className.trim().toUpperCase();
+        const cleanNorm = rawNorm.replace(/^LỚP\s*|^LOP\s*/i, '');
+        next = prev.filter((s) => {
+          const sCls = (s.className || '').trim().toUpperCase();
+          const sClean = sCls.replace(/^LỚP\s*|^LOP\s*/i, '');
+          return sCls !== rawNorm && sClean !== cleanNorm && sCls !== cleanNorm;
+        });
+      } else {
+        next = [];
+      }
+
+      try {
+        localStorage.setItem('labgrade_student_roster', JSON.stringify(next));
+        if (typeof BroadcastChannel !== 'undefined') {
+          const bc = new BroadcastChannel('labgrade_session_channel');
+          bc.postMessage({ type: 'ROSTER_UPDATED', students: next });
+          bc.close();
+        }
+      } catch {}
+
+      return next;
+    });
+
+    return true;
+  };
+
+  // Đổi tên lớp học sinh nhanh chóng trong CSDL (ví dụ sửa nhầm 6B2 thành 6A2)
+  const handleRenameStudentClass = async (oldClassName: string, newClassName: string): Promise<boolean> => {
+    if (!oldClassName || !newClassName) return false;
+    let renameSucceeded = false;
+    let serverStudents: StudentRecord[] | null = null;
+
+    try {
+      const res = await apiFetch('/api/student-roster/rename', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ oldClassName: oldClassName.trim(), newClassName: newClassName.trim() }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (Array.isArray(data.students)) {
+          serverStudents = data.students;
+          renameSucceeded = true;
+        }
+      }
+    } catch (err) {
+      console.warn('Lỗi khi đổi tên lớp trên máy chủ:', err);
+    }
+
+    setStudentRoster((prev) => {
+      let next: StudentRecord[];
+      if (renameSucceeded && serverStudents) {
+        next = serverStudents;
+      } else {
+        const oldNorm = oldClassName.trim().toUpperCase();
+        const oldClean = oldNorm.replace(/^LỚP\s*|^LOP\s*/i, '');
+        const newNorm = newClassName.trim().toUpperCase().replace(/^LỚP\s*|^LOP\s*/i, '');
+        next = prev.map((s) => {
+          const sCls = (s.className || '').trim().toUpperCase();
+          const sClean = sCls.replace(/^LỚP\s*|^LOP\s*/i, '');
+          if (sCls === oldNorm || sClean === oldClean || sCls === oldClean) {
+            return { ...s, className: newNorm };
+          }
+          return s;
+        });
+      }
+
+      try {
+        localStorage.setItem('labgrade_student_roster', JSON.stringify(next));
+        if (typeof BroadcastChannel !== 'undefined') {
+          const bc = new BroadcastChannel('labgrade_session_channel');
+          bc.postMessage({ type: 'ROSTER_UPDATED', students: next });
+          bc.close();
+        }
+      } catch {}
+
+      return next;
+    });
+
     return true;
   };
 
@@ -803,7 +939,10 @@ export default function App() {
         }}
         roster={studentRoster}
         onSaveRoster={handleSaveStudentRoster}
+        onDeleteRoster={handleDeleteStudentRoster}
+        onRenameClass={handleRenameStudentClass}
         onOpenStudentRosterModal={() => setIsStudentRosterModalOpen(true)}
+        isTeacher={isTeacherRole}
       />
 
       {/* Student Roster Modal - Quản lý và Tải lên Danh Sách Học Sinh từ File Excel 3 Cột (Chỉ Giáo Viên) */}
@@ -813,6 +952,7 @@ export default function App() {
         roster={studentRoster}
         onSaveRoster={handleSaveStudentRoster}
         onDeleteRoster={handleDeleteStudentRoster}
+        onRenameClass={handleRenameStudentClass}
       />
 
       {/* Class Results Modal - View and download during practice */}
@@ -827,6 +967,7 @@ export default function App() {
           onToggleSubmissionPermission={handleToggleSubmissionPermission}
           onChangeClassName={handleSelectClassName}
           onRefresh={refreshSubmissionsAndStatus}
+          onClearSubmissions={handleClearAllSubmissions}
           dbStatus={dbStatus}
         />
       )}
@@ -839,6 +980,8 @@ export default function App() {
           submissions={submissions}
           onClose={() => setIsProjectorOpen(false)}
           onRefresh={refreshSubmissionsAndStatus}
+          onClearSubmissions={handleClearAllSubmissions}
+          isTeacher={isTeacherRole}
           allowSubmission={allowSubmission}
         />
       )}

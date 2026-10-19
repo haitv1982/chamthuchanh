@@ -51,6 +51,7 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
   const [teacherNoteInput, setTeacherNoteInput] = useState<string>('');
   const [overrideScoreInput, setOverrideScoreInput] = useState<string>('');
   const [exportSuccessMsg, setExportSuccessMsg] = useState<string | null>(null);
+  const [showConfirmClear, setShowConfirmClear] = useState<boolean>(false);
 
   // Exact 13 classes requested by teacher + 'Tất cả'
   const availableClasses = ['Tất cả', ...SCHOOL_CLASSES];
@@ -451,17 +452,40 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
             trong tiết học
           </div>
           <div className="flex items-center gap-2">
-            <button
-              onClick={() => {
-                if (confirm('Thầy/Cô có chắc chắn muốn làm mới toàn bộ danh sách bài nộp của lớp này?')) {
-                  onClearSubmissions(selectedClass === 'Tất cả' ? undefined : selectedClass);
-                }
-              }}
-              className="text-rose-600 hover:text-rose-700 flex items-center gap-1 font-semibold"
-            >
-              <Trash2 className="w-3.5 h-3.5" />
-              <span>Xóa dữ liệu lớp này</span>
-            </button>
+            {showConfirmClear ? (
+              <div className="flex items-center gap-2 bg-rose-50 border border-rose-200 px-3 py-1 rounded-xl text-rose-700 animate-in fade-in duration-150">
+                <span className="font-semibold text-xs">
+                  Xóa sạch bài nộp {selectedClass === 'Tất cả' ? 'toàn bộ các lớp' : `lớp ${selectedClass}`}?
+                </span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    onClearSubmissions(selectedClass === 'Tất cả' ? undefined : selectedClass);
+                    setShowConfirmClear(false);
+                  }}
+                  className="px-2 py-0.5 bg-rose-600 text-white font-bold rounded-lg hover:bg-rose-700 text-xs cursor-pointer shadow-2xs"
+                >
+                  Xác nhận
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setShowConfirmClear(false)}
+                  className="px-2 py-0.5 bg-slate-200 text-slate-700 font-bold rounded-lg hover:bg-slate-300 text-xs cursor-pointer"
+                >
+                  Hủy
+                </button>
+              </div>
+            ) : (
+              <button
+                type="button"
+                onClick={() => setShowConfirmClear(true)}
+                className="text-rose-600 hover:text-rose-700 flex items-center gap-1 font-semibold cursor-pointer px-2 py-1 hover:bg-rose-50 rounded-lg transition"
+                title="Xóa dữ liệu bài nộp của lớp này"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+                <span>Xóa dữ liệu lớp này</span>
+              </button>
+            )}
           </div>
         </div>
       </div>

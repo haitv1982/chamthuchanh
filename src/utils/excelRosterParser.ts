@@ -11,7 +11,10 @@ import { StudentRecord } from '../types';
  * - Bỏ qua tiêu đề trường, phòng GD&ĐT, chữ ký ban giám hiệu
  * - Không có dòng tiêu đề (Dữ liệu bắt đầu ngay từ dòng đầu tiên)
  */
-export function parseStudentExcel(buffer: ArrayBuffer | Uint8Array): {
+export function parseStudentExcel(
+  buffer: ArrayBuffer | Uint8Array,
+  defaultClass?: string
+): {
   students: StudentRecord[];
   classes: string[];
   summary: string;
@@ -146,9 +149,9 @@ export function parseStudentExcel(buffer: ArrayBuffer | Uint8Array): {
         continue;
       }
 
-      // Nếu vẫn chưa có lớp, lấy lớp từ sheet hoặc gán mặc định nếu không có
+      // Nếu vẫn chưa có lớp, lấy lớp từ sheet hoặc lớp mặc định đang chọn
       if (!className) {
-        className = sheetClassMatch || lastSeenClass || '8A1';
+        className = sheetClassMatch || lastSeenClass || (defaultClass ? cleanClassName(defaultClass) : '8A1');
       }
 
       allExtracted.push({

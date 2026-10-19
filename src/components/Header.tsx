@@ -349,27 +349,24 @@ export const Header: React.FC<HeaderProps> = ({
               </button>
             )}
 
-            {/* Nút Nhập Thông Tin (bên trái nút Máy Chiếu theo yêu cầu của Thầy/Cô) */}
+            {/* Nút Nhập Thông Tin (bên trái nút Máy Chiếu - Luôn hiện chữ 'Nhập Thông Tin') */}
             {onOpenStudentInfoModal && (
               <button
                 type="button"
                 onClick={onOpenStudentInfoModal}
-                title="Nháy vào đây để chọn khối, lớp, số máy và nhập tên học sinh / nhóm"
+                title={
+                  studentInfo?.className && studentInfo?.studentLeader
+                    ? `Đang thực hành: ${studentInfo.className} • ${studentInfo.machineNumber || 'Máy'} • ${studentInfo.studentLeader}. Nháy vào để sửa thông tin.`
+                    : 'Nháy vào đây để chọn khối, lớp, số máy và nhập tên học sinh / nhóm'
+                }
                 className={`flex items-center gap-1.5 px-3 py-1.5 sm:py-2 rounded-xl text-xs sm:text-sm font-bold border transition-all shadow-xs backdrop-blur-xs active:scale-95 cursor-pointer ${
                   studentInfo?.className && studentInfo?.studentLeader
-                    ? 'bg-emerald-500/25 hover:bg-emerald-500/35 text-white border-emerald-400/40 ring-1 ring-emerald-400/30'
+                    ? 'bg-emerald-500/25 hover:bg-emerald-500/35 text-white border-emerald-400/50 ring-1 ring-emerald-400/30'
                     : 'bg-amber-400 hover:bg-amber-300 text-slate-950 border-amber-300 font-black animate-pulse'
                 }`}
               >
                 <UserCheck className={`w-4 h-4 ${studentInfo?.className && studentInfo?.studentLeader ? 'text-emerald-300' : 'text-slate-950'}`} />
-                <span>
-                  {studentInfo?.className && studentInfo?.studentLeader
-                    ? `${studentInfo.className} • ${studentInfo.machineNumber || 'Máy'}`
-                    : 'Nhập Thông Tin'}
-                </span>
-                <span className="text-[11px] opacity-80 hidden xl:inline">
-                  {studentInfo?.studentLeader ? `(${studentInfo.studentLeader.split(' ').slice(-1)[0]})` : ''}
-                </span>
+                <span>Nhập Thông Tin</span>
               </button>
             )}
 
@@ -434,12 +431,12 @@ export const Header: React.FC<HeaderProps> = ({
               </button>
             )}
 
-            {/* Nút Danh Sách Học Sinh Các Lớp (Tải lên từ file Excel 3 cột) */}
-            {onOpenStudentRosterModal && (
+            {/* Nút Danh Sách Học Sinh Các Lớp (Tải lên từ file Excel 3 cột) - Chỉ hiển thị khi vào Quyền Giáo Viên */}
+            {isTeacher && onOpenStudentRosterModal && (
               <button
                 type="button"
                 onClick={onOpenStudentRosterModal}
-                className="flex items-center gap-1.5 px-3 py-1.5 sm:py-2 rounded-xl text-xs sm:text-sm font-bold bg-emerald-500/25 hover:bg-emerald-500/40 text-emerald-100 border border-emerald-300/40 transition-all shadow-xs cursor-pointer"
+                className="flex items-center gap-1.5 px-3 py-1.5 sm:py-2 rounded-xl text-xs sm:text-sm font-bold bg-emerald-500/25 hover:bg-emerald-500/40 text-emerald-100 border border-emerald-300/40 transition-all shadow-xs cursor-pointer animate-in fade-in"
                 title="Tải lên và quản lý danh sách học sinh các lớp từ tệp Excel 3 cột (TT, Họ và tên, Lớp)"
               >
                 <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-300" />

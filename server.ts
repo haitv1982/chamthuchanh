@@ -20,6 +20,7 @@ import {
   getAllStudents,
   saveStudentRoster,
   deleteStudentRoster,
+  renameStudentClass,
 } from './src/server/database';
 
 dotenv.config();
@@ -323,11 +324,21 @@ app.post('/api/submissions/sync-batch', (req, res) => {
   res.json(result);
 });
 
-// API: Xóa bài nộp theo lớp
-app.delete('/api/submissions', (req, res) => {
-  const { className } = req.query;
-  const remaining = deleteSubmissions(typeof className === 'string' ? className : undefined);
-  res.json({ success: true, count: remaining });
+// API: Xóa bài nộp theo lớp hoặc toàn bộ (Hỗ trợ cả DELETE và POST /delete)
+const handleDeleteSubmissions = (req: express.Request, res: express.Response) => {
+  const targetClass = req.query.className || req.body?.className;
+  const classNameStr = typeof targetClass === 'string' && targetClass.trim() ? targetClass.trim() : undefined;
+  const remaining = deleteSubmissions(classNameStr);
+  res.json({ success: true, count: remaining, submissions: getAllSubmissions() });
+};
+
+app.delete('/api/submissions', handleDeleteSubmissions);
+app.post('/api/submissions/delete', handleDeleteSubmissions);
+
+// API: Xóa sạch toàn bộ kết quả thực hành ảo và cũ khỏi CSDL máy chủ
+app.post('/api/submissions/clear', (_req, res) => {
+  const remaining = deleteSubmissions(); // xóa sạch 100%
+  res.json({ success: true, count: remaining, submissions: [] });
 });
 
 // API: Trạng thái chi tiết CSDL lưu trữ phòng máy
@@ -359,10 +370,24 @@ app.post('/api/student-roster', (req, res) => {
   res.json(result);
 });
 
-// API: Xóa danh sách học sinh (toàn bộ hoặc theo lớp)
-app.delete('/api/student-roster', (req, res) => {
-  const { className } = req.query;
-  const result = deleteStudentRoster(typeof className === 'string' ? className : undefined);
+// API: Xóa danh sách học sinh (toàn bộ hoặc theo lớp) - Hỗ trợ cả DELETE và POST /delete (tránh lỗi proxy/CORS chặn DELETE)
+const handleDeleteRoster = (req: express.Request, res: express.Response) => {
+  const targetClass = req.query.className || req.body?.className;
+  const classNameStr = typeof targetClass === 'string' && targetClass.trim() ? targetClass.trim() : undefined;
+  const result = deleteStudentRoster(classNameStr);
+  res.json(result);
+};
+
+app.delete('/api/student-roster', handleDeleteRoster);
+app.post('/api/student-roster/delete', handleDeleteRoster);
+
+// API: Đổi tên lớp học sinh nhanh chóng (ví dụ khắc phục khi nạp nhầm 6B2 thay vì 6A2)
+app.post('/api/student-roster/rename', (req, res) => {
+  const { oldClassName, newClassName } = req.body || {};
+  if (!oldClassName || !newClassName) {
+    return res.status(400).json({ error: 'Thiếu tên lớp cũ hoặc tên lớp mới' });
+  }
+  const result = renameStudentClass(String(oldClassName), String(newClassName));
   res.json(result);
 });
 
