@@ -193,6 +193,7 @@ export const Header: React.FC<HeaderProps> = ({
       return;
     }
 
+    let syncedToServer = false;
     // Gửi cập nhật lên máy chủ phòng máy
     try {
       const res = await apiFetch('/api/change-pin', {
@@ -208,26 +209,33 @@ export const Header: React.FC<HeaderProps> = ({
         setChangePinError(data.error || 'Mã PIN hiện tại không chính xác!');
         return;
       }
+      syncedToServer = true;
     } catch {
       // Fallback cục bộ nếu không kết nối được máy chủ
       if (currentPinInput.trim() !== teacherPin.trim()) {
         setChangePinError('Mã PIN hiện tại không chính xác!');
         return;
       }
+      syncedToServer = false;
     }
 
     const updatedPin = newPinInput.trim();
     setTeacherPin(updatedPin);
     localStorage.setItem(STORAGE_KEY_TEACHER_PIN, updatedPin);
 
-    setChangePinSuccess('Đã đổi mã PIN mới thành công! Thầy/cô vui lòng ghi nhớ mã PIN này.');
+    if (syncedToServer) {
+      setChangePinSuccess('✅ Đã đổi mã PIN thành công trên máy chủ CSDL 24/7! Toàn bộ máy học sinh và giáo viên sẽ dùng mã PIN mới này.');
+    } else {
+      setChangePinSuccess('⚠️ Đã đổi mã PIN trên máy này (Chế độ cục bộ). Chưa kết nối máy chủ CSDL nên mã PIN chưa tự động đổi trên các máy khác.');
+    }
+
     setTimeout(() => {
       setIsChangePinModalOpen(false);
       setCurrentPinInput('');
       setNewPinInput('');
       setConfirmPinInput('');
       setChangePinSuccess(null);
-    }, 1500);
+    }, 2500);
   };
 
   const handleTestPing = async () => {

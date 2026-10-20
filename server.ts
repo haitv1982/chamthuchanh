@@ -1,6 +1,7 @@
 import express from 'express';
 import dotenv from 'dotenv';
 import path from 'path';
+import fs from 'fs';
 import { fileURLToPath } from 'url';
 import { GoogleGenAI, Type } from '@google/genai';
 import { scanAndGradeProduct } from './src/utils/productScanner';
@@ -519,19 +520,51 @@ app.get('/api/health', (_req, res) => {
 });
 
 // Mount Vite or static build
-if (process.env.NODE_ENV !== 'production') {
+const distDir = path.resolve(__dirname, 'dist');
+const indexHtmlFile = path.join(distDir, 'index.html');
+
+let isDistReady = fs.existsSync(indexHtmlFile);
+
+if (!isDistReady && process.env.NODE_ENV === 'production') {
+  console.log('[LabGrade Server] ⚠️ Chưa tìm thấy dist/index.html. Đang tự động chạy npm run build...');
+  try {
+    const { execSync } = await import('child_process');
+    execSync('npm run build', { stdio: 'inherit' });
+    isDistReady = fs.existsSync(indexHtmlFile);
+    if (isDistReady) {
+      console.log('[LabGrade Server] ✅ Tự động biên dịch dist thành công!');
+    }
+  } catch (buildError) {
+    console.error('[LabGrade Server] ⚠️ Không thể chạy npm run build, sẽ chuyển sang Vite middleware:', buildError);
+  }
+}
+
+if (isDistReady) {
+  app.use(express.static(distDir));
+  app.get('*', (_req, res) => {
+    res.sendFile(indexHtmlFile, (err) => {
+      if (err && !res.headersSent) {
+        res.status(500).send('Không thể tải trang: ' + (err as Error).message);
+      }
+    });
+  });
+} else {
+  console.log('[LabGrade Server] 🚀 Khởi chạy Vite middleware phục vụ giao diện trực tiếp...');
   const { createServer } = await import('vite');
   const vite = await createServer({
     server: { middlewareMode: true },
     appType: 'spa',
   });
   app.use(vite.middlewares);
-} else {
-  app.use(express.static(path.resolve(__dirname, 'dist')));
-  app.get('*', (_req, res) => {
-    res.sendFile(path.resolve(__dirname, 'dist', 'index.html'));
-  });
 }
+
+// Error handling middleware to prevent uncaught exceptions
+app.use((err: any, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+  console.error('[Server Internal Error]', err);
+  if (!res.headersSent) {
+    res.status(500).json({ error: 'Server Internal Error', message: err?.message || String(err) });
+  }
+});
 
 app.listen(PORT, '0.0.0.0', () => {
   const interfaces = os.networkInterfaces();

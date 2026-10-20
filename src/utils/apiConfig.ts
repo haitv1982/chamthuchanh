@@ -7,8 +7,8 @@
  * 3. Mạng nội bộ phòng máy trường học (LAN IP ví dụ http://192.168.1.100:3000)
  */
 
-// Địa chỉ máy chủ Cloud Run trung tâm mặc định (liên thông dữ liệu 24/7 khi mở từ GitHub Pages)
-export const DEFAULT_CLOUD_BACKEND_URL = 'https://ais-pre-z4vcbgzjafe3fqbkfbktwa-152013379411.asia-east1.run.app';
+// Địa chỉ máy chủ Cloud trung tâm mặc định (liên thông dữ liệu 24/7 khi mở từ GitHub Pages)
+export const DEFAULT_CLOUD_BACKEND_URL = 'https://chamthuchanh.onrender.com';
 
 export const STORAGE_KEY_SERVER_URL = 'labgrade_custom_server_url_v1';
 
