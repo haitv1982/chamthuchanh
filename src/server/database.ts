@@ -71,11 +71,10 @@ export function initLabDatabase(): DatabaseState {
       const raw = fs.readFileSync(DB_FILE, 'utf-8');
       const parsed = JSON.parse(raw);
       if (parsed && Array.isArray(parsed.submissions)) {
-        // Tự động xóa sạch toàn bộ kết quả chấm ảo hoặc bài nộp cũ của các ngày trước đây
+        // Loại bỏ bài nộp mock ảo, giữ nguyên toàn bộ bài nộp thực tế của học sinh
         const cleanSubmissions = parsed.submissions.filter((s: any) => {
           if (!s || String(s.id).startsWith('mock-')) return false;
-          const subDate = s.practiceDate || (s.latestSubmittedAt ? s.latestSubmittedAt.slice(0, 10) : '');
-          return subDate === todayStr;
+          return true;
         });
 
         dbState = {
@@ -86,7 +85,7 @@ export function initLabDatabase(): DatabaseState {
           submissions: cleanSubmissions,
         };
         flushDatabaseToDisk();
-        console.log(`[CSDL Thực Hành] Khôi phục thành công ${dbState.submissions.length} bài nộp ngày hôm nay (${todayStr}) từ CSDL đĩa: ${DB_FILE} (Cho phép nộp: ${dbState.allowSubmission ? 'BẬT' : 'KHÓA'})`);
+        console.log(`[CSDL Thực Hành] Khôi phục thành công ${dbState.submissions.length} bài nộp từ CSDL đĩa: ${DB_FILE} (Cho phép nộp: ${dbState.allowSubmission ? 'BẬT' : 'KHÓA'})`);
         return dbState;
       }
     } catch (err) {
@@ -98,8 +97,7 @@ export function initLabDatabase(): DatabaseState {
           if (parsed && Array.isArray(parsed.submissions)) {
             const cleanSubmissions = parsed.submissions.filter((s: any) => {
               if (!s || String(s.id).startsWith('mock-')) return false;
-              const subDate = s.practiceDate || (s.latestSubmittedAt ? s.latestSubmittedAt.slice(0, 10) : '');
-              return subDate === todayStr;
+              return true;
             });
             dbState = {
               version: parsed.version || '2.0.0',
@@ -108,7 +106,7 @@ export function initLabDatabase(): DatabaseState {
               teacherPin: typeof parsed.teacherPin === 'string' ? parsed.teacherPin : '1234',
               submissions: cleanSubmissions,
             };
-            console.log(`[CSDL Thực Hành] Đã khôi phục ${dbState.submissions.length} bản ghi hôm nay từ tệp sao lưu.`);
+            console.log(`[CSDL Thực Hành] Đã khôi phục ${dbState.submissions.length} bản ghi từ tệp sao lưu.`);
             flushDatabaseToDisk();
             return dbState;
           }
@@ -312,6 +310,11 @@ export function getDatabaseMetrics() {
 // QUẢN LÝ DANH SÁCH HỌC SINH TỪNG LỚP (TẢI LÊN TỪ EXCEL)
 // ==============================================================
 let studentRosterState: StudentRecord[] = [];
+let rosterLastUpdated: string = new Date().toISOString();
+
+export function getRosterLastUpdated(): string {
+  return rosterLastUpdated;
+}
 
 // Khởi tạo danh sách học sinh từ đĩa (hỗ trợ nạp cả CSDL riêng từng lớp và tệp tổng hợp)
 function loadStudentRoster(): StudentRecord[] {
@@ -362,6 +365,7 @@ function loadStudentRoster(): StudentRecord[] {
 function flushStudentRosterToDisk(): boolean {
   try {
     ensureDataDir();
+    rosterLastUpdated = new Date().toISOString();
     if (!fs.existsSync(ROSTERS_DIR)) {
       fs.mkdirSync(ROSTERS_DIR, { recursive: true });
     }

@@ -6,6 +6,7 @@ import { GoogleGenAI, Type } from '@google/genai';
 import { scanAndGradeProduct } from './src/utils/productScanner';
 import { INITIAL_SUBMISSIONS } from './src/data/mockSubmissions';
 
+import os from 'os';
 import {
   initLabDatabase,
   getAllSubmissions,
@@ -21,6 +22,7 @@ import {
   saveStudentRoster,
   deleteStudentRoster,
   renameStudentClass,
+  getRosterLastUpdated,
 } from './src/server/database';
 
 dotenv.config();
@@ -30,6 +32,20 @@ const __dirname = path.dirname(__filename);
 
 const app = express();
 const PORT = Number(process.env.PORT) || 3000;
+
+// Bộ quản lý Server-Sent Events (SSE) thời gian thực kết nối giữa máy GV và tất cả máy HS
+const sseClients = new Set<express.Response>();
+
+export function broadcastRealtimeEvent(event: { type: string; [key: string]: any }) {
+  const payload = `data: ${JSON.stringify(event)}\n\n`;
+  for (const client of sseClients) {
+    try {
+      client.write(payload);
+    } catch {
+      sseClients.delete(client);
+    }
+  }
+}
 
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
@@ -237,6 +253,10 @@ app.post('/api/session-status', (req, res) => {
   const { allow } = req.body;
   if (typeof allow === 'boolean') {
     setAllowSubmission(allow);
+    broadcastRealtimeEvent({
+      type: 'SUBMISSION_PERMISSION_CHANGED',
+      allow: getAllowSubmission(),
+    });
   }
   res.json({ success: true, allowSubmission: getAllowSubmission() });
 });
@@ -294,6 +314,14 @@ app.post('/api/submissions', (req, res) => {
 
   try {
     const result = upsertSubmission(newSubmission);
+    // Phát sóng sự kiện thời gian thực tới tất cả máy giáo viên và học sinh
+    broadcastRealtimeEvent({
+      type: 'SUBMISSION_UPDATED',
+      submission: result.submission,
+      totalSubmissions: result.totalCount,
+      dbStatus: getDatabaseMetrics(),
+    });
+
     res.json({
       success: true,
       count: result.totalCount,
@@ -321,6 +349,12 @@ app.post('/api/submissions/sync-batch', (req, res) => {
     return res.status(400).json({ error: 'Dữ liệu không phải là danh sách bài nộp' });
   }
   const result = batchSyncSubmissions(submissions);
+  broadcastRealtimeEvent({
+    type: 'SUBMISSIONS_SYNCED',
+    addedCount: result.count,
+    submissions: getAllSubmissions(),
+    dbStatus: getDatabaseMetrics(),
+  });
   res.json(result);
 });
 
@@ -329,6 +363,11 @@ const handleDeleteSubmissions = (req: express.Request, res: express.Response) =>
   const targetClass = req.query.className || req.body?.className;
   const classNameStr = typeof targetClass === 'string' && targetClass.trim() ? targetClass.trim() : undefined;
   const remaining = deleteSubmissions(classNameStr);
+  broadcastRealtimeEvent({
+    type: 'SUBMISSIONS_CLEARED',
+    className: classNameStr,
+    count: remaining,
+  });
   res.json({ success: true, count: remaining, submissions: getAllSubmissions() });
 };
 
@@ -338,6 +377,10 @@ app.post('/api/submissions/delete', handleDeleteSubmissions);
 // API: Xóa sạch toàn bộ kết quả thực hành ảo và cũ khỏi CSDL máy chủ
 app.post('/api/submissions/clear', (_req, res) => {
   const remaining = deleteSubmissions(); // xóa sạch 100%
+  broadcastRealtimeEvent({
+    type: 'SUBMISSIONS_CLEARED',
+    count: remaining,
+  });
   res.json({ success: true, count: remaining, submissions: [] });
 });
 
@@ -357,7 +400,7 @@ app.get('/api/database/export-json', (_req, res) => {
 // API: Lấy danh sách học sinh các lớp (tải lên từ Excel)
 app.get('/api/student-roster', (_req, res) => {
   const students = getAllStudents();
-  res.json({ success: true, count: students.length, students });
+  res.json({ success: true, count: students.length, students, lastUpdated: getRosterLastUpdated() });
 });
 
 // API: Cập nhật danh sách học sinh từ Excel (Giáo viên tải lên)
@@ -367,14 +410,29 @@ app.post('/api/student-roster', (req, res) => {
     return res.status(400).json({ error: 'Dữ liệu không phải là danh sách học sinh' });
   }
   const result = saveStudentRoster(students, mode);
+  // BẮT BUỘC: Phát sóng thời gian thực tới tất cả máy học sinh để cập nhật ngay danh sách nhập thông tin
+  broadcastRealtimeEvent({
+    type: 'ROSTER_UPDATED',
+    students: result.students,
+    total: result.total,
+    classes: result.classes,
+    lastUpdated: getRosterLastUpdated(),
+  });
   res.json(result);
 });
 
-// API: Xóa danh sách học sinh (toàn bộ hoặc theo lớp) - Hỗ trợ cả DELETE và POST /delete (tránh lỗi proxy/CORS chặn DELETE)
+// API: Xóa danh sách học sinh (toàn bộ hoặc theo lớp) - Hỗ trợ cả DELETE và POST /delete
 const handleDeleteRoster = (req: express.Request, res: express.Response) => {
   const targetClass = req.query.className || req.body?.className;
   const classNameStr = typeof targetClass === 'string' && targetClass.trim() ? targetClass.trim() : undefined;
   const result = deleteStudentRoster(classNameStr);
+  broadcastRealtimeEvent({
+    type: 'ROSTER_UPDATED',
+    students: getAllStudents(),
+    total: result.count,
+    classes: result.classes,
+    deletedClass: classNameStr,
+  });
   res.json(result);
 };
 
@@ -388,7 +446,66 @@ app.post('/api/student-roster/rename', (req, res) => {
     return res.status(400).json({ error: 'Thiếu tên lớp cũ hoặc tên lớp mới' });
   }
   const result = renameStudentClass(String(oldClassName), String(newClassName));
+  broadcastRealtimeEvent({
+    type: 'ROSTER_UPDATED',
+    students: getAllStudents(),
+    total: result.count,
+    classes: result.classes,
+    renamed: { oldClassName, newClassName },
+  });
   res.json(result);
+});
+
+// Endpoint SSE kênh thời gian thực: /api/events (kết nối liên tục giữa máy GV và máy HS)
+app.get('/api/events', (req, res) => {
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache, no-transform',
+    'Connection': 'keep-alive',
+    'Access-Control-Allow-Origin': '*',
+  });
+
+  // Gửi thông báo kết nối thành công và số máy trạm đang mở
+  res.write(`data: ${JSON.stringify({ type: 'CONNECTED', clientsCount: sseClients.size + 1 })}\n\n`);
+
+  sseClients.add(res);
+
+  // Heartbeat ping mỗi 15 giây để duy trì kết nối
+  const keepAlive = setInterval(() => {
+    try {
+      res.write(': keepalive\n\n');
+    } catch {
+      clearInterval(keepAlive);
+      sseClients.delete(res);
+    }
+  }, 15000);
+
+  req.on('close', () => {
+    clearInterval(keepAlive);
+    sseClients.delete(res);
+  });
+});
+
+// Endpoint thông tin mạng nội bộ: /api/network-info
+app.get('/api/network-info', (_req, res) => {
+  const interfaces = os.networkInterfaces();
+  const lanIps: string[] = [];
+
+  for (const name of Object.keys(interfaces)) {
+    for (const net of interfaces[name] || []) {
+      if (net.family === 'IPv4' && !net.internal) {
+        lanIps.push(net.address);
+      }
+    }
+  }
+
+  res.json({
+    port: PORT,
+    lanIps,
+    lanUrls: lanIps.map((ip) => `http://${ip}:${PORT}`),
+    activeClients: sseClients.size,
+    serverTime: new Date().toISOString(),
+  });
 });
 
 app.get('/api/health', (_req, res) => {
@@ -396,6 +513,7 @@ app.get('/api/health', (_req, res) => {
     status: 'ok',
     hasGeminiKey: Boolean(process.env.GEMINI_API_KEY),
     submissionsCount: getAllSubmissions().length,
+    activeClients: sseClients.size,
     timestamp: new Date().toISOString(),
   });
 });
@@ -416,5 +534,24 @@ if (process.env.NODE_ENV !== 'production') {
 }
 
 app.listen(PORT, '0.0.0.0', () => {
-  console.log(`[LabGrade Server] Listening on port ${PORT}`);
+  const interfaces = os.networkInterfaces();
+  const lanIps: string[] = [];
+  for (const name of Object.keys(interfaces)) {
+    for (const net of interfaces[name] || []) {
+      if (net.family === 'IPv4' && !net.internal) {
+        lanIps.push(net.address);
+      }
+    }
+  }
+
+  console.log(`====================================================`);
+  console.log(`[LabGrade Server] Máy chủ CSDL phòng máy đã khởi chạy thành công:`);
+  console.log(`👉 Trực tiếp trên máy này: http://localhost:${PORT}`);
+  if (lanIps.length > 0) {
+    lanIps.forEach((ip) => {
+      console.log(`👉 Cho các máy học sinh (mạng LAN phòng máy): http://${ip}:${PORT}`);
+    });
+  }
+  console.log(`====================================================`);
 });
+

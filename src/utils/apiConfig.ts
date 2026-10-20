@@ -7,8 +7,8 @@
  * 3. Mạng nội bộ phòng máy trường học (LAN IP ví dụ http://192.168.1.100:3000)
  */
 
-// Địa chỉ máy chủ Cloud Run trung tâm mặc định (đã cấu hình CSDL liên tục 24/7 và CORS)
-export const DEFAULT_CLOUD_BACKEND_URL = 'https://ais-dev-z4vcbgzjafe3fqbkfbktwa-152013379411.asia-east1.run.app';
+// Địa chỉ máy chủ Cloud Run trung tâm mặc định (liên thông dữ liệu 24/7 khi mở từ GitHub Pages)
+export const DEFAULT_CLOUD_BACKEND_URL = 'https://ais-pre-z4vcbgzjafe3fqbkfbktwa-152013379411.asia-east1.run.app';
 
 export const STORAGE_KEY_SERVER_URL = 'labgrade_custom_server_url_v1';
 
@@ -24,7 +24,7 @@ export function isStaticHosting(): boolean {
     host.endsWith('pages.dev') ||
     host.endsWith('vercel.app') ||
     host.endsWith('netlify.app') ||
-    host === '127.0.0.1' && window.location.port !== '3000'
+    (host === '127.0.0.1' && window.location.port !== '3000')
   );
 }
 
@@ -34,21 +34,29 @@ export function isStaticHosting(): boolean {
 export function getServerBaseUrl(): string {
   if (typeof window === 'undefined') return '';
 
-  // 1. Nếu giáo viên đã chủ động cài đặt địa chỉ máy chủ (vd IP mạng LAN phòng máy)
+  // 1. Nếu giáo viên/học sinh đã cài đặt địa chỉ máy chủ (vd IP phòng máy http://192.168.1.xxx:3000 hoặc Render/Cloud URL)
   const customUrl = localStorage.getItem(STORAGE_KEY_SERVER_URL);
   if (customUrl && customUrl.trim()) {
     return customUrl.trim().replace(/\/+$/, '');
   }
 
-  // 2. Nếu đang chạy trên GitHub Pages (haitv198.github.io/chamthuchanh)
-  // Tự động kết nối tới máy chủ CSDL Cloud Run trung tâm để toàn bộ máy học sinh và giáo viên liên thông với nhau
-  if (isStaticHosting()) {
-    return DEFAULT_CLOUD_BACKEND_URL;
+  // 2. Nếu đang chạy trực tiếp trên máy chủ có server.ts (máy giáo viên hoặc Cloud Run / Render)
+  // Dùng relative path để tối ưu tốc độ và không cần cấu hình IP
+  if (!isStaticHosting()) {
+    return '';
   }
 
-  // 3. Nếu đang chạy trực tiếp trên Cloud Run hoặc localhost:3000 (đã có server.ts nội tại)
-  // Dùng relative path để tối ưu tốc độ
-  return '';
+  // 3. Nếu đang chạy trên GitHub Pages tĩnh và có cấu hình DEFAULT_CLOUD_BACKEND_URL
+  return DEFAULT_CLOUD_BACKEND_URL;
+}
+
+/**
+ * Kiểm tra xem máy khách đã được cấu hình kết nối tới máy chủ hợp lệ hay chưa
+ */
+export function isBackendConfigured(): boolean {
+  if (!isStaticHosting()) return true; // Đang chạy trực tiếp trên máy chủ backend
+  const customUrl = localStorage.getItem(STORAGE_KEY_SERVER_URL);
+  return Boolean(customUrl && customUrl.trim()) || Boolean(DEFAULT_CLOUD_BACKEND_URL);
 }
 
 /**
@@ -143,3 +151,25 @@ export async function testServerConnection(customTargetUrl?: string): Promise<{
     };
   }
 }
+
+/**
+ * Lấy thông tin mạng nội bộ và danh sách IP từ máy chủ CSDL phòng máy
+ */
+export async function fetchNetworkInfo(): Promise<{
+  port: number;
+  lanIps: string[];
+  lanUrls: string[];
+  activeClients: number;
+  serverTime: string;
+} | null> {
+  try {
+    const res = await apiFetch('/api/network-info', { method: 'GET' }, 3000);
+    if (res.ok) {
+      return await res.json();
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+

@@ -19,6 +19,7 @@ import {
   ExternalLink,
   Save,
   X,
+  RefreshCw,
 } from 'lucide-react';
 import { Assignment, Submission, SubmissionAttempt } from '../types';
 import { SCHOOL_CLASSES } from '../data/classes';
@@ -33,6 +34,7 @@ interface TeacherDashboardProps {
   onOpenCreateAssignment: () => void;
   onUpdateSubmission: (submission: Submission) => void;
   onClearSubmissions: (className?: string) => void;
+  onRefresh?: () => Promise<void>;
 }
 
 export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
@@ -44,8 +46,10 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
   onOpenCreateAssignment,
   onUpdateSubmission,
   onClearSubmissions,
+  onRefresh,
 }) => {
   const [selectedClass, setSelectedClass] = useState<string>('8A2');
+  const [isRefreshing, setIsRefreshing] = useState<boolean>(false);
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [viewingSubmission, setViewingSubmission] = useState<Submission | null>(null);
   const [teacherNoteInput, setTeacherNoteInput] = useState<string>('');
@@ -86,8 +90,13 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
     : '0';
 
   // Handle Export to Excel
-  const handleExportExcel = () => {
+  const handleExportExcel = async () => {
     try {
+      if (onRefresh) {
+        setIsRefreshing(true);
+        await onRefresh();
+        setIsRefreshing(false);
+      }
       exportSubmissionsToExcel({
         className: selectedClass,
         assignment: activeAssignment,
@@ -98,6 +107,7 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
       setExportSuccessMsg(`Đã xuất thành công file Excel cho lớp ${selectedClass}!`);
       setTimeout(() => setExportSuccessMsg(null), 4000);
     } catch (err: any) {
+      setIsRefreshing(false);
       alert('Không thể xuất file: ' + (err.message || 'Lỗi không xác định'));
     }
   };
@@ -156,11 +166,28 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
 
         {/* Action Buttons */}
         <div className="flex flex-wrap items-center gap-2.5">
+          {/* Refresh Submissions Button */}
+          {onRefresh && (
+            <button
+              onClick={async () => {
+                setIsRefreshing(true);
+                await onRefresh();
+                setTimeout(() => setIsRefreshing(false), 600);
+              }}
+              disabled={isRefreshing}
+              title="Làm mới và tải lại toàn bộ kết quả bài nộp từ CSDL phòng máy"
+              className="flex items-center gap-2 px-3.5 py-2.5 bg-slate-800 hover:bg-slate-700 text-white rounded-xl text-xs sm:text-sm font-bold shadow-xs hover:shadow transition-all cursor-pointer disabled:opacity-50"
+            >
+              <RefreshCw className={`w-4 h-4 text-cyan-400 ${isRefreshing ? 'animate-spin' : ''}`} />
+              <span>{isRefreshing ? 'Đang tải...' : 'Làm Mới CSDL'}</span>
+            </button>
+          )}
+
           {/* Export Excel Button */}
           <button
             onClick={handleExportExcel}
             title="Xuất file Excel đầy đủ từng học sinh trong lớp (cả trưởng nhóm và tất cả các bạn thành viên)"
-            className="flex items-center gap-2 px-4 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs sm:text-sm font-bold shadow-xs hover:shadow transition-all"
+            className="flex items-center gap-2 px-4 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs sm:text-sm font-bold shadow-xs hover:shadow transition-all cursor-pointer"
           >
             <FileSpreadsheet className="w-4 h-4" />
             <span>Xuất Excel (Tất Cả Học Sinh)</span>

@@ -238,17 +238,12 @@ export function sanitizeSubmission(raw: any): Submission {
  */
 export function loadSubmissionsSafely(fallback: Submission[] = []): Submission[] {
   try {
-    const todayStr = getTodayDateString();
     const saved = localStorage.getItem(STORAGE_KEY_SUBMISSIONS);
     if (saved !== null) {
       const parsed = JSON.parse(saved);
       if (Array.isArray(parsed)) {
         return parsed
-          .filter((s) => {
-            if (!s || String(s.id).startsWith('mock-')) return false;
-            // Chỉ giữ lại bài nộp của ngày thực hành hôm nay, tự động loại bỏ các kết quả ảo ngày trước
-            return s.practiceDate === todayStr || isSubmittedToday(s.latestSubmittedAt, todayStr);
-          })
+          .filter((s) => s && !String(s.id).startsWith('mock-'))
           .map(sanitizeSubmission);
       }
     }

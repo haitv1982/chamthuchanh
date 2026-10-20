@@ -24,6 +24,7 @@ import {
 } from './utils/storageManager';
 import { scanAndGradeProduct } from './utils/productScanner';
 import { apiFetch, getApiUrl } from './utils/apiConfig';
+import { realtimeSync } from './utils/realtimeSync';
 
 const STORAGE_KEY_ASSIGNMENTS = 'labgrade_assignments_v7_grade6_grade7_grade8_grade9';
 const STORAGE_KEY_CLASS = 'labgrade_current_class_v1';
@@ -125,20 +126,21 @@ export default function App() {
     } catch {}
   }, [studentRoster]);
 
-  // Tải danh sách học sinh từ máy chủ khi mở ứng dụng
-  useEffect(() => {
-    const fetchRoster = async () => {
-      try {
-        const res = await apiFetch('/api/student-roster');
-        if (res.ok) {
-          const data = await res.json();
-          if (Array.isArray(data.students)) {
-            setStudentRoster(data.students);
-          }
+  // Tải danh sách học sinh từ máy chủ (liên thông dữ liệu thời gian thực giữa máy GV và máy HS)
+  const fetchRosterLatest = async () => {
+    try {
+      const res = await apiFetch('/api/student-roster');
+      if (res.ok) {
+        const data = await res.json();
+        if (Array.isArray(data.students)) {
+          setStudentRoster(data.students);
         }
-      } catch {}
-    };
-    fetchRoster();
+      }
+    } catch {}
+  };
+
+  useEffect(() => {
+    fetchRosterLatest();
   }, []);
 
   // Role: 'teacher' (Giáo viên) vs 'student' (Học sinh) - Mặc định trên máy mới là Học sinh (chỉ chuyển Giáo viên khi nhập mã PIN)
@@ -165,8 +167,64 @@ export default function App() {
     } catch {}
   }, [allowSubmission]);
 
-  // Đồng bộ trạng thái khóa nộp bài tức thời giữa các tab/cửa sổ trên cùng máy
+  // Trạng thái kết nối kênh thời gian thực (Server-Sent Events) tới máy chủ CSDL
+  const [isRealtimeConnected, setIsRealtimeConnected] = useState<boolean>(false);
+
+  // Kênh thời gian thực liên thông dữ liệu tức thời giữa Máy Giáo Viên và tất cả Máy Học Sinh
   useEffect(() => {
+    // 1. Kết nối kênh SSE thời gian thực tới máy chủ
+    realtimeSync.connect();
+
+    const unsubscribe = realtimeSync.subscribe((event) => {
+      if (event.type === 'CONNECTION_STATUS') {
+        setIsRealtimeConnected(event.connected);
+      } else if (event.type === 'ROSTER_UPDATED') {
+        if (Array.isArray(event.students)) {
+          setStudentRoster(event.students);
+          try {
+            localStorage.setItem('labgrade_student_roster', JSON.stringify(event.students));
+          } catch {}
+          console.log(`[Thời Gian Thực] Đã tự động cập nhật danh sách ${event.students.length} học sinh từ máy chủ.`);
+        }
+      } else if (event.type === 'SUBMISSION_UPDATED' && event.submission) {
+        const cleanSub = sanitizeSubmission(event.submission);
+        setSubmissions((prev) => {
+          const filtered = prev.filter((s) => s.id !== cleanSub.id && !(s.className === cleanSub.className && s.machineNumber === cleanSub.machineNumber && s.practiceDate === cleanSub.practiceDate));
+          const next = pruneOldSubmissions([cleanSub, ...filtered]);
+          saveSubmissionsSafely(next);
+          return next;
+        });
+        if (event.dbStatus) {
+          setDbStatus(event.dbStatus);
+        }
+        console.log(`[Thời Gian Thực] Nhận bài nộp mới từ máy học sinh: ${cleanSub.machineNumber} - Lớp ${cleanSub.className}`);
+      } else if (event.type === 'SUBMISSIONS_SYNCED' && Array.isArray(event.submissions)) {
+        const cleanList = event.submissions
+          .filter((s: any) => s && !String(s.id).startsWith('mock-'))
+          .map((s: any) => sanitizeSubmission(s));
+        setSubmissions(cleanList);
+        saveSubmissionsSafely(cleanList);
+        if (event.dbStatus) {
+          setDbStatus(event.dbStatus);
+        }
+      } else if (event.type === 'SUBMISSIONS_CLEARED') {
+        if (event.className) {
+          setSubmissions((prev) => {
+            const next = prev.filter((s) => s.className !== event.className);
+            saveSubmissionsSafely(next);
+            return next;
+          });
+        } else {
+          setSubmissions([]);
+          purgeAllLegacySubmissions();
+          saveSubmissionsSafely([]);
+        }
+      } else if (event.type === 'SUBMISSION_PERMISSION_CHANGED' && typeof event.allow === 'boolean') {
+        setAllowSubmission(event.allow);
+      }
+    });
+
+    // 2. Kênh BroadcastChannel hỗ trợ giữa các tab/cửa sổ trên cùng máy
     let bc: BroadcastChannel | null = null;
     if (typeof BroadcastChannel !== 'undefined') {
       try {
@@ -194,6 +252,8 @@ export default function App() {
     window.addEventListener('storage', handleStorageChange);
 
     return () => {
+      unsubscribe();
+      realtimeSync.disconnect();
       if (bc) bc.close();
       window.removeEventListener('storage', handleStorageChange);
     };
@@ -250,12 +310,8 @@ export default function App() {
           setDbStatus(data.dbStatus);
         }
         if (Array.isArray(data.submissions)) {
-          const todayStr = getTodayDateString();
           const cleanSubs = data.submissions
-            .filter((s: any) => {
-              if (!s || String(s.id).startsWith('mock-')) return false;
-              return s.practiceDate === todayStr || isSubmittedToday(s.latestSubmittedAt, todayStr);
-            })
+            .filter((s: any) => s && !String(s.id).startsWith('mock-'))
             .map((raw: any) => sanitizeSubmission(raw));
           setSubmissions(cleanSubs);
         }
@@ -263,6 +319,17 @@ export default function App() {
     } catch {
       // offline or network congestion resilience in busy computer lab
     }
+
+    // 3. Tự động đồng bộ danh sách học sinh từ CSDL máy chủ liên tục để máy học sinh luôn có danh sách mới nhất
+    try {
+      const rosterRes = await apiFetch('/api/student-roster', { method: 'GET' }, 5000);
+      if (rosterRes.ok) {
+        const rosterData = await rosterRes.json();
+        if (Array.isArray(rosterData.students)) {
+          setStudentRoster(rosterData.students);
+        }
+      }
+    } catch {}
   };
 
   // Đồng bộ toàn bộ bài nộp trên máy này lên CSDL trung tâm
@@ -814,15 +881,23 @@ export default function App() {
   };
 
   // Export Excel handler for active class or specified class (Hỗ trợ lọc theo ngày bất kỳ hoặc ngày gần nhất)
-  const handleExportClassExcel = (
+  const handleExportClassExcel = async (
     customClass?: string,
     targetDate?: string | null,
     dateMode: 'all' | 'latest' | 'custom' = 'all'
   ) => {
+    // Luôn chủ động đồng bộ bài nộp mới nhất từ máy chủ CSDL trước khi xuất file Excel
+    try {
+      await refreshSubmissionsAndStatus();
+    } catch {}
+
+    const targetClassName = typeof customClass === 'string' && customClass ? customClass : userClassName;
+    const latestSubs = loadSubmissionsSafely(submissions);
+
     exportSubmissionsToExcel({
-      className: typeof customClass === 'string' && customClass ? customClass : userClassName,
+      className: targetClassName,
       assignment: activeAssignment,
-      submissions,
+      submissions: latestSubs,
       targetDate,
       dateMode,
     });
@@ -867,6 +942,7 @@ export default function App() {
         onRefreshDb={refreshSubmissionsAndStatus}
         onSyncAllLocalSubmissionsToDb={handleSyncAllLocalSubmissionsToDb}
         onOpenStudentRosterModal={() => setIsStudentRosterModalOpen(true)}
+        isRealtimeConnected={isRealtimeConnected}
       />
 
       {/* Main Student Workspace (Single focused interface without scrolling) */}
@@ -941,6 +1017,7 @@ export default function App() {
         onSaveRoster={handleSaveStudentRoster}
         onDeleteRoster={handleDeleteStudentRoster}
         onRenameClass={handleRenameStudentClass}
+        onRefreshRoster={fetchRosterLatest}
         onOpenStudentRosterModal={() => setIsStudentRosterModalOpen(true)}
         isTeacher={isTeacherRole}
       />
