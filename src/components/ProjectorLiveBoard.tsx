@@ -190,18 +190,20 @@ export const ProjectorLiveBoard: React.FC<ProjectorLiveBoardProps> = ({
         return;
       }
       try {
-        const verifyRes = await apiFetch('/api/teacher/verify-pin', {
+        const verifyRes = await apiFetch('/api/verify-pin', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ pin: teacherPinInput.trim() }),
         });
-        if (!verifyRes.ok) {
-          const vData = await verifyRes.json();
+        const vData = await verifyRes.json().catch(() => ({}));
+        if (!verifyRes.ok || !vData.success) {
           setPinErrorMsg(vData.error || 'Mã PIN Giáo viên không chính xác.');
           return;
         }
-      } catch {
-        if (teacherPinInput.trim() !== '1234') {
+      } catch (err) {
+        // Chỉ khi mất mạng hoàn toàn: đối chiếu với mã đã lưu trong localStorage
+        const localPin = localStorage.getItem('labgrade_teacher_pin_v1') || '1234';
+        if (teacherPinInput.trim() !== localPin) {
           setPinErrorMsg('Mã PIN Giáo viên không chính xác.');
           return;
         }

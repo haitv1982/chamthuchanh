@@ -364,19 +364,23 @@ export function scanAndGradeProduct(params: {
           status = 'failed';
           detail = `Chưa tạo bảng biểu theo yêu cầu. Hãy chèn bảng (Insert -> Table).`;
         }
-      } else if (normStep.includes('it nhat 8') || normStep.includes('8 thiet bi')) {
-        // Kiểm tra số lượng thiết bị (TH7_SP01)
-        const deviceNames = ['ban phim', 'chuot', 'man hinh', 'may in', 'loa', 'micro', 'may quet', 'may chieu', 'tai nghe', 'o dia'];
+      } else if (normStep.includes('it nhat 8') || normStep.includes('8 thiet bi') || normStep.includes('thiet bi vao')) {
+        // Kiểm tra số lượng thiết bị (TH7_SP01) hỗ trợ đa dạng từ đồng nghĩa thực tế của học sinh
+        const deviceNames = [
+          'ban phim', 'chuot', 'man hinh', 'may in', 'loa', 'micro', 'may quet', 'scanner', 
+          'may chieu', 'tai nghe', 'o dia', 'o cung', 'usb', 'camera', 'webcam', 'but cam ung', 
+          'man cam ung', 'bo thu am', 'thiet bi vao', 'thiet bi ra'
+        ];
         const foundDevices = deviceNames.filter((d) => normContent.includes(d));
-        if (foundDevices.length >= 7) {
+        if (foundDevices.length >= 6) {
           status = 'passed';
-          detail = `Đã liệt kê đủ ${foundDevices.length}/8 thiết bị vào - ra chuẩn xác.`;
-        } else if (foundDevices.length >= 4) {
+          detail = `Đã liệt kê đủ ${foundDevices.length} thiết bị vào - ra chuẩn xác.`;
+        } else if (foundDevices.length >= 3) {
           status = 'partial';
-          detail = `Mới liệt kê được ${foundDevices.length}/8 thiết bị (còn thiếu ${8 - foundDevices.length} thiết bị).`;
+          detail = `Đã liệt kê được ${foundDevices.length} thiết bị (nên bổ sung thêm đủ ít nhất 8 thiết bị để đạt điểm tối đa).`;
         } else {
           status = 'failed';
-          detail = `Chưa liệt kê đủ thiết bị (mới có ${foundDevices.length}/8 thiết bị). Cần bổ sung thêm bàn phím, chuột, màn hình, máy in...`;
+          detail = `Chưa liệt kê đủ thiết bị (mới có ${foundDevices.length} thiết bị). Cần bổ sung thêm các thiết bị vào/ra như bàn phím, chuột, màn hình, máy in, micro, loa...`;
         }
       } else if (normStep.includes('dien chuc nang') || normStep.includes('phan loai')) {
         const hasChucNang = normContent.includes('chuc nang') || normContent.includes('dung de') || normContent.includes('nhiem vu');
@@ -455,9 +459,11 @@ export function scanAndGradeProduct(params: {
 
     finalScore = Math.round(rawScore * 10) / 10;
 
-    // Nếu đã hoàn thành toàn bộ các bước và điểm >= 9.5
-    if (passedStepsCount === totalSteps && structure.formatScorePercent >= 80) {
-      finalScore = attemptNumber > 1 ? 10.0 : 9.5;
+    // Chỉ đạt 10.0 điểm tuyệt đối khi hoàn thành đầy đủ tất cả các bước VÀ nội dung phong phú, chất lượng cao
+    if (passedStepsCount === totalSteps && contentScorePercent >= 80 && structure.formatScorePercent >= 80 && (structure.wordCount >= 25 || ['png', 'jpg', 'jpeg', 'sb3'].includes(ext))) {
+      finalScore = 10.0;
+    } else if (passedStepsCount === totalSteps && contentScorePercent >= 65) {
+      finalScore = Math.min(9.5, Math.max(8.5, finalScore));
     }
   }
 

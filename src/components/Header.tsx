@@ -122,6 +122,16 @@ export const Header: React.FC<HeaderProps> = ({
     activeClients: number;
   } | null>(null);
   const [copiedLanUrl, setCopiedLanUrl] = useState<string | null>(null);
+  const [aiStatus, setAiStatus] = useState<{ hasGeminiKey: boolean; model?: string } | null>(null);
+
+  useEffect(() => {
+    if (isServerConfigModalOpen) {
+      apiFetch('/api/ai-status')
+        .then((r) => r.json())
+        .then((d) => setAiStatus(d))
+        .catch(() => {});
+    }
+  }, [isServerConfigModalOpen]);
 
   const handleRoleButtonClick = () => {
     if (isTeacher) {
@@ -155,28 +165,39 @@ export const Header: React.FC<HeaderProps> = ({
       if (res.ok) {
         const data = await res.json();
         if (data.success) {
+          // Lưu mã PIN mới hợp lệ từ máy chủ vào máy này
+          setTeacherPin(entered);
+          try {
+            localStorage.setItem(STORAGE_KEY_TEACHER_PIN, entered);
+          } catch {}
           setIsPinModalOpen(false);
           setPinInput('');
           setPinError(null);
           setIsVerifying(false);
           if (onToggleRole) onToggleRole();
           return;
+        } else {
+          // MÁY CHỦ TỪ CHỐI: TUYỆT ĐỐI KHÔNG FALLBACK VỀ MÃ CŨ
+          setIsVerifying(false);
+          setPinError(data.error || 'Mã PIN không chính xác! Mã PIN cũ đã bị vô hiệu hóa trên hệ thống máy chủ CSDL.');
+          return;
         }
       }
-    } catch {}
-
-    // Fallback đối chiếu với mã lưu trữ cục bộ khi ngoại tuyến
-    if (entered === teacherPin.trim()) {
-      setIsPinModalOpen(false);
-      setPinInput('');
-      setPinError(null);
-      setIsVerifying(false);
-      if (onToggleRole) onToggleRole();
-      return;
+    } catch (netErr) {
+      console.warn('Lỗi kết nối máy chủ xác thực PIN, thử đối chiếu offline:', netErr);
+      // Chỉ khi máy mất kết nối Internet hoàn toàn mới đối chiếu cục bộ
+      if (entered === teacherPin.trim()) {
+        setIsPinModalOpen(false);
+        setPinInput('');
+        setPinError(null);
+        setIsVerifying(false);
+        if (onToggleRole) onToggleRole();
+        return;
+      }
     }
 
     setIsVerifying(false);
-    setPinError('Mã PIN không chính xác. Vui lòng liên hệ Thầy/Cô giáo phụ trách phòng máy!');
+    setPinError('Mã PIN không chính xác. Vui lòng nhập đúng mã PIN giáo viên mới nhất!');
   };
 
   const handleChangePinSubmit = async (e: React.FormEvent) => {
@@ -733,6 +754,21 @@ export const Header: React.FC<HeaderProps> = ({
                   </span>
                 </div>
               )}
+
+              {/* Trạng thái Trí tuệ Nhân tạo Gemini AI */}
+              <div className="pt-2 border-t border-slate-100 flex items-center justify-between text-xs">
+                <span className="text-slate-600">Động cơ chấm AI:</span>
+                {aiStatus?.hasGeminiKey ? (
+                  <span className="font-bold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-full border border-emerald-200 flex items-center gap-1">
+                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></span>
+                    <span>Gemini AI đã kích hoạt</span>
+                  </span>
+                ) : (
+                  <span className="font-bold text-amber-700 bg-amber-50 px-2 py-0.5 rounded-full border border-amber-200 text-[11px]" title="Để bật AI chấm thông minh, hãy thêm biến GEMINI_API_KEY trên Render">
+                    Bộ lọc từ khóa (Chưa cài GEMINI_API_KEY)
+                  </span>
+                )}
+              </div>
 
               {pingResult && !pingResult.ok && (
                 <p className="text-[11px] text-rose-600 bg-rose-50 p-2 rounded-xl border border-rose-200 font-medium">

@@ -221,6 +221,11 @@ export default function App() {
         }
       } else if (event.type === 'SUBMISSION_PERMISSION_CHANGED' && typeof event.allow === 'boolean') {
         setAllowSubmission(event.allow);
+      } else if (event.type === 'TEACHER_PIN_CHANGED') {
+        console.log('[Bảo Mật] Mã PIN giáo viên đã được đổi trên máy chủ CSDL.');
+        try {
+          localStorage.removeItem('labgrade_teacher_pin_v1');
+        } catch {}
       }
     });
 
@@ -310,10 +315,46 @@ export default function App() {
           setDbStatus(data.dbStatus);
         }
         if (Array.isArray(data.submissions)) {
-          const cleanSubs = data.submissions
+          const serverSubs = data.submissions
             .filter((s: any) => s && !String(s.id).startsWith('mock-'))
             .map((raw: any) => sanitizeSubmission(raw));
-          setSubmissions(cleanSubs);
+
+          // CỨU HỘ DỮ LIỆU THÔNG MINH:
+          // Nếu máy này có bài nộp học sinh thực tế mà máy chủ chưa kịp lưu (ví dụ nộp lúc máy chủ Render đang ngủ đông),
+          // tự động đẩy các bài còn thiếu lên CSDL máy chủ ngay lập tức!
+          const localList = loadSubmissionsSafely([]);
+          const missingOnServer = localList.filter((local) => {
+            return !serverSubs.some(
+              (server: Submission) =>
+                server.id === local.id ||
+                (server.className === local.className &&
+                  server.machineNumber === local.machineNumber &&
+                  (server.practiceDate || '') === (local.practiceDate || ''))
+            );
+          });
+
+          if (missingOnServer.length > 0) {
+            console.log(`[Tự Động Khôi Phục] Đang đẩy ${missingOnServer.length} bài nộp tồn đọng lên máy chủ CSDL...`);
+            apiFetch('/api/submissions/sync-batch', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ submissions: missingOnServer }),
+            }, 6000).catch(() => {});
+          }
+
+          // Hợp nhất danh sách để cả máy chủ và máy này luôn có đầy đủ 100% bài nộp
+          const mergedMap = new Map<string, Submission>();
+          serverSubs.forEach((s: Submission) => mergedMap.set(`${s.className}_${s.machineNumber}_${s.practiceDate || ''}`, s));
+          missingOnServer.forEach((s) => {
+            const key = `${s.className}_${s.machineNumber}_${s.practiceDate || ''}`;
+            if (!mergedMap.has(key)) {
+              mergedMap.set(key, s);
+            }
+          });
+
+          const merged = Array.from(mergedMap.values());
+          setSubmissions(merged);
+          saveSubmissionsSafely(merged);
         }
       }
     } catch {

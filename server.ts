@@ -263,15 +263,18 @@ app.post('/api/session-status', (req, res) => {
 });
 
 // API: Xác thực mã PIN Giáo viên (Bảo vệ phía máy chủ, không để học sinh thấy mã PIN)
-app.post('/api/verify-pin', (req, res) => {
-  const { pin } = req.body;
+const handleVerifyTeacherPin = (req: express.Request, res: express.Response) => {
+  const { pin } = req.body || {};
   if (!pin || typeof pin !== 'string') {
     return res.status(400).json({ success: false, error: 'Thiếu mã PIN' });
   }
   const currentPin = getTeacherPin();
   const isValid = pin.trim() === currentPin.trim();
-  res.json({ success: isValid });
-});
+  res.json({ success: isValid, error: isValid ? undefined : 'Mã PIN giáo viên không chính xác' });
+};
+
+app.post('/api/verify-pin', handleVerifyTeacherPin);
+app.post('/api/teacher/verify-pin', handleVerifyTeacherPin);
 
 // API: Đổi mã PIN Giáo viên
 app.post('/api/change-pin', (req, res) => {
@@ -284,8 +287,21 @@ app.post('/api/change-pin', (req, res) => {
     return res.status(400).json({ success: false, error: 'Mã PIN mới phải có tối thiểu 4 ký tự' });
   }
   setTeacherPin(newPin.trim());
-  console.log('[LabGrade CSDL] Giáo viên đã đổi mã PIN mới thành công.');
+  console.log('[LabGrade CSDL] Giáo viên đã đổi mã PIN mới thành công trên CSDL máy chủ.');
+  broadcastRealtimeEvent({
+    type: 'TEACHER_PIN_CHANGED',
+    timestamp: new Date().toISOString(),
+  });
   res.json({ success: true, message: 'Đổi mã PIN thành công' });
+});
+
+// API: Kiểm tra trạng thái Gemini AI
+app.get('/api/ai-status', (_req, res) => {
+  res.json({
+    hasGeminiKey: Boolean(process.env.GEMINI_API_KEY),
+    model: process.env.GEMINI_MODEL || 'gemini-3.8-flash',
+    status: process.env.GEMINI_API_KEY ? 'active' : 'offline_rule_mode',
+  });
 });
 
 // API: Lấy toàn bộ danh sách bài nộp và trạng thái CSDL thời gian thực
