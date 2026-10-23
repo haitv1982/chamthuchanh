@@ -35,6 +35,7 @@ import {
   DEFAULT_CLOUD_BACKEND_URL,
   isStaticHosting,
 } from '../utils/apiConfig';
+import { realtimeSync } from '../utils/realtimeSync';
 
 const STORAGE_KEY_TEACHER_PIN = 'labgrade_teacher_pin_v1';
 
@@ -133,6 +134,38 @@ export const Header: React.FC<HeaderProps> = ({
     }
   }, [isServerConfigModalOpen]);
 
+  // Đồng bộ mã PIN thời gian thực từ máy chủ hoặc từ máy Giáo viên qua BroadcastChannel & SSE
+  useEffect(() => {
+    let bc: BroadcastChannel | null = null;
+    if (typeof BroadcastChannel !== 'undefined') {
+      try {
+        bc = new BroadcastChannel('labgrade_session_channel');
+        bc.onmessage = (event) => {
+          if (event.data?.type === 'TEACHER_PIN_CHANGED' && event.data.newPin) {
+            setTeacherPin(event.data.newPin);
+            try {
+              localStorage.setItem(STORAGE_KEY_TEACHER_PIN, event.data.newPin);
+            } catch {}
+          }
+        };
+      } catch {}
+    }
+
+    const unsub = realtimeSync.subscribe((event) => {
+      if (event.type === 'TEACHER_PIN_CHANGED' && event.newPin) {
+        setTeacherPin(event.newPin);
+        try {
+          localStorage.setItem(STORAGE_KEY_TEACHER_PIN, event.newPin);
+        } catch {}
+      }
+    });
+
+    return () => {
+      if (bc) bc.close();
+      unsub();
+    };
+  }, []);
+
   const handleRoleButtonClick = () => {
     if (isTeacher) {
       // Đang ở quyền Giáo viên -> bấm để chuyển về Học sinh
@@ -161,7 +194,8 @@ export const Header: React.FC<HeaderProps> = ({
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ pin: entered }),
-      });
+      }, 10000);
+
       if (res.ok) {
         const data = await res.json();
         if (data.success) {
@@ -177,16 +211,16 @@ export const Header: React.FC<HeaderProps> = ({
           if (onToggleRole) onToggleRole();
           return;
         } else {
-          // MÁY CHỦ TỪ CHỐI: TUYỆT ĐỐI KHÔNG FALLBACK VỀ MÃ CŨ
+          // MÁY CHỦ TỪ CHỐI: TUYỆT ĐỐI KHÔNG FALLBACK VỀ MÃ CŨ 1234
           setIsVerifying(false);
-          setPinError(data.error || 'Mã PIN không chính xác! Mã PIN cũ đã bị vô hiệu hóa trên hệ thống máy chủ CSDL.');
+          setPinError(data.error || 'Mã PIN không chính xác! Mã PIN đã được đổi trên máy chủ CSDL.');
           return;
         }
       }
     } catch (netErr) {
       console.warn('Lỗi kết nối máy chủ xác thực PIN, thử đối chiếu offline:', netErr);
-      // Chỉ khi máy mất kết nối Internet hoàn toàn mới đối chiếu cục bộ
-      if (entered === teacherPin.trim()) {
+      // Chỉ khi máy ĐÃ TỪNG được đổi sang mã PIN riêng (khác 1234) mới cho đối chiếu offline
+      if (teacherPin && teacherPin !== '1234' && entered === teacherPin.trim()) {
         setIsPinModalOpen(false);
         setPinInput('');
         setPinError(null);
@@ -194,6 +228,10 @@ export const Header: React.FC<HeaderProps> = ({
         if (onToggleRole) onToggleRole();
         return;
       }
+
+      setIsVerifying(false);
+      setPinError('⚠️ Không thể kết nối với máy chủ CSDL phòng máy để xác thực mã PIN. Vui lòng kiểm tra lại kết nối mạng!');
+      return;
     }
 
     setIsVerifying(false);

@@ -7,8 +7,8 @@
  * 3. Mạng nội bộ phòng máy trường học (LAN IP ví dụ http://192.168.1.100:3000)
  */
 
-// Địa chỉ máy chủ Cloud trung tâm mặc định (liên thông dữ liệu 24/7 khi mở từ GitHub Pages)
-export const DEFAULT_CLOUD_BACKEND_URL = 'https://chamthuchanh.onrender.com';
+// Địa chỉ máy chủ Cloud trung tâm mặc định (chạy ổn định trên Google Cloud Run asia-east1, không giới hạn băng thông)
+export const DEFAULT_CLOUD_BACKEND_URL = 'https://ais-pre-z4vcbgzjafe3fqbkfbktwa-152013379411.asia-east1.run.app';
 
 export const STORAGE_KEY_SERVER_URL = 'labgrade_custom_server_url_v1';
 
@@ -82,11 +82,18 @@ export function getApiUrl(path: string): string {
 /**
  * Wrapper gọi fetch có tự động nối baseUrl, gắn headers chuẩn và xử lý timeout
  */
-export async function apiFetch(path: string, init?: RequestInit, timeoutMs = 8000): Promise<Response> {
+export async function apiFetch(path: string, init?: RequestInit, timeoutMs?: number): Promise<Response> {
   const fullUrl = getApiUrl(path);
 
+  // Mặc định 15s để đủ thời gian nếu máy chủ Render đang thức dậy từ chế độ ngủ
+  const effectiveTimeout = timeoutMs !== undefined
+    ? timeoutMs
+    : path.includes('/grade')
+    ? 25000
+    : 15000;
+
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const timer = setTimeout(() => controller.abort(), effectiveTimeout);
 
   try {
     const headers = new Headers(init?.headers || {});

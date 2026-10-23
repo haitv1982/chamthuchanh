@@ -17,10 +17,14 @@ import {
   Trash2,
   CheckCircle2,
   AlertCircle,
+  AlertTriangle,
+  Volume2,
 } from 'lucide-react';
 import { Submission, Assignment } from '../types';
 import { SCHOOL_CLASSES } from '../data/classes';
 import { apiFetch } from '../utils/apiConfig';
+import { realtimeSync } from '../utils/realtimeSync';
+import { playPlagiarismWarningSound } from '../utils/antiPlagiarism';
 
 interface ProjectorLiveBoardProps {
   className: string;
@@ -64,6 +68,19 @@ export const ProjectorLiveBoard: React.FC<ProjectorLiveBoardProps> = ({
   const [teacherPinInput, setTeacherPinInput] = useState<string>('');
   const [pinErrorMsg, setPinErrorMsg] = useState<string | null>(null);
 
+  // Cảnh báo sao chép tệp lớp trước thời gian thực
+  const [activePlagiarismAlert, setActivePlagiarismAlert] = useState<{
+    machineNumber: string;
+    className: string;
+    studentLeader: string;
+    copiedFromClass: string;
+    copiedFromStudent: string;
+    copiedFromMachine: string;
+    copiedAt?: string;
+    message: string;
+    timestamp: string;
+  } | null>(null);
+
   // Sync strictly when prop submissions updates (chỉ giữ lại bài nộp của ngày hôm nay, loại bỏ hoàn toàn bài ảo cũ)
   useEffect(() => {
     const todayStr = new Date().toISOString().slice(0, 10);
@@ -75,7 +92,7 @@ export const ProjectorLiveBoard: React.FC<ProjectorLiveBoardProps> = ({
     setLiveSubmissions(validSubs);
   }, [submissions]);
 
-  // Lắng nghe tín hiệu xóa bài nộp từ BroadcastChannel giữa các tab
+  // Lắng nghe tín hiệu xóa bài nộp và CẢNH BÁO SAO CHÉP từ BroadcastChannel & SSE Realtime
   useEffect(() => {
     let bc: BroadcastChannel | null = null;
     if (typeof BroadcastChannel !== 'undefined') {
@@ -88,12 +105,25 @@ export const ProjectorLiveBoard: React.FC<ProjectorLiveBoardProps> = ({
             } else {
               setLiveSubmissions((prev) => prev.filter((s) => s.className !== event.data.targetClass));
             }
+          } else if (event.data?.type === 'PLAGIARISM_ALERT') {
+            playPlagiarismWarningSound();
+            setActivePlagiarismAlert(event.data);
           }
         };
       } catch {}
     }
+
+    // Kết nối qua Server-Sent Events (SSE) để nhận sự kiện từ bất kỳ máy nào gửi lên server
+    const unsub = realtimeSync.subscribe((event) => {
+      if (event.type === 'PLAGIARISM_ALERT') {
+        playPlagiarismWarningSound();
+        setActivePlagiarismAlert(event as any);
+      }
+    });
+
     return () => {
       if (bc) bc.close();
+      unsub();
     };
   }, []);
 
@@ -186,7 +216,7 @@ export const ProjectorLiveBoard: React.FC<ProjectorLiveBoardProps> = ({
   const handleExecuteClear = async () => {
     if (!isTeacher) {
       if (!teacherPinInput.trim()) {
-        setPinErrorMsg('Vui lòng nhập mã PIN Giáo viên (mặc định 1234).');
+        setPinErrorMsg('Vui lòng nhập mã PIN Giáo viên.');
         return;
       }
       try {
@@ -194,17 +224,19 @@ export const ProjectorLiveBoard: React.FC<ProjectorLiveBoardProps> = ({
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ pin: teacherPinInput.trim() }),
-        });
+        }, 10000);
         const vData = await verifyRes.json().catch(() => ({}));
         if (!verifyRes.ok || !vData.success) {
           setPinErrorMsg(vData.error || 'Mã PIN Giáo viên không chính xác.');
           return;
         }
       } catch (err) {
-        // Chỉ khi mất mạng hoàn toàn: đối chiếu với mã đã lưu trong localStorage
-        const localPin = localStorage.getItem('labgrade_teacher_pin_v1') || '1234';
-        if (teacherPinInput.trim() !== localPin) {
-          setPinErrorMsg('Mã PIN Giáo viên không chính xác.');
+        // Chỉ khi mất mạng hoàn toàn và máy này đã có mã PIN tùy chỉnh (khác 1234)
+        const localPin = localStorage.getItem('labgrade_teacher_pin_v1');
+        if (localPin && localPin !== '1234' && teacherPinInput.trim() === localPin) {
+          // Cho phép xóa cục bộ
+        } else {
+          setPinErrorMsg('⚠️ Không thể kết nối với máy chủ CSDL phòng máy để xác thực mã PIN.');
           return;
         }
       }
@@ -404,6 +436,40 @@ export const ProjectorLiveBoard: React.FC<ProjectorLiveBoardProps> = ({
         </div>
       )}
 
+      {/* CẢNH BÁO SAO CHÉP TỆP LỚP TRƯỚC TRÊN MÁY CHIẾU PHÒNG THỰC HÀNH */}
+      {activePlagiarismAlert && (
+        <div className="mx-6 mt-3 p-4 bg-rose-950/95 border-2 border-rose-500 rounded-2xl text-rose-200 text-xs sm:text-sm font-bold flex items-start justify-between gap-3 shadow-2xl animate-pulse">
+          <div className="flex items-start gap-3">
+            <div className="w-10 h-10 rounded-xl bg-rose-600 text-white flex items-center justify-center shrink-0 animate-bounce shadow-lg">
+              <AlertTriangle className="w-6 h-6" />
+            </div>
+            <div>
+              <div className="text-sm sm:text-base font-black text-white flex flex-wrap items-center gap-2">
+                <span>🚨 CẢNH BÁO GIAN LẬN: PHÁT HIỆN SAO CHÉP TỆP BÀI LÀM CỦA HỌC SINH LỚP TRƯỚC!</span>
+                <span className="text-[11px] bg-rose-600 text-white px-2 py-0.5 rounded font-black uppercase tracking-wider">
+                  0.0 Điểm
+                </span>
+              </div>
+              <div className="text-xs text-rose-200 mt-1 leading-relaxed">
+                <span className="text-white font-extrabold">{activePlagiarismAlert.machineNumber}</span> ({activePlagiarismAlert.className} - Nhóm trưởng: <span className="text-white font-extrabold">{activePlagiarismAlert.studentLeader}</span>) vừa nộp tệp trùng khớp 100% với bài của bạn <span className="text-yellow-300 font-extrabold">{activePlagiarismAlert.copiedFromStudent}</span> ({activePlagiarismAlert.copiedFromClass} - {activePlagiarismAlert.copiedFromMachine})!
+              </div>
+              <div className="text-[11px] text-rose-300 mt-1 italic flex items-center gap-1.5 font-medium">
+                <Volume2 className="w-3.5 h-3.5 text-rose-400 shrink-0" />
+                <span>Hệ thống tự động hủy kết quả bài nộp và phát còi cảnh báo. Nhóm phải tự tay thực hành lại bài của mình!</span>
+              </div>
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={() => setActivePlagiarismAlert(null)}
+            className="p-1.5 rounded-xl bg-rose-900/80 hover:bg-rose-800 text-rose-300 transition-colors cursor-pointer shrink-0"
+            title="Đóng thông báo cảnh báo"
+          >
+            <X className="w-5 h-5" />
+          </button>
+        </div>
+      )}
+
       {/* Main Grid View */}
       <div className="flex-1 p-6 overflow-y-auto space-y-6">
         {/* Hall of Fame: Điểm 10 Tuyệt Đối */}
@@ -437,13 +503,20 @@ export const ProjectorLiveBoard: React.FC<ProjectorLiveBoardProps> = ({
           {machineCards.map(({ machineId, submission, hasMultipleGroups }) => {
             const isJustUpdated = recentMachineId === machineId;
             const hasSubmitted = Boolean(submission);
+            const isPlagiarized = Boolean(
+              submission?.hasPlagiarism ||
+              submission?.plagiarismAlert?.isCopied ||
+              (activePlagiarismAlert && activePlagiarismAlert.machineNumber === machineId)
+            );
             const score = submission?.highestScore ?? null;
 
             return (
               <div
                 key={machineId}
                 className={`relative rounded-2xl p-3 border transition-all duration-300 flex flex-col justify-between min-h-[105px] ${
-                  isJustUpdated
+                  isPlagiarized
+                    ? 'bg-rose-950/95 border-rose-500 ring-2 ring-rose-500 shadow-2xl animate-pulse text-white'
+                    : isJustUpdated
                     ? 'ring-4 ring-cyan-400 scale-105 z-10 bg-cyan-950/80 border-cyan-400 shadow-xl'
                     : hasSubmitted
                     ? score !== null && score >= 9
@@ -456,10 +529,15 @@ export const ProjectorLiveBoard: React.FC<ProjectorLiveBoardProps> = ({
               >
                 {/* Header card: Số máy & Điểm */}
                 <div className="flex items-center justify-between gap-1">
-                  <span className={`text-xs font-black uppercase tracking-wider ${hasSubmitted ? 'text-white' : 'text-slate-400'}`}>
+                  <span className={`text-xs font-black uppercase tracking-wider ${isPlagiarized ? 'text-rose-200' : hasSubmitted ? 'text-white' : 'text-slate-400'}`}>
                     {machineId}
                   </span>
-                  {hasSubmitted && score !== null ? (
+                  {isPlagiarized ? (
+                    <span className="text-xs font-black px-2 py-0.5 rounded-lg bg-rose-600 text-white shadow-sm flex items-center gap-1 animate-bounce">
+                      <AlertTriangle className="w-3.5 h-3.5" />
+                      0.0đ
+                    </span>
+                  ) : hasSubmitted && score !== null ? (
                     <span
                       className={`text-sm sm:text-base font-black px-2 py-0.5 rounded-lg shadow-sm ${
                         score >= 9
@@ -487,6 +565,12 @@ export const ProjectorLiveBoard: React.FC<ProjectorLiveBoardProps> = ({
                         <span className="truncate">{submission.className}</span>
                         <span>{submission.attempts?.length || 1} lần nộp</span>
                       </div>
+                      {isPlagiarized && (
+                        <div className="text-[10px] text-rose-300 font-extrabold flex items-center gap-1 mt-0.5 animate-pulse">
+                          <AlertTriangle className="w-3 h-3 text-rose-400 shrink-0" />
+                          <span>Lấy tệp lớp trước!</span>
+                        </div>
+                      )}
                     </div>
                   ) : (
                     <div className="text-[11px] text-slate-600 italic">Đang thực hành...</div>
@@ -494,7 +578,14 @@ export const ProjectorLiveBoard: React.FC<ProjectorLiveBoardProps> = ({
                 </div>
 
                 {/* Footer card: Trạng thái & Lần nộp */}
-                {hasSubmitted && (
+                {isPlagiarized ? (
+                  <div className="flex items-center justify-between text-[10px] text-rose-300 pt-1 border-t border-rose-500/40 font-bold">
+                    <span className="truncate">
+                      🚨 {submission?.plagiarismAlert?.copiedFromClass || activePlagiarismAlert?.copiedFromClass || 'Khác lớp'}
+                    </span>
+                    <span className="text-rose-400 uppercase text-[9px] font-mono">VI PHẠM</span>
+                  </div>
+                ) : hasSubmitted ? (
                   <div className="flex items-center justify-between text-[10px] text-slate-400 pt-1 border-t border-white/5">
                     <span className="truncate">
                       {submission?.latestSubmittedAt ? submission.latestSubmittedAt.slice(11, 16) : ''}
@@ -505,7 +596,7 @@ export const ProjectorLiveBoard: React.FC<ProjectorLiveBoardProps> = ({
                       </span>
                     )}
                   </div>
-                )}
+                ) : null}
               </div>
             );
           })}

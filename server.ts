@@ -24,6 +24,7 @@ import {
   deleteStudentRoster,
   renameStudentClass,
   getRosterLastUpdated,
+  detectPlagiarism,
 } from './src/server/database';
 
 dotenv.config();
@@ -83,11 +84,12 @@ function fallbackHeuristicGrading(params: {
   fileName: string;
   fileContent: string;
   attemptNumber: number;
+  imageBase64?: string;
 }) {
   return scanAndGradeProduct(params);
 }
 
-// API: Chấm điểm bài thực hành (Gemini AI + Fallback)
+// API: Chấm điểm bài thực hành (Gemini AI Vision + Heuristic Fallback)
 app.post('/api/grade', async (req, res) => {
   try {
     // 0. BẢO VỆ CHẶT CHẼ: KIỂM TRA QUYỀN NỘP BÀI TỪ GIÁO VIÊN
@@ -103,6 +105,7 @@ app.post('/api/grade', async (req, res) => {
       fileName,
       fileSize,
       fileContent = '',
+      imageBase64,
       attemptNumber = 1,
       studentLeader,
       groupMembers = [],
@@ -114,12 +117,87 @@ app.post('/api/grade', async (req, res) => {
       return res.status(400).json({ error: 'Thiếu thông tin bài tập hoặc tệp nộp.' });
     }
 
+    const ext = (fileName.split('.').pop() || '').toLowerCase();
+    const isImageFile = ['png', 'jpg', 'jpeg', 'webp', 'bmp'].includes(ext) || Boolean(imageBase64);
+
+    // 0.1 PHÁT HIỆN HỌC SINH LỚP SAU LẤY Y NGUYÊN TỆP BÀI LÀM CỦA HỌC SINH LỚP TRƯỚC
+    const plagiarismAlert = detectPlagiarism({
+      className,
+      machineNumber,
+      studentLeader,
+      assignmentId: assignment?.id,
+      fileName,
+      fileSize: fileSize || 0,
+      fileContent,
+      imageBase64,
+    });
+
+    if (plagiarismAlert && plagiarismAlert.isCopied) {
+      console.warn(`[🚨 CẢNH BÁO SAO CHÉP] Máy ${machineNumber} (${className} - ${studentLeader}) lấy y nguyên bài của ${plagiarismAlert.copiedFromStudent} (${plagiarismAlert.copiedFromClass})`);
+
+      // Phát sóng cảnh báo tức thời tới màn hình MÁY CHIẾU và máy GIÁO VIÊN
+      broadcastRealtimeEvent({
+        type: 'PLAGIARISM_ALERT',
+        machineNumber,
+        className,
+        studentLeader,
+        copiedFromClass: plagiarismAlert.copiedFromClass,
+        copiedFromStudent: plagiarismAlert.copiedFromStudent,
+        copiedFromMachine: plagiarismAlert.copiedFromMachine,
+        copiedAt: plagiarismAlert.copiedAt,
+        message: plagiarismAlert.message,
+        timestamp: new Date().toISOString(),
+      });
+
+      return res.json({
+        score: 0.0,
+        aiComparisonDetails: plagiarismAlert.message,
+        strengths: ['Tệp được tải lên máy chủ thành công.'],
+        weaknesses: [
+          `🚨 VI PHẠM TÍNH TRUNG THỰC: Tệp nộp trùng khớp 100% với sản phẩm của bạn ${plagiarismAlert.copiedFromStudent} (${plagiarismAlert.copiedFromClass} - ${plagiarismAlert.copiedFromMachine}).`,
+          'Hệ thống không chấp nhận nộp lại bài làm có sẵn của học sinh lớp trước trên máy tính.',
+        ],
+        howToGetTen: [
+          'Bước 1: Mở phần mềm và tự tay thực hành lại sản phẩm của nhóm mình.',
+          'Bước 2: Tuyệt đối không nộp các tệp có sẵn của học sinh lớp trước để lại.',
+          'Bước 3: Lưu lại tệp mới và bấm "Chấm Lại Bằng AI" để được ghi nhận điểm số chính thức.',
+        ],
+        criteriaResults: Array.isArray(assignment?.rubric)
+          ? assignment.rubric.map((r: any) => ({
+              criterionId: r.id,
+              criterionName: r.name,
+              score: 0,
+              maxScore: r.maxScore,
+              feedback: `⚠️ Không tính điểm do phát hiện tệp nộp trùng khớp y nguyên với bài làm của học sinh lớp trước (${plagiarismAlert.copiedFromClass}).`,
+            }))
+          : [],
+        stepEvaluations: Array.isArray(assignment?.steps)
+          ? assignment.steps.map((st: string, idx: number) => ({
+              stepNumber: idx + 1,
+              instruction: st,
+              status: 'failed',
+              detail: 'Không được công nhận do sao chép tệp bài làm có sẵn.',
+            }))
+          : [],
+        inspectionSummary: {
+          contentScorePercent: 0,
+          formatScorePercent: 0,
+          stepCompletionRate: '0 bước được công nhận (Vi phạm sao chép)',
+          isOffTopic: false,
+          warningMessage: plagiarismAlert.message,
+        },
+        plagiarismAlert,
+        encouragement: 'Em hãy tự tay thực hành lại bài học nhé. Thầy/Cô và hệ thống luôn ghi nhận nỗ lực thực chất của em!',
+        engine: 'anti-plagiarism-detector',
+      });
+    }
+
     // Try Gemini AI if available
     if (ai) {
       try {
         const rubricList = Array.isArray(assignment?.rubric) ? assignment.rubric : [];
         const rubricText = rubricList.length > 0
-          ? rubricList.map((r: any) => `- [${r.id || 'c'}] ${r.name || 'Tiêu chí'} (Tối đa ${r.maxScore || 2.5}đ): ${r.description || ''}`).join('\n')
+          ? rubricList.map((r: any) => `- [Mã ${r.id || 'c'}] ${r.name || 'Tiêu chí'} (Tối đa ${r.maxScore || 2.5}đ): ${r.description || ''}`).join('\n')
           : 'Thang điểm 10.0 chuẩn: Hoàn thành đúng yêu cầu, chạy đúng kết quả, giải thuật tối ưu và cấu trúc chuẩn.';
 
         const sampleProduct = assignment?.sampleProduct;
@@ -132,8 +210,8 @@ app.post('/api/grade', async (req, res) => {
           : 'Thực hiện theo các yêu cầu nhiệm vụ đề bài.';
 
         const prompt = `
-Bạn là Hệ thống AI Chuyên gia Đánh giá & Chấm điểm Thực hành Tin Học trường THCS/THPT.
-Nhiệm vụ của bạn là quét sâu NỘI DUNG VÀ HÌNH THỨC SẢN PHẨM của học sinh, đối chiếu CHÍNH XÁC TỪNG BƯỚC THỰC HIỆN với đề bài và sản phẩm mẫu.
+Bạn là Hệ thống AI Chuyên gia Đánh giá & Chấm điểm Thực hành Tin Học trường THCS/THPT (chuẩn giáo dục Việt Nam).
+Nhiệm vụ của bạn là quét sâu NỘI DUNG VÀ HÌNH THỨC SẢN PHẨM của học sinh, đối chiếu CHÍNH XÁC TỪNG BƯỚC THỰC HIỆN và TỪNG TIÊU CHÍ RUBRIC với đề bài.
 
 THÔNG TIN BÀI THỰC HÀNH:
 - Tên bài: ${assignment.title}
@@ -142,8 +220,11 @@ THÔNG TIN BÀI THỰC HÀNH:
 - Tệp nộp theo quy định: ${assignment.targetFile || 'Theo yêu cầu'}
 - Tiêu chí đạt: ${assignment.acceptanceCriteria || 'Hoàn thành các bước'}
 
-DANH SÁCH CÁC BƯỚC HỌC SINH CẦN THỰC HIỆN ĐỂ ĐẠT:
+DANH SÁCH CÁC BƯỚC HỌC SINH CẦN THỰC HIỆN:
 ${stepsList}
+
+BẢNG TIÊU CHÍ ĐÁNH GIÁ (RUBRIC) - BẮT BUỘC CHIẾT ĐIỂM TỪNG MỤC:
+${rubricText}
 
 ${sampleProductText}
 
@@ -155,48 +236,100 @@ THÔNG TIN SẢN PHẨM HỌC SINH NỘP:
 - Tên tệp nộp: ${fileName} (${fileSize || 0} bytes)
 - Lần nộp thứ: ${attemptNumber}
 
-NỘI DUNG VÀ CẤU TRÚC THỰC TẾ TRÍCH XUẤT TỪ TỆP NỘP CỦA HỌC SINH:
+${isImageFile ? `
+ĐẶC BIỆT QUAN TRỌNG - ĐÂY LÀ TỆP HÌNH ẢNH SƠ ĐỒ / SẢN PHẨM THỰC HÀNH (PNG/JPG):
+Tệp ảnh thực tế của học sinh đã được đính kèm vào tin nhắn này (qua Vision).
+Bạn PHẢI phân tích trực tiếp hình ảnh đính kèm:
+1. ĐỌC TẤT CẢ VĂN BẢN TRÊN ẢNH: Xem có tiêu đề không? Có các khối hình chữ nhật/bo góc không? Trên các khối có ghi các thành phần/hoạt động không?
+2. KIỂM TRA MŨI TÊN & LIÊN KẾT: Các mũi tên có nối đúng chiều trình tự quy trình hoặc luồng dữ liệu không?
+3. HÌNH ẢNH MINH HỌA & THẨM MỸ: Bố cục có cân đối, dễ nhìn, màu sắc tương phản rõ ràng không? Có biểu tượng minh họa không?
+4. ĐỐI CHIẾU THEO ĐẶC THÙ BÀI HỌC:
+   - Bài sơ đồ quy trình xử lí thông tin (SP01): Cả 2 dạng (4 khối tuần tự "Thu nhận -> Xử lí -> Lưu trữ -> Truyền thông tin" HOẶC mô hình kiến trúc máy tính "Thiết bị vào -> CPU -> Thiết bị ra & Bộ nhớ") đều đạt 10.0 điểm tuyệt đối!
+   - Bài ảnh chụp cây thư mục (SP02): Xem có thư mục gốc TINHOC6 và các thư mục con (BaiTap, HinhAnh, VanBan, SanPham) hay không.
+   - Bài sơ đồ mạng (SP03), Poster (SP04), Sơ đồ khối (SP13, TH7_SP12), Sơ đồ tư duy (SP11, TH9_SP06), Infographic (TH9_SP02): Nếu có bố cục rõ ràng, đúng các thành phần chủ đề -> Đạt 9.0 - 10.0 điểm!
+` : `
+NỘI DUNG VÀ CẤU TRÚC TRÍCH XUẤT TỪ TỆP NỘP:
 \`\`\`
 ${fileContent ? fileContent.slice(0, 15000) : '[Tệp rỗng hoặc không có nội dung văn bản]'}
 \`\`\`
 
-QUY TẮC ĐÁNH GIÁ VÀ ĐỐI CHIẾU CHÍNH XÁC (RẤT QUAN TRỌNG):
-1. TUYỆT ĐỐI KHÔNG CHẤM MẶC ĐỊNH 8.0 ĐIỂM!
-2. NẾU TỆP NỘP LẠC ĐỀ HOẶC NỘP TỆP NGẪU NHIÊN:
-   - Nếu học sinh nộp một tệp Word/tệp văn bản ngẫu nhiên KHÔNG LIÊN QUAN đến chủ đề bài thực hành "${assignment.title}" (ví dụ bài tập môn khác, lời bài hát, đoạn văn linh tinh, hoặc tệp rỗng/quá ngắn dưới 15 từ không chứa các bước): BẮT BUỘC CHẤM TỪ 1.0 ĐẾN 3.0 ĐIỂM. Nêu rõ: "Tệp nộp chưa đúng nội dung bài thực hành".
-3. ĐỐI CHIẾU TỪNG BƯỚC:
-   - Bạn PHẢI đối chiếu từng bước trong danh sách các bước trên.
-   - Trả về mảng "stepEvaluations": mỗi phần tử gồm {"stepNumber": số, "instruction": "nội dung bước", "status": "passed" | "partial" | "failed", "detail": "nhận xét cụ thể tại sao đạt hoặc chưa đạt"}.
-4. ĐO LƯỜNG NỘI DUNG VÀ HÌNH THỨC:
-   - "inspectionSummary": { "contentScorePercent": số (0-100), "formatScorePercent": số (0-100), "stepCompletionRate": "X/Y bước đã hoàn thành", "isOffTopic": boolean }
-5. ĐIỂM SỐ CHÍNH XÁC THEO TỶ LỆ HOÀN THÀNH (Thang điểm 10.0, 1 chữ số thập phân):
-   - Lạc đề/Rỗng: 1.0 - 3.0đ
-   - Thiếu nhiều bước cốt lõi: 4.0 - 6.0đ
-   - Đạt phần lớn, thiếu 1-2 bước nhỏ: 7.0 - 8.5đ
-   - Hoàn thành trọn vẹn mọi bước và tiêu chí: 9.5 - 10.0đ.
-6. Trả về ĐÚNG JSON (không kèm markdown ngoài):
+HƯỚNG DẪN ĐÁNH GIÁ THEO THỂ LOẠI MÔN TIN HỌC (CHUẨN GDPT 2018):
+- BẢNG TÍNH EXCEL (.XLSX):
+  + Kiểm tra sự hiện diện của bảng dữ liệu có tiêu đề cột rõ ràng.
+  + Kiểm tra các công thức/hàm (SUM, AVERAGE, IF, RANK, COUNTIF, MAX, MIN, các hàm lồng nhau) hoặc các kết quả tính toán số học. Nếu học sinh đã lập bảng và tính đúng kết quả/dùng đúng hàm, cho điểm tối đa ở tiêu chí công thức và bảng tính.
+  + Với bài vẽ biểu đồ hoặc lọc/sắp xếp: Kiểm tra cấu trúc dữ liệu tóm tắt và định dạng bảng.
+- VĂN BẢN WORD (.DOCX):
+  + Kiểm tra tiêu đề lớn, các đề mục, bảng biểu phân loại (ví dụ: bảng 8 thiết bị vào-ra của TH7_SP01, phiếu tìm kiếm SP05, cẩm nang SP07, đánh giá độ tin cậy TH8_SP01/TH9_SP01).
+  + Kiểm tra tính đầy đủ của nội dung: Nếu đã trả lời đúng các câu hỏi bài học, nêu được các giải pháp, cho điểm cao (8.5 - 10.0).
+- TRÌNH CHIẾU POWERPOINT (.PPTX):
+  + Kiểm tra số lượng slide (thường từ 3 - 6 slide), tiêu đề từng slide, nội dung tóm tắt theo gạch đầu dòng, nội dung khoa học, văn hóa mạng, bảo vệ thông tin cá nhân.
+  + Đánh giá cao các bài có cấu trúc rõ ràng từ mở đầu đến kết luận.
+- LẬP TRÌNH SCRATCH (.SB3):
+  + Kiểm tra các nhân vật (sprites), khối sự kiện (Khi bấm cờ xanh), khối lặp (lặp lại, liên tục), khối điều kiện (nếu...thì), biến số tính điểm, trả lời câu hỏi trắc nghiệm.
+  + Nếu chương trình có logic hoạt động, có tương tác -> Đạt 9.0 - 10.0 điểm!
+- LẬP TRÌNH PYTHON (.PY) / C++ (.CPP):
+  + Kiểm tra cú pháp, lệnh nhập xuất (input, print), vòng lặp for/while, câu lệnh điều kiện if/else, thuật toán tìm kiếm/sắp xếp.
+`}
+
+QUY TẮC CHIẾT ĐIỂM (BẮT BUỘC):
+1. Bạn PHẢI chiết điểm chi tiết cho từng tiêu chí trong bảng Rubric trên vào mảng "criteriaResults".
+   Mỗi tiêu chí gồm:
+   - "criterionId": mã tiêu chí (ví dụ: r1, r2, r3, r4)
+   - "criterionName": tên tiêu chí
+   - "score": điểm học sinh đạt được cho tiêu chí này (tối thiểu 0, tối đa bằng maxScore)
+   - "maxScore": điểm tối đa của tiêu chí
+   - "feedback": nhận xét cụ thể học sinh đã làm tốt điểm nào hoặc thiếu điểm nào ở tiêu chí này.
+2. Tổng điểm "score" BẮT BUỘC bằng tổng điểm của tất cả các tiêu chí trong criteriaResults (làm tròn 1 chữ số thập phân, thang 10.0).
+3. ĐỐI CHIẾU TỪNG BƯỚC: Mảng "stepEvaluations" cho từng bước trong đề bài, gồm:
+   - "stepNumber": số thứ tự bước (1, 2, 3...)
+   - "instruction": tóm tắt nội dung bước
+   - "status": "passed" | "partial" | "failed"
+   - "detail": nhận xét ngắn gọn bước này đã đạt hay chưa đạt.
+
+Định dạng JSON trả về (BẮT BUỘC):
 {
-  "score": 3.0,
-  "aiComparisonDetails": "Tóm tắt đối chiếu nội dung và hình thức với sản phẩm",
-  "strengths": ["Điểm cụ thể làm được"],
-  "weaknesses": ["Chỗ còn thiếu/sai cần sửa"],
-  "howToGetTen": ["Bước 1: ...", "Bước 2: ..."],
-  "stepEvaluations": [
-    { "stepNumber": 1, "instruction": "...", "status": "passed", "detail": "..." }
+  "score": 10.0,
+  "aiComparisonDetails": "Tóm tắt đối chiếu chi tiết nội dung và hình thức sản phẩm với mục tiêu bài học",
+  "criteriaResults": [
+    { "criterionId": "r1", "criterionName": "Đủ 4 hoạt động xử lí thông tin", "score": 3.5, "maxScore": 3.5, "feedback": "Đã thể hiện đầy đủ 4 hoạt động: Thu nhận, Xử lí, Lưu trữ và Truyền thông tin." },
+    { "criterionId": "r2", "criterionName": "Mũi tên liên kết & Chiều quy trình", "score": 2.5, "maxScore": 2.5, "feedback": "Mũi tên chỉ đúng chiều trình tự luồng thông tin." },
+    { "criterionId": "r3", "criterionName": "Tiêu đề & Ví dụ minh họa", "score": 2.0, "maxScore": 2.0, "feedback": "Có tiêu đề QUY TRÌNH XỬ LÍ THÔNG TIN rõ ràng, có biểu tượng minh họa trực quan." },
+    { "criterionId": "r4", "criterionName": "Thẩm mỹ & Đặt tên tệp nộp", "score": 2.0, "maxScore": 2.0, "feedback": "Màu sắc hài hòa, bố cục cân đối, xuất đúng định dạng ảnh." }
   ],
+  "stepEvaluations": [
+    { "stepNumber": 1, "instruction": "Tạo sơ đồ với 4 khối", "status": "passed", "detail": "Đã có đủ 4 khối hình rõ ràng." }
+  ],
+  "strengths": ["Ưu điểm nổi bật của bài làm"],
+  "weaknesses": ["Chỗ còn thiếu sót (nếu có)"],
+  "howToGetTen": ["Gợi ý để hoàn thiện tối đa điểm 10"],
   "inspectionSummary": {
-    "contentScorePercent": 20,
-    "formatScorePercent": 50,
-    "stepCompletionRate": "1/5 bước đã hoàn thành",
+    "contentScorePercent": 100,
+    "formatScorePercent": 100,
+    "stepCompletionRate": "8/8 bước đã hoàn thành",
     "isOffTopic": false
   },
-  "encouragement": "Lời động viên ngắn"
+  "encouragement": "Lời khen ngợi và động viên học sinh"
 }
 `;
 
+        // Chuẩn bị payload Gemini: Hỗ trợ Multimodal Vision nếu có ảnh base64
+        const contentsPayload: any[] = [];
+        if (imageBase64 && typeof imageBase64 === 'string' && imageBase64.includes(',')) {
+          const [header, base64Data] = imageBase64.split(',');
+          const mimeTypeMatch = header.match(/:(.*?);/);
+          const mimeType = mimeTypeMatch ? mimeTypeMatch[1] : 'image/png';
+          contentsPayload.push({
+            inlineData: {
+              mimeType,
+              data: base64Data,
+            },
+          });
+        }
+        contentsPayload.push(prompt);
+
         const response = await ai.models.generateContent({
           model: 'gemini-3.8-flash',
-          contents: prompt,
+          contents: contentsPayload,
           config: {
             responseMimeType: 'application/json',
           },
@@ -206,8 +339,17 @@ QUY TẮC ĐÁNH GIÁ VÀ ĐỐI CHIẾU CHÍNH XÁC (RẤT QUAN TRỌNG):
         const parsed = JSON.parse(rawJson);
 
         if (parsed && typeof parsed.score === 'number') {
+          // Tính lại tổng điểm từ criteriaResults nếu có để đảm bảo chiết điểm chuẩn 100%
+          let finalCalculatedScore = parsed.score;
+          if (Array.isArray(parsed.criteriaResults) && parsed.criteriaResults.length > 0) {
+            const sumCriteria = parsed.criteriaResults.reduce((acc: number, c: any) => acc + (typeof c.score === 'number' ? c.score : 0), 0);
+            if (sumCriteria > 0) {
+              finalCalculatedScore = Math.min(10, Math.max(1, Math.round(sumCriteria * 10) / 10));
+            }
+          }
+
           return res.json({
-            score: Math.min(10, Math.max(1, Math.round(parsed.score * 10) / 10)),
+            score: finalCalculatedScore,
             aiComparisonDetails: parsed.aiComparisonDetails || 'Đã đối chiếu với sản phẩm mẫu và chuẩn tin học.',
             strengths: Array.isArray(parsed.strengths) && parsed.strengths.length > 0 ? parsed.strengths : ['Sản phẩm nộp đúng định dạng yêu cầu.'],
             weaknesses: Array.isArray(parsed.weaknesses) ? parsed.weaknesses : [],
@@ -215,8 +357,8 @@ QUY TẮC ĐÁNH GIÁ VÀ ĐỐI CHIẾU CHÍNH XÁC (RẤT QUAN TRỌNG):
             stepEvaluations: Array.isArray(parsed.stepEvaluations) ? parsed.stepEvaluations : undefined,
             inspectionSummary: parsed.inspectionSummary || undefined,
             criteriaResults: Array.isArray(parsed.criteriaResults) ? parsed.criteriaResults : undefined,
-            encouragement: parsed.encouragement || 'Tiếp tục hoàn thiện để đạt 10 điểm nhé!',
-            engine: 'gemini-3.8-flash',
+            encouragement: parsed.encouragement || 'Tiếp tục phát huy nhé!',
+            engine: 'gemini-3.8-flash-vision',
           });
         }
       } catch (aiErr) {
@@ -224,11 +366,12 @@ QUY TẮC ĐÁNH GIÁ VÀ ĐỐI CHIẾU CHÍNH XÁC (RẤT QUAN TRỌNG):
       }
     }
 
-    // Heuristic Fallback
+    // Heuristic Fallback khi chưa có API Key
     const fallbackResult = fallbackHeuristicGrading({
       assignment,
       fileName,
       fileContent,
+      imageBase64,
       attemptNumber,
     });
 
@@ -290,6 +433,7 @@ app.post('/api/change-pin', (req, res) => {
   console.log('[LabGrade CSDL] Giáo viên đã đổi mã PIN mới thành công trên CSDL máy chủ.');
   broadcastRealtimeEvent({
     type: 'TEACHER_PIN_CHANGED',
+    newPin: newPin.trim(),
     timestamp: new Date().toISOString(),
   });
   res.json({ success: true, message: 'Đổi mã PIN thành công' });

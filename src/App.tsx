@@ -23,6 +23,7 @@ import {
   purgeAllLegacySubmissions,
 } from './utils/storageManager';
 import { scanAndGradeProduct } from './utils/productScanner';
+import { detectPlagiarismClientSide } from './utils/antiPlagiarism';
 import { apiFetch, getApiUrl } from './utils/apiConfig';
 import { realtimeSync } from './utils/realtimeSync';
 
@@ -35,6 +36,7 @@ function analyzeStudentWork(params: {
   fileName: string;
   fileContent: string;
   attemptNumber: number;
+  imageBase64?: string;
 }) {
   return scanAndGradeProduct(params);
 }
@@ -47,8 +49,28 @@ export default function App() {
       if (saved) {
         const parsed = JSON.parse(saved);
         if (Array.isArray(parsed) && parsed.length > 0) {
-          const hasGrade9 = parsed.some((a: Assignment) => a.id.startsWith('th9') || a.gradeLevel === 'Lớp 9');
-          if (hasGrade9) return parsed;
+          // Luôn đồng bộ rubric và đặc tả chuẩn mới nhất từ DEFAULT_ASSIGNMENTS
+          const defaultMap = new Map(DEFAULT_ASSIGNMENTS.map((a) => [a.id, a]));
+          const merged = parsed.map((item: Assignment) => {
+            const def = defaultMap.get(item.id);
+            if (def) {
+              return {
+                ...def,
+                ...item,
+                rubric: def.rubric,
+                targetFile: def.targetFile,
+                requirements: def.requirements,
+                steps: def.steps,
+              };
+            }
+            return item;
+          });
+          DEFAULT_ASSIGNMENTS.forEach((def) => {
+            if (!merged.some((m: Assignment) => m.id === def.id)) {
+              merged.push(def);
+            }
+          });
+          return merged;
         }
       }
     } catch (e) {
@@ -305,7 +327,7 @@ export default function App() {
 
     // 2. Tải toàn bộ bài nộp và trạng thái CSDL mới nhất từ máy chủ
     try {
-      const res = await apiFetch('/api/submissions', { method: 'GET' }, 6000);
+      const res = await apiFetch('/api/submissions', { method: 'GET' }, 15000);
       if (res.ok) {
         const data = await res.json();
         if (typeof data.allowSubmission === 'boolean') {
@@ -339,7 +361,7 @@ export default function App() {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ submissions: missingOnServer }),
-            }, 6000).catch(() => {});
+            }, 12000).catch(() => {});
           }
 
           // Hợp nhất danh sách để cả máy chủ và máy này luôn có đầy đủ 100% bài nộp
@@ -363,7 +385,7 @@ export default function App() {
 
     // 3. Tự động đồng bộ danh sách học sinh từ CSDL máy chủ liên tục để máy học sinh luôn có danh sách mới nhất
     try {
-      const rosterRes = await apiFetch('/api/student-roster', { method: 'GET' }, 5000);
+      const rosterRes = await apiFetch('/api/student-roster', { method: 'GET' }, 15000);
       if (rosterRes.ok) {
         const rosterData = await rosterRes.json();
         if (Array.isArray(rosterData.students)) {
@@ -697,6 +719,7 @@ export default function App() {
     fileName: string;
     fileSize: number;
     fileContent: string;
+    imageBase64?: string;
   }): Promise<SubmissionAttempt | null> => {
     const todayStr = getTodayDateString();
     const currentAssignment =
@@ -757,6 +780,7 @@ export default function App() {
           fileName: data.fileName,
           fileSize: data.fileSize,
           fileContent: data.fileContent,
+          imageBase64: data.imageBase64,
           attemptNumber,
           studentLeader: data.studentLeader,
           groupMembers: data.groupMembers,
@@ -779,12 +803,91 @@ export default function App() {
         throw err;
       }
       console.warn('Call to /api/grade failed, using smart local evaluator:', err);
-      gradeData = analyzeStudentWork({
-        assignment: currentAssignment,
-        fileName: data.fileName,
-        fileContent: data.fileContent,
-        attemptNumber,
-      });
+      // Kiểm tra phát hiện sao chép lớp trước phía client khi offline hoặc máy chủ chưa sẵn sàng
+      const clientPlag = detectPlagiarismClientSide(
+        {
+          className: data.className,
+          machineNumber: data.machineNumber,
+          studentLeader: data.studentLeader,
+          fileName: data.fileName,
+          fileSize: data.fileSize,
+          fileContent: data.fileContent,
+          imageBase64: data.imageBase64,
+        },
+        submissions
+      );
+
+      if (clientPlag && clientPlag.isCopied) {
+        gradeData = {
+          score: 0.0,
+          aiComparisonDetails: clientPlag.message,
+          strengths: ['Tệp được tải lên thành công.'],
+          weaknesses: [
+            `🚨 VI PHẠM TÍNH TRUNG THỰC: Tệp nộp trùng khớp 100% với sản phẩm của bạn ${clientPlag.copiedFromStudent} (${clientPlag.copiedFromClass} - ${clientPlag.copiedFromMachine}).`,
+            'Hệ thống không chấp nhận nộp lại bài làm có sẵn của học sinh lớp trước trên máy tính.',
+          ],
+          howToGetTen: [
+            'Bước 1: Mở phần mềm và tự tay thực hành lại sản phẩm của nhóm mình.',
+            'Bước 2: Tuyệt đối không nộp các tệp có sẵn của học sinh lớp trước để lại trên máy.',
+            'Bước 3: Lưu lại tệp mới và bấm "Chấm Lại Bằng AI" để được ghi nhận điểm số chính thức.',
+          ],
+          criteriaResults: Array.isArray(currentAssignment?.rubric)
+            ? currentAssignment.rubric.map((r: any) => ({
+                criterionId: r.id,
+                criterionName: r.name,
+                score: 0,
+                maxScore: r.maxScore,
+                feedback: `⚠️ Không tính điểm do phát hiện tệp nộp trùng khớp y nguyên với bài làm của học sinh lớp trước (${clientPlag.copiedFromClass}).`,
+              }))
+            : [],
+          stepEvaluations: Array.isArray(currentAssignment?.steps)
+            ? currentAssignment.steps.map((st: string, idx: number) => ({
+                stepNumber: idx + 1,
+                instruction: st,
+                status: 'failed' as const,
+                detail: 'Không được công nhận do sao chép tệp bài làm có sẵn.',
+              }))
+            : [],
+          inspectionSummary: {
+            contentScorePercent: 0,
+            formatScorePercent: 0,
+            stepCompletionRate: '0 bước được công nhận (Vi phạm sao chép)',
+            isOffTopic: false,
+            warningMessage: clientPlag.message,
+          },
+          plagiarismAlert: clientPlag,
+          encouragement: 'Em hãy tự tay thực hành lại bài học nhé. Thầy/Cô và hệ thống luôn ghi nhận nỗ lực thực chất của em!',
+          engine: 'anti-plagiarism-detector',
+        };
+      } else {
+        gradeData = analyzeStudentWork({
+          assignment: currentAssignment,
+          fileName: data.fileName,
+          fileContent: data.fileContent,
+          imageBase64: data.imageBase64,
+          attemptNumber,
+        });
+      }
+    }
+
+    const hasPlagAlert = Boolean(gradeData?.plagiarismAlert && gradeData.plagiarismAlert.isCopied);
+    if (hasPlagAlert) {
+      try {
+        const bc = new BroadcastChannel('labgrade_session_channel');
+        bc.postMessage({
+          type: 'PLAGIARISM_ALERT',
+          machineNumber: data.machineNumber,
+          className: data.className,
+          studentLeader: data.studentLeader,
+          copiedFromClass: gradeData.plagiarismAlert.copiedFromClass,
+          copiedFromStudent: gradeData.plagiarismAlert.copiedFromStudent,
+          copiedFromMachine: gradeData.plagiarismAlert.copiedFromMachine,
+          copiedAt: gradeData.plagiarismAlert.copiedAt,
+          message: gradeData.plagiarismAlert.message,
+          timestamp: new Date().toISOString(),
+        });
+        bc.close();
+      } catch {}
     }
 
     const newAttempt: SubmissionAttempt = {
@@ -793,6 +896,7 @@ export default function App() {
       fileName: data.fileName,
       fileSize: data.fileSize,
       fileContent: data.fileContent,
+      imageBase64: data.imageBase64,
       score: gradeData.score,
       aiComparisonDetails: gradeData.aiComparisonDetails || 'Sản phẩm đã được hệ thống AI đối chiếu tự động với sản phẩm mẫu & chuẩn tri thức môn Tin học.',
       criteriaResults: gradeData.criteriaResults || [],
@@ -801,6 +905,7 @@ export default function App() {
       howToGetTen: gradeData.howToGetTen || [],
       stepEvaluations: gradeData.stepEvaluations || [],
       inspectionSummary: gradeData.inspectionSummary || undefined,
+      plagiarismAlert: gradeData.plagiarismAlert || undefined,
     };
 
     let updatedSubmission: Submission;
@@ -820,6 +925,8 @@ export default function App() {
         latestScore: newAttempt.score,
         latestSubmittedAt: newAttempt.timestamp,
         practiceDate: todayStr,
+        hasPlagiarism: hasPlagAlert || existingSubmission.hasPlagiarism,
+        plagiarismAlert: gradeData.plagiarismAlert || existingSubmission.plagiarismAlert,
         status: maxScore >= 10 ? 'perfect' : maxScore >= 7 ? 'graded' : 'needs_improvement',
       };
 
@@ -840,6 +947,8 @@ export default function App() {
         latestScore: newAttempt.score,
         latestSubmittedAt: newAttempt.timestamp,
         practiceDate: todayStr,
+        hasPlagiarism: hasPlagAlert,
+        plagiarismAlert: gradeData.plagiarismAlert || undefined,
         status: newAttempt.score >= 10 ? 'perfect' : newAttempt.score >= 7 ? 'graded' : 'needs_improvement',
       };
 

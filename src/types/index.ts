@@ -52,6 +52,17 @@ export interface CriterionResult {
   feedback: string;
 }
 
+export interface PlagiarismAlert {
+  isCopied: boolean;
+  copiedFromStudent: string;     // Tên học sinh lớp trước đã nộp
+  copiedFromClass: string;       // Lớp trước (ví dụ: 6A1)
+  copiedFromMachine: string;     // Số máy lớp trước đã nộp (ví dụ: Máy 05)
+  copiedAt?: string;             // Thời gian lớp trước đã nộp
+  similarityPercent: number;     // Độ trùng khớp (100% hoặc %)
+  message: string;               // Thông điệp cảnh báo chi tiết
+  fileHash?: string;             // Mã vân tay tệp
+}
+
 export interface SubmissionAttempt {
   attemptNumber: number;
   timestamp: string;
@@ -67,6 +78,7 @@ export interface SubmissionAttempt {
   howToGetTen: string[];
   stepEvaluations?: StepEvaluation[]; // Đối chiếu chi tiết từng bước thực hiện
   inspectionSummary?: InspectionSummary; // Thước đo quét nội dung và hình thức
+  plagiarismAlert?: PlagiarismAlert;  // Cảnh báo sao chép tệp lớp trước
   teacherNote?: string;
 }
 
@@ -83,6 +95,8 @@ export interface Submission {
   latestScore: number;
   latestSubmittedAt: string;
   practiceDate?: string; // Ngày thực hành (YYYY-MM-DD, phân tách giữa các ngày/tuần khác nhau)
+  hasPlagiarism?: boolean;            // Cờ phát hiện sao chép
+  plagiarismAlert?: PlagiarismAlert;  // Thông tin sao chép chi tiết
   status: 'graded' | 'perfect' | 'needs_improvement';
 }
 

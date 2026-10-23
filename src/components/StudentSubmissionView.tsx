@@ -26,8 +26,11 @@ import {
   FileSpreadsheet,
   FileCheck,
   HelpCircle,
+  Award,
 } from 'lucide-react';
 import * as XLSX from 'xlsx';
+import mammoth from 'mammoth';
+import JSZip from 'jszip';
 import { Assignment, Submission, SubmissionAttempt } from '../types';
 import {
   StitchGreeting,
@@ -160,20 +163,99 @@ export const StudentSubmissionView: React.FC<StudentSubmissionViewProps> = ({
     );
   });
 
-  // Xử lý đọc tệp nộp
-  const processUploadedFile = (file: File) => {
+  // Xử lý đọc tệp nộp nâng cao cho tất cả định dạng (Word, PowerPoint, Excel, Scratch, Python, Ảnh...)
+  const processUploadedFile = async (file: File) => {
     setSelectedFile(file);
     setErrorMsg(null);
 
     const ext = file.name.split('.').pop()?.toLowerCase() || '';
 
-    // File Excel
-    if (ext === 'xlsx' || ext === 'xls') {
+    // 1. File Word (.docx) - Trích xuất văn bản và bảng biểu thực tế bằng mammoth
+    if (ext === 'docx') {
+      try {
+        const arrayBuffer = await file.arrayBuffer();
+        const result = await mammoth.extractRawText({ arrayBuffer });
+        const docText = (result.value || '').trim();
+        setFileContent(
+          docText
+            ? `[NỘI DUNG VĂN BẢN WORD (.DOCX): ${file.name}]\n${docText}`
+            : `[Tệp Word: ${file.name}, dung lượng ${file.size} bytes]`
+        );
+      } catch (err) {
+        console.warn('Lỗi đọc Word bằng mammoth:', err);
+        setFileContent(`[Tệp Word: ${file.name}, dung lượng ${file.size} bytes]`);
+      }
+    }
+    // 2. File PowerPoint (.pptx) - Trích xuất nội dung các trang slide bằng JSZip
+    else if (ext === 'pptx') {
+      try {
+        const zip = await JSZip.loadAsync(file);
+        let pptxText = `[BÀI TRÌNH CHIẾU POWERPOINT (.PPTX): ${file.name}]\n`;
+        const slideFiles = Object.keys(zip.files).filter(
+          (name) => name.startsWith('ppt/slides/slide') && name.endsWith('.xml')
+        );
+        slideFiles.sort((a, b) => {
+          const numA = parseInt(a.replace(/[^0-9]/g, '')) || 0;
+          const numB = parseInt(b.replace(/[^0-9]/g, '')) || 0;
+          return numA - numB;
+        });
+
+        for (let i = 0; i < slideFiles.length; i++) {
+          const slideXml = await zip.files[slideFiles[i]].async('text');
+          const matches = slideXml.match(/<a:t>([^<]*)<\/a:t>/g) || [];
+          const slideContent = matches.map((m) => m.replace(/<\/?a:t>/g, '')).join(' ');
+          pptxText += `\n--- Slide ${i + 1} ---\n${slideContent}\n`;
+        }
+        setFileContent(pptxText);
+      } catch (err) {
+        console.warn('Lỗi đọc PowerPoint bằng JSZip:', err);
+        setFileContent(`[Tệp PowerPoint: ${file.name}, dung lượng ${file.size} bytes]`);
+      }
+    }
+    // 3. File Lập trình Scratch (.sb3) - Phân tích cấu trúc khối lệnh bằng JSZip
+    else if (ext === 'sb3') {
+      try {
+        const zip = await JSZip.loadAsync(file);
+        if (zip.files['project.json']) {
+          const jsonStr = await zip.files['project.json'].async('text');
+          const project = JSON.parse(jsonStr);
+          let sb3Summary = `[DỰ ÁN LẬP TRÌNH SCRATCH (.SB3): ${file.name}]\n`;
+          if (Array.isArray(project.targets)) {
+            sb3Summary += `Tổng số nhân vật / sân khấu: ${project.targets.length}\n`;
+            project.targets.forEach((target: any, idx: number) => {
+              sb3Summary += `\n[Đối tượng ${idx + 1}: ${target.name} (${target.isStage ? 'Sân khấu Stage' : 'Nhân vật Sprite'})]\n`;
+              const blocks = target.blocks || {};
+              const blockKeys = Object.keys(blocks);
+              sb3Summary += `- Số lượng khối lệnh: ${blockKeys.length}\n`;
+              const opcodes: string[] = [];
+              blockKeys.forEach((k) => {
+                const b = blocks[k];
+                if (b && typeof b === 'object' && b.opcode) opcodes.push(b.opcode);
+              });
+              const uniqueOpcodes = Array.from(new Set(opcodes));
+              sb3Summary += `- Các loại khối đã dùng: ${uniqueOpcodes.slice(0, 30).join(', ')}\n`;
+              if (target.variables && Object.keys(target.variables).length > 0) {
+                const varNames = Object.values(target.variables).map((v: any) => v[0]);
+                sb3Summary += `- Biến số khởi tạo: ${varNames.join(', ')}\n`;
+              }
+            });
+          }
+          setFileContent(sb3Summary);
+        } else {
+          setFileContent(`[Dự án Scratch: ${file.name}, dung lượng ${file.size} bytes]`);
+        }
+      } catch (err) {
+        console.warn('Lỗi đọc tệp Scratch .sb3:', err);
+        setFileContent(`[Tệp Scratch .sb3: ${file.name}, dung lượng ${file.size} bytes]`);
+      }
+    }
+    // 4. File Bảng tính Excel (.xlsx, .xls)
+    else if (ext === 'xlsx' || ext === 'xls') {
       const reader = new FileReader();
       reader.onload = (e) => {
         try {
           const buffer = new Uint8Array(e.target?.result as ArrayBuffer);
-          const workbook = XLSX.read(buffer, { type: 'array' });
+          const workbook = XLSX.read(buffer, { type: 'array', cellFormula: true });
           let sheetDetails = `[BẢNG TÍNH EXCEL: ${file.name}]\n`;
           workbook.SheetNames.forEach((sheetName) => {
             sheetDetails += `\n--- TRANG TÍNH: ${sheetName} ---\n`;
@@ -188,8 +270,8 @@ export const StudentSubmissionView: React.FC<StudentSubmissionViewProps> = ({
       };
       reader.readAsArrayBuffer(file);
     }
-    // File Hình ảnh
-    else if (['png', 'jpg', 'jpeg', 'webp', 'gif'].includes(ext)) {
+    // 5. File Hình ảnh sơ đồ / đồ họa (.png, .jpg, .jpeg, .webp, .bmp)
+    else if (['png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp'].includes(ext)) {
       const reader = new FileReader();
       reader.onload = (e) => {
         const base64 = e.target?.result as string;
@@ -198,7 +280,7 @@ export const StudentSubmissionView: React.FC<StudentSubmissionViewProps> = ({
       };
       reader.readAsDataURL(file);
     }
-    // File Văn bản, Code, HTML, Python, v.v.
+    // 6. File Văn bản, Code Python (.py), C++ (.cpp), HTML (.html), Text (.txt)
     else {
       const reader = new FileReader();
       reader.onload = (e) => {
@@ -482,6 +564,8 @@ export const StudentSubmissionView: React.FC<StudentSubmissionViewProps> = ({
                 ))}
               </div>
             )}
+
+            {/* Đã xóa ô hiển thị tiêu chí tại đây theo yêu cầu của giáo viên */}
           </div>
 
           {/* 4. VÙNG TẢI SẢN PHẨM LÊN ĐỂ CHẤM ĐIỂM (CÓ HÌNH ẢNH ĐỘNG STITCH THEO YÊU CẦU) */}
@@ -822,8 +906,21 @@ export const StudentSubmissionView: React.FC<StudentSubmissionViewProps> = ({
                       </div>
                     </div>
 
-                    {/* Banner Lời Khen hoặc Cảnh báo */}
-                    {latestResult.score >= 10 ? (
+                    {/* Banner Lời Khen hoặc Cảnh báo Sao Chép / Nhắc nhở */}
+                    {latestResult.plagiarismAlert?.isCopied ? (
+                      <div className="p-3.5 bg-rose-50 border-2 border-rose-500 rounded-xl space-y-2 text-rose-950 text-xs shadow-sm animate-in fade-in">
+                        <div className="flex items-center gap-2 text-rose-700 font-black text-sm">
+                          <AlertTriangle className="w-5 h-5 text-rose-600 shrink-0 animate-bounce" />
+                          <span>🚨 PHÁT HIỆN SAO CHÉP TỆP LỚP TRƯỚC</span>
+                        </div>
+                        <div className="text-[11px] leading-relaxed text-rose-900 bg-rose-100/70 p-2.5 rounded-lg border border-rose-200">
+                          {latestResult.plagiarismAlert.message}
+                        </div>
+                        <div className="text-[11px] text-rose-800 font-medium">
+                          ⚠️ <strong>Chế tài phòng thực hành:</strong> Hệ thống đã tự động khóa điểm 0.0đ và gửi cảnh báo trực tiếp lên <strong>Màn hình máy chiếu của Giáo viên</strong>. Em hãy tự tay mở phần mềm thực hành lại bài học này của nhóm mình!
+                        </div>
+                      </div>
+                    ) : latestResult.score >= 10 ? (
                       <div className="p-3 bg-gradient-to-r from-amber-400 to-yellow-400 text-slate-950 rounded-xl font-bold text-xs flex items-center gap-2.5 shadow-2xs">
                         <StitchCelebrate className="w-9 h-9 shrink-0 drop-shadow-2xs" />
                         <div>
@@ -837,6 +934,77 @@ export const StudentSubmissionView: React.FC<StudentSubmissionViewProps> = ({
                         <div>
                           <div className="font-bold text-amber-900">Chưa đạt 10 điểm tuyệt đối?</div>
                           <div className="text-[11px] text-amber-800">Mở lại tệp trên máy, hoàn thiện theo các bước bên dưới rồi bấm chấm lại nhé!</div>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* BẢNG CHIẾT TÍNH ĐIỂM TỪNG TIÊU CHÍ (RUBRIC BREAKDOWN) */}
+                    {latestResult.criteriaResults && latestResult.criteriaResults.length > 0 && (
+                      <div className="space-y-2">
+                        <div className="flex items-center justify-between text-xs font-black text-slate-800 uppercase">
+                          <span className="flex items-center gap-1.5">
+                            <Award className="w-4 h-4 text-indigo-600 shrink-0" />
+                            <span>Chi Tiết Điểm Từng Tiêu Chí:</span>
+                          </span>
+                          <span className="text-indigo-700 bg-indigo-50 border border-indigo-200 px-2 py-0.5 rounded-md font-black text-[11px]">
+                            {latestResult.criteriaResults.reduce((acc, c) => acc + (typeof c.score === 'number' ? c.score : 0), 0).toFixed(1)}/10đ
+                          </span>
+                        </div>
+
+                        <div className="max-h-52 overflow-y-auto space-y-1.5 pr-1 text-xs">
+                          {latestResult.criteriaResults.map((crit, idx) => {
+                            const isFull = crit.score >= crit.maxScore;
+                            const percent = Math.min(100, Math.round((crit.score / crit.maxScore) * 100));
+                            return (
+                              <div
+                                key={crit.criterionId || idx}
+                                className={`p-2 rounded-xl border space-y-1 ${
+                                  isFull
+                                    ? 'bg-emerald-50/70 border-emerald-200 text-emerald-950'
+                                    : crit.score > 0
+                                    ? 'bg-blue-50/70 border-blue-200 text-blue-950'
+                                    : 'bg-rose-50/70 border-rose-200 text-rose-950'
+                                }`}
+                              >
+                                <div className="flex items-center justify-between text-xs font-bold">
+                                  <span className="truncate pr-1">
+                                    {idx + 1}. {crit.criterionName}
+                                  </span>
+                                  <span
+                                    className={`text-[11px] font-black px-2 py-0.5 rounded-full shrink-0 ${
+                                      isFull
+                                        ? 'bg-emerald-200 text-emerald-900'
+                                        : crit.score > 0
+                                        ? 'bg-blue-200 text-blue-900'
+                                        : 'bg-rose-200 text-rose-900'
+                                    }`}
+                                  >
+                                    {crit.score} / {crit.maxScore}đ
+                                  </span>
+                                </div>
+
+                                {/* Progress bar */}
+                                <div className="w-full bg-slate-200/80 h-1.5 rounded-full overflow-hidden">
+                                  <div
+                                    className={`h-full rounded-full transition-all duration-300 ${
+                                      isFull
+                                        ? 'bg-emerald-500'
+                                        : crit.score > 0
+                                        ? 'bg-blue-500'
+                                        : 'bg-rose-400'
+                                    }`}
+                                    style={{ width: `${percent}%` }}
+                                  />
+                                </div>
+
+                                {crit.feedback && (
+                                  <p className="text-[11px] opacity-85 leading-snug">
+                                    {crit.feedback}
+                                  </p>
+                                )}
+                              </div>
+                            );
+                          })}
                         </div>
                       </div>
                     )}

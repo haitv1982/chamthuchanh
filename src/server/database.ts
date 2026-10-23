@@ -2,7 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { INITIAL_SUBMISSIONS } from '../data/mockSubmissions';
-import { Submission, SubmissionAttempt, StudentRecord } from '../types';
+import { Submission, SubmissionAttempt, StudentRecord, PlagiarismAlert } from '../types';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -154,6 +154,70 @@ export function setTeacherPin(newPin: string): void {
   flushDatabaseToDisk();
 }
 
+// Thuật toán quét và phát hiện học sinh lớp sau lấy y nguyên tệp của học sinh lớp trước
+export function detectPlagiarism(params: {
+  className: string;
+  machineNumber: string;
+  studentLeader: string;
+  assignmentId?: string;
+  fileName: string;
+  fileSize: number;
+  fileContent?: string;
+  imageBase64?: string;
+}): PlagiarismAlert | null {
+  const { className, machineNumber, studentLeader, fileName, fileSize, fileContent, imageBase64 } = params;
+  if (!fileSize || fileSize < 50) return null;
+
+  const currentContent = (fileContent || '').trim();
+  const cleanCurrentLeader = (studentLeader || '').trim().toLowerCase();
+
+  // Duyệt qua tất cả các bài nộp đã có trong CSDL
+  for (const sub of dbState.submissions) {
+    if (!sub || !Array.isArray(sub.attempts)) continue;
+
+    const subLeader = (sub.studentLeader || '').trim().toLowerCase();
+    const isDifferentClass = sub.className !== className;
+    const isDifferentStudentSameClass = sub.className === className && subLeader !== cleanCurrentLeader;
+
+    // Chỉ phát hiện khi đối chiếu với bài của lớp khác hoặc học sinh khác
+    if (!isDifferentClass && !isDifferentStudentSameClass) continue;
+
+    for (const attempt of sub.attempts) {
+      if (!attempt || !attempt.fileSize) continue;
+
+      // 1. Kiểm tra kích thước byte trùng khớp tuyệt đối
+      const isExactSize = Math.abs(attempt.fileSize - fileSize) === 0;
+
+      // 2. Kiểm tra nội dung văn bản trùng khớp
+      const attemptContent = (attempt.fileContent || '').trim();
+      const isExactTextContent = currentContent.length > 50 && attemptContent.length > 50 && currentContent === attemptContent;
+
+      // 3. Kiểm tra dữ liệu hình ảnh trùng khớp tuyệt đối
+      const isExactImage = Boolean(imageBase64 && attempt.imageBase64 && imageBase64.length > 500 && imageBase64 === attempt.imageBase64);
+
+      // 4. Nếu tệp có cùng dung lượng byte và cùng tên tệp hoặc cùng nội dung/ảnh
+      const isExactCopy =
+        (isExactSize && (isExactTextContent || isExactImage || (fileName && attempt.fileName && fileName.toLowerCase() === attempt.fileName.toLowerCase() && fileSize > 500))) ||
+        isExactTextContent ||
+        isExactImage;
+
+      if (isExactCopy) {
+        return {
+          isCopied: true,
+          copiedFromStudent: sub.studentLeader || 'Học sinh lớp trước',
+          copiedFromClass: sub.className,
+          copiedFromMachine: sub.machineNumber,
+          copiedAt: attempt.timestamp || sub.latestSubmittedAt,
+          similarityPercent: 100,
+          message: `🚨 CẢNH BÁO SAO CHÉP: Tệp nộp trùng khớp y nguyên 100% với sản phẩm của bạn ${sub.studentLeader} (${sub.className} - ${sub.machineNumber}) đã nộp trước đó!`,
+        };
+      }
+    }
+  }
+
+  return null;
+}
+
 // Tự động lưu và cập nhật kết quả nộp bài của học sinh ngay lập tức vào CSDL
 export function upsertSubmission(newSub: any): { success: boolean; submission: Submission; totalCount: number } {
   if (!newSub || !newSub.className || !newSub.machineNumber) {
@@ -162,6 +226,10 @@ export function upsertSubmission(newSub: any): { success: boolean; submission: S
 
   const cleanLeader = (newSub.studentLeader || '').trim().toLowerCase();
   const subPracticeDate = newSub.practiceDate || (newSub.latestSubmittedAt ? newSub.latestSubmittedAt.slice(0, 10) : new Date().toISOString().slice(0, 10));
+
+  // Kiểm tra cờ cảnh báo sao chép
+  const hasPlag = Boolean(newSub.hasPlagiarism || (newSub.plagiarismAlert && newSub.plagiarismAlert.isCopied));
+  const plagAlert = newSub.plagiarismAlert || undefined;
 
   // Tìm bản ghi trùng: cùng ID HOẶC cùng lớp + cùng máy + cùng ngày thực hành (hoặc cùng tên trưởng nhóm)
   const existingIdx = dbState.submissions.findIndex((s) => {
@@ -214,6 +282,8 @@ export function upsertSubmission(newSub: any): { success: boolean; submission: S
       latestScore: latestAttempt ? latestAttempt.score : (newSub.latestScore ?? highestScore),
       latestSubmittedAt: latestAttempt ? latestAttempt.timestamp : (newSub.latestSubmittedAt || new Date().toISOString()),
       practiceDate: subPracticeDate,
+      hasPlagiarism: hasPlag || existing.hasPlagiarism,
+      plagiarismAlert: plagAlert || existing.plagiarismAlert,
       status: highestScore >= 10 ? 'perfect' : highestScore >= 7 ? 'graded' : 'needs_improvement',
     };
 
@@ -237,6 +307,8 @@ export function upsertSubmission(newSub: any): { success: boolean; submission: S
       latestScore: typeof newSub.latestScore === 'number' ? newSub.latestScore : highestScore,
       latestSubmittedAt: newSub.latestSubmittedAt || new Date().toISOString(),
       practiceDate: subPracticeDate,
+      hasPlagiarism: hasPlag,
+      plagiarismAlert: plagAlert,
       status: highestScore >= 10 ? 'perfect' : highestScore >= 7 ? 'graded' : 'needs_improvement',
     };
 
