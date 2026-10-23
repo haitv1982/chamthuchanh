@@ -189,17 +189,20 @@ export const Header: React.FC<HeaderProps> = ({
     setIsVerifying(true);
     setPinError(null);
 
+    const savedPin = localStorage.getItem(STORAGE_KEY_TEACHER_PIN) || teacherPin || '1234';
+
+    // 1. Thử xác thực với máy chủ nếu có API backend phản hồi JSON
     try {
       const res = await apiFetch('/api/verify-pin', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ pin: entered }),
-      }, 10000);
+      }, 5000);
 
-      if (res.ok) {
+      const contentType = res.headers.get('content-type') || '';
+      if (res.ok && contentType.includes('application/json')) {
         const data = await res.json();
         if (data.success) {
-          // Lưu mã PIN mới hợp lệ từ máy chủ vào máy này
           setTeacherPin(entered);
           try {
             localStorage.setItem(STORAGE_KEY_TEACHER_PIN, entered);
@@ -211,31 +214,32 @@ export const Header: React.FC<HeaderProps> = ({
           if (onToggleRole) onToggleRole();
           return;
         } else {
-          // MÁY CHỦ TỪ CHỐI: TUYỆT ĐỐI KHÔNG FALLBACK VỀ MÃ CŨ 1234
           setIsVerifying(false);
-          setPinError(data.error || 'Mã PIN không chính xác! Mã PIN đã được đổi trên máy chủ CSDL.');
+          setPinError(data.error || 'Mã PIN không chính xác! (Mã PIN mặc định là 1234)');
           return;
         }
       }
     } catch (netErr) {
-      console.warn('Lỗi kết nối máy chủ xác thực PIN, thử đối chiếu offline:', netErr);
-      // Chỉ khi máy ĐÃ TỪNG được đổi sang mã PIN riêng (khác 1234) mới cho đối chiếu offline
-      if (teacherPin && teacherPin !== '1234' && entered === teacherPin.trim()) {
-        setIsPinModalOpen(false);
-        setPinInput('');
-        setPinError(null);
-        setIsVerifying(false);
-        if (onToggleRole) onToggleRole();
-        return;
-      }
+      console.warn('Lỗi kết nối máy chủ xác thực PIN, chuyển sang đối chiếu cục bộ:', netErr);
+    }
 
+    // 2. Chế độ Web tĩnh (Vercel, GitHub Pages) hoặc khi ngoại tuyến:
+    // Đối chiếu trực tiếp với mã PIN lưu trong máy hoặc mã mặc định 1234!
+    if (entered === savedPin.trim()) {
+      setTeacherPin(entered);
+      try {
+        localStorage.setItem(STORAGE_KEY_TEACHER_PIN, entered);
+      } catch {}
+      setIsPinModalOpen(false);
+      setPinInput('');
+      setPinError(null);
       setIsVerifying(false);
-      setPinError('⚠️ Không thể kết nối với máy chủ CSDL phòng máy để xác thực mã PIN. Vui lòng kiểm tra lại kết nối mạng!');
+      if (onToggleRole) onToggleRole();
       return;
     }
 
     setIsVerifying(false);
-    setPinError('Mã PIN không chính xác. Vui lòng nhập đúng mã PIN giáo viên mới nhất!');
+    setPinError('Mã PIN không chính xác! Mã PIN mặc định là 1234 (nếu Thầy/Cô chưa đổi lần nào).');
   };
 
   const handleChangePinSubmit = async (e: React.FormEvent) => {

@@ -7,8 +7,8 @@
  * 3. Mạng nội bộ phòng máy trường học (LAN IP ví dụ http://192.168.1.100:3000)
  */
 
-// Địa chỉ máy chủ Cloud trung tâm mặc định (chạy ổn định trên Google Cloud Run asia-east1, không giới hạn băng thông)
-export const DEFAULT_CLOUD_BACKEND_URL = 'https://ais-pre-z4vcbgzjafe3fqbkfbktwa-152013379411.asia-east1.run.app';
+// Mặc định để trống để trang web tĩnh (Vercel, GitHub Pages) hoạt động độc lập mượt mà không bị lỗi CORS
+export const DEFAULT_CLOUD_BACKEND_URL = '';
 
 export const STORAGE_KEY_SERVER_URL = 'labgrade_custom_server_url_v1';
 

@@ -219,24 +219,30 @@ export const ProjectorLiveBoard: React.FC<ProjectorLiveBoardProps> = ({
         setPinErrorMsg('Vui lòng nhập mã PIN Giáo viên.');
         return;
       }
+      const localPin = localStorage.getItem('labgrade_teacher_pin_v1') || '1234';
       try {
         const verifyRes = await apiFetch('/api/verify-pin', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ pin: teacherPinInput.trim() }),
-        }, 10000);
-        const vData = await verifyRes.json().catch(() => ({}));
-        if (!verifyRes.ok || !vData.success) {
-          setPinErrorMsg(vData.error || 'Mã PIN Giáo viên không chính xác.');
-          return;
+        }, 5000);
+        const contentType = verifyRes.headers.get('content-type') || '';
+        if (verifyRes.ok && contentType.includes('application/json')) {
+          const vData = await verifyRes.json().catch(() => ({}));
+          if (!vData.success) {
+            setPinErrorMsg(vData.error || 'Mã PIN Giáo viên không chính xác! (Mặc định: 1234).');
+            return;
+          }
+        } else {
+          // Đối chiếu cục bộ trên Vercel / GitHub Pages
+          if (teacherPinInput.trim() !== localPin) {
+            setPinErrorMsg('Mã PIN Giáo viên không chính xác! Mã PIN mặc định là 1234.');
+            return;
+          }
         }
       } catch (err) {
-        // Chỉ khi mất mạng hoàn toàn và máy này đã có mã PIN tùy chỉnh (khác 1234)
-        const localPin = localStorage.getItem('labgrade_teacher_pin_v1');
-        if (localPin && localPin !== '1234' && teacherPinInput.trim() === localPin) {
-          // Cho phép xóa cục bộ
-        } else {
-          setPinErrorMsg('⚠️ Không thể kết nối với máy chủ CSDL phòng máy để xác thực mã PIN.');
+        if (teacherPinInput.trim() !== localPin) {
+          setPinErrorMsg('Mã PIN Giáo viên không chính xác! Mã PIN mặc định là 1234.');
           return;
         }
       }
