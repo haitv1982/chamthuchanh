@@ -1,0 +1,41 @@
+{
+  "entities": {
+    "Submission": {
+      "collection": "submissions",
+      "description": "Kết quả bài nộp thực hành của học sinh theo từng máy và lớp",
+      "fields": {
+        "id": { "type": "string", "required": true, "description": "Mã bài nộp duy nhất" },
+        "assignmentId": { "type": "string", "required": true, "description": "Mã bài tập / sản phẩm thực hành" },
+        "assignmentTitle": { "type": "string", "required": true, "description": "Tên sản phẩm thực hành" },
+        "className": { "type": "string", "required": true, "description": "Tên lớp học (ví dụ: 6A2)" },
+        "machineNumber": { "type": "string", "required": true, "description": "Số máy phòng tin (ví dụ: Máy 05)" },
+        "studentLeader": { "type": "string", "required": true, "description": "Họ và tên học sinh nộp" },
+        "groupMembers": { "type": "array", "required": false, "description": "Danh sách thành viên nhóm" },
+        "attempts": { "type": "array", "required": true, "description": "Lịch sử các lần nộp và chấm điểm" },
+        "highestScore": { "type": "number", "required": true, "description": "Điểm cao nhất" },
+        "latestScore": { "type": "number", "required": true, "description": "Điểm lần nộp gần nhất" },
+        "latestSubmittedAt": { "type": "string", "required": true, "description": "Thời gian nộp mới nhất" },
+        "practiceDate": { "type": "string", "required": false, "description": "Ngày thực hành YYYY-MM-DD" },
+        "status": { "type": "string", "required": true, "description": "Trạng thái bài nộp" }
+      }
+    },
+    "StudentRecord": {
+      "collection": "roster",
+      "description": "Danh sách học sinh các lớp do giáo viên tải lên",
+      "fields": {
+        "stt": { "type": "number", "required": false, "description": "Số thứ tự trong danh sách lớp" },
+        "fullName": { "type": "string", "required": true, "description": "Họ và tên học sinh" },
+        "className": { "type": "string", "required": true, "description": "Lớp học" }
+      }
+    },
+    "AppSettings": {
+      "collection": "app_settings",
+      "description": "Cấu hình chung và trạng thái phòng thực hành",
+      "fields": {
+        "allowSubmission": { "type": "boolean", "required": true, "description": "Cho phép học sinh nộp bài" },
+        "teacherPin": { "type": "string", "required": false, "description": "Mã PIN giáo viên" },
+        "lastUpdated": { "type": "string", "required": true, "description": "Thời gian cập nhật gần nhất" }
+      }
+    }
+  }
+}

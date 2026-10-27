@@ -593,3 +593,374 @@ export function exportSingleSubmissionToExcel(params: {
   const filename = `Ket_Qua_${submission.className}_${formattedMachine.replace(/\s+/g, '_')}_${safeLeader}.xlsx`;
   XLSX.writeFile(wb, filename);
 }
+
+// ============================================================================
+// CHỨC NĂNG XUẤT BẢNG TỔNG HỢP ĐIỂM TỪNG LỚP (SP1, SP2... ĐIỂM TRUNG BÌNH)
+// Cập nhật tại thời điểm giáo viên bấm xuất - Lấy điểm cao nhất của từng sản phẩm
+// ============================================================================
+
+export interface StudentSummaryRow {
+  stt: number;
+  hoVaDem: string;
+  ten: string;
+  fullName: string;
+  scores: Record<string, number | null>; // assignmentId -> score
+  completedCount: number;
+  totalProducts: number;
+  avgScore: number | null;
+  classification: string;
+}
+
+export function getGradeLevelFromClass(className: string): string {
+  const clean = (className || '').trim().replace(/^LỚP\s*|^LOP\s*/i, '');
+  const firstChar = clean.charAt(0);
+  if (firstChar === '6') return 'Lớp 6';
+  if (firstChar === '7') return 'Lớp 7';
+  if (firstChar === '8') return 'Lớp 8';
+  if (firstChar === '9') return 'Lớp 9';
+  return 'Lớp 6';
+}
+
+export function getAssignmentsForClass(
+  className: string,
+  allAssignments: Assignment[],
+  submissions?: Submission[]
+): Assignment[] {
+  const gradeLevel = getGradeLevelFromClass(className);
+  let classAssignments = (allAssignments || []).filter((a) => a.gradeLevel === gradeLevel);
+  if (classAssignments.length === 0) {
+    classAssignments = allAssignments || [];
+  }
+  // Nếu học sinh lớp này có nộp thêm sản phẩm khác ngoài danh sách khối, bổ sung thêm
+  if (submissions && submissions.length > 0) {
+    const cleanCls = className.trim().toUpperCase().replace(/^LỚP\s*|^LOP\s*/i, '');
+    const classSubs = className === 'Tất cả'
+      ? submissions
+      : submissions.filter((s) => s.className.trim().toUpperCase().replace(/^LỚP\s*|^LOP\s*/i, '') === cleanCls);
+
+    const usedAssignmentIds = new Set(classSubs.map((s) => s.assignmentId));
+    allAssignments.forEach((a) => {
+      if (usedAssignmentIds.has(a.id) && !classAssignments.some((ca) => ca.id === a.id)) {
+        classAssignments.push(a);
+      }
+    });
+  }
+  return classAssignments;
+}
+
+export function buildClassMultiProductData(params: {
+  className: string;
+  assignments: Assignment[];
+  submissions: Submission[];
+  roster?: any[];
+}): {
+  students: StudentSummaryRow[];
+  classAssignments: Assignment[];
+  className: string;
+  totalStudents: number;
+  studentsWithSubmissions: number;
+  classAverageScore: string;
+  exportTimestamp: string;
+} {
+  const { className, assignments, submissions, roster = [] } = params;
+
+  const cleanCls = className.trim().toUpperCase().replace(/^LỚP\s*|^LOP\s*/i, '');
+  const classSubs = className === 'Tất cả'
+    ? submissions
+    : submissions.filter((s) => s.className.trim().toUpperCase().replace(/^LỚP\s*|^LOP\s*/i, '') === cleanCls);
+
+  const classAssignments = getAssignmentsForClass(className, assignments, submissions);
+
+  // 1. Tập hợp danh sách học sinh:
+  // Ưu tiên danh sách đã tải lên (roster) của lớp này
+  const rosterForClass = (roster || []).filter((r: any) => {
+    const rCls = (r.className || '').trim().toUpperCase().replace(/^LỚP\s*|^LOP\s*/i, '');
+    return className === 'Tất cả' || rCls === cleanCls;
+  });
+
+  const studentNameMap = new Map<string, { fullName: string; originalStt?: any }>();
+
+  // Thêm học sinh từ danh sách phân lớp (roster)
+  rosterForClass.forEach((r: any, idx: number) => {
+    const name = (r.fullName || '').trim();
+    if (name) {
+      const normKey = name.toLowerCase().replace(/\s+/g, ' ');
+      if (!studentNameMap.has(normKey)) {
+        studentNameMap.set(normKey, { fullName: name, originalStt: r.stt ?? idx + 1 });
+      }
+    }
+  });
+
+  // Thêm bất kỳ học sinh nào đã nộp bài (Trưởng nhóm hoặc thành viên) mà chưa có trong danh sách
+  classSubs.forEach((sub) => {
+    const leader = (sub.studentLeader || '').trim();
+    if (leader) {
+      const normKey = leader.toLowerCase().replace(/\s+/g, ' ');
+      if (!studentNameMap.has(normKey)) {
+        studentNameMap.set(normKey, { fullName: leader });
+      }
+    }
+    (sub.groupMembers || []).forEach((m) => {
+      const member = (m || '').trim();
+      if (member) {
+        const normKey = member.toLowerCase().replace(/\s+/g, ' ');
+        if (!studentNameMap.has(normKey)) {
+          studentNameMap.set(normKey, { fullName: member });
+        }
+      }
+    });
+  });
+
+  // Sắp xếp danh sách học sinh: Nếu có thứ tự STT thì theo STT, nếu không sắp xếp theo Tên ABC
+  const rawList = Array.from(studentNameMap.values());
+  const sortedList = [...rawList].sort((a, b) => {
+    if (a.originalStt != null && b.originalStt != null) {
+      const numA = Number(a.originalStt);
+      const numB = Number(b.originalStt);
+      if (!isNaN(numA) && !isNaN(numB) && numA !== numB) return numA - numB;
+    }
+    const nameA = splitVietnameseName(a.fullName);
+    const nameB = splitVietnameseName(b.fullName);
+    const cmpTen = nameA.ten.localeCompare(nameB.ten, 'vi', { sensitivity: 'base' });
+    if (cmpTen !== 0) return cmpTen;
+    return nameA.hoVaDem.localeCompare(nameB.hoVaDem, 'vi', { sensitivity: 'base' });
+  });
+
+  // 2. Tính điểm từng sản phẩm cho từng học sinh (LẤY KẾT QUẢ CAO NHẤT)
+  const students: StudentSummaryRow[] = sortedList.map((st, idx) => {
+    const normName = st.fullName.toLowerCase().replace(/\s+/g, ' ');
+    const nameParts = splitVietnameseName(st.fullName);
+    const scores: Record<string, number | null> = {};
+
+    classAssignments.forEach((assign) => {
+      // Tìm tất cả các bài nộp của học sinh này cho sản phẩm assign
+      const matchingSubs = classSubs.filter((sub) => {
+        const isParticipant =
+          sub.studentLeader.trim().toLowerCase().replace(/\s+/g, ' ') === normName ||
+          (sub.groupMembers || []).some((m) => m.trim().toLowerCase().replace(/\s+/g, ' ') === normName);
+
+        if (!isParticipant) return false;
+
+        const isMatchAssign =
+          sub.assignmentId === assign.id ||
+          (assign.targetFile && sub.assignmentTitle.toLowerCase().includes(assign.targetFile.toLowerCase())) ||
+          sub.assignmentTitle.toLowerCase().trim() === assign.title.toLowerCase().trim();
+
+        return isMatchAssign;
+      });
+
+      if (matchingSubs.length > 0) {
+        // Lấy điểm cao nhất trong các lần nộp
+        const bestScore = Math.max(...matchingSubs.map((s) => s.highestScore));
+        scores[assign.id] = bestScore;
+      } else {
+        scores[assign.id] = null;
+      }
+    });
+
+    const scoredValues = Object.values(scores).filter((v): v is number => v !== null);
+    const completedCount = scoredValues.length;
+    const avgScore = completedCount > 0
+      ? Number((scoredValues.reduce((sum, val) => sum + val, 0) / completedCount).toFixed(2))
+      : null;
+
+    let classification = 'Chưa có điểm';
+    if (avgScore !== null) {
+      if (avgScore >= 9) classification = 'Xuất sắc';
+      else if (avgScore >= 8) classification = 'Giỏi';
+      else if (avgScore >= 6.5) classification = 'Khá';
+      else if (avgScore >= 5) classification = 'Đạt';
+      else classification = 'Chưa đạt';
+    }
+
+    return {
+      stt: st.originalStt ? Number(st.originalStt) || idx + 1 : idx + 1,
+      hoVaDem: nameParts.hoVaDem,
+      ten: nameParts.ten,
+      fullName: st.fullName,
+      scores,
+      completedCount,
+      totalProducts: classAssignments.length,
+      avgScore,
+      classification,
+    };
+  });
+
+  const studentsWithSubmissions = students.filter((s) => s.completedCount > 0).length;
+  const totalAvg = students
+    .map((s) => s.avgScore)
+    .filter((v): v is number => v !== null);
+
+  const classAverageScore = totalAvg.length > 0
+    ? (totalAvg.reduce((sum, v) => sum + v, 0) / totalAvg.length).toFixed(2)
+    : '0';
+
+  const exportTimestamp = new Date().toLocaleString('vi-VN', {
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    day: '2-digit',
+    month: '2-digit',
+    year: 'numeric',
+  });
+
+  return {
+    students,
+    classAssignments,
+    className,
+    totalStudents: students.length,
+    studentsWithSubmissions,
+    classAverageScore,
+    exportTimestamp,
+  };
+}
+
+/**
+ * Xuất file Excel Bảng Tổng Hợp Điểm Từng Lớp
+ * Gồm: STT, Họ và tên, Điểm SP1, Điểm SP2,... Điểm trung bình, lấy kết quả cao nhất
+ * Cập nhật tức thời tại thời điểm bấm xuất!
+ */
+export function exportClassMultiProductGradebook(params: {
+  className: string;
+  assignments: Assignment[];
+  submissions: Submission[];
+  roster?: any[];
+  teacherName?: string;
+  schoolName?: string;
+}) {
+  const {
+    className,
+    assignments,
+    submissions,
+    roster = [],
+    teacherName = 'Giáo viên Tin học',
+    schoolName = 'TRƯỜNG THCS / THPT',
+  } = params;
+
+  // Lấy dữ liệu tổng hợp tại thời điểm hiện tại
+  const data = buildClassMultiProductData({
+    className,
+    assignments,
+    submissions,
+    roster,
+  });
+
+  const { students, classAssignments, exportTimestamp } = data;
+
+  // Xây dựng các tiêu đề cột sản phẩm: SP01, SP02...
+  const productHeaders = classAssignments.map((a, i) => {
+    const match = a.title.match(/SP\d+/i);
+    const code = match ? match[0].toUpperCase() : `SP${String(i + 1).padStart(2, '0')}`;
+    return `${code}: ${a.title.replace(/^SP\d+\.\s*/i, '').slice(0, 25)}`;
+  });
+
+  const COL_HEADERS = [
+    'STT',
+    'Họ và chữ đệm',
+    'Tên',
+    'Họ và tên đầy đủ',
+    ...productHeaders,
+    'Số SP đã nộp',
+    'Điểm trung bình (ĐTB)',
+    'Xếp loại học lực',
+  ];
+
+  // Helper để tạo các hàng cho một danh sách học sinh
+  const createSheetRows = (
+    studentList: StudentSummaryRow[],
+    titleText: string,
+    subText: string
+  ): any[][] => {
+    const rows: any[][] = [];
+    rows.push([schoolName.toUpperCase()]);
+    rows.push(['TỔ CHUYÊN MÔN: TIN HỌC - SỔ ĐIỂM ĐIỆN TỬ PHÒNG THỰC HÀNH']);
+    rows.push(['']);
+    rows.push([titleText]);
+    rows.push([subText]);
+    rows.push([`Lớp: ${className} | Số lượng học sinh: ${studentList.length} | Tổng số sản phẩm: ${classAssignments.length}`]);
+    rows.push([`Thời điểm xuất: ${exportTimestamp} (Dữ liệu thời gian thực cập nhật mới nhất)`]);
+    rows.push([`Giáo viên phụ trách: ${teacherName} | Tiêu chí: Lấy kết quả cao nhất của từng sản phẩm (gồm Trưởng nhóm & Thành viên)`]);
+    rows.push(['']);
+    rows.push(COL_HEADERS);
+
+    studentList.forEach((st, idx) => {
+      const scoreCols = classAssignments.map((a) => {
+        const val = st.scores[a.id];
+        return val !== null && val !== undefined ? val : '';
+      });
+
+      rows.push([
+        idx + 1,
+        st.hoVaDem,
+        st.ten,
+        st.fullName,
+        ...scoreCols,
+        `${st.completedCount}/${classAssignments.length}`,
+        st.avgScore !== null ? st.avgScore : '',
+        st.classification,
+      ]);
+    });
+
+    // Thống kê cuối bảng
+    rows.push(['']);
+    rows.push([`=== THỐNG KÊ TỔNG HỢP LỚP ${className} (THỜI ĐIỂM: ${exportTimestamp}) ===`]);
+    rows.push(['Sĩ số học sinh ghi nhận:', studentList.length]);
+    rows.push(['Số học sinh đã có ít nhất 1 bài nộp:', studentList.filter((s) => s.completedCount > 0).length]);
+    rows.push(['Điểm trung bình chung toàn lớp:', data.classAverageScore]);
+    rows.push(['Số học sinh đạt loại Giỏi/Xuất sắc (>=8.0):', studentList.filter((s) => s.avgScore !== null && s.avgScore >= 8).length]);
+    rows.push(['Ghi chú:', 'Điểm từng sản phẩm lấy kết quả cao nhất giữa các lần nộp. Cả trưởng nhóm và các bạn trong nhóm đều được ghi nhận điểm.']);
+
+    return rows;
+  };
+
+  // SHEET 1: Theo thứ tự STT lớp (hoặc danh sách học sinh)
+  const sheet1Rows = createSheetRows(
+    students,
+    `BẢNG ĐIỂM TỔNG HỢP CÁC SẢN PHẨM THỰC HÀNH - LỚP ${className.toUpperCase()}`,
+    'Thống kê chi tiết điểm các sản phẩm SP1, SP2... và Điểm trung bình (ĐTB) | Thứ tự theo danh sách lớp'
+  );
+
+  // SHEET 2: Sắp xếp theo Tên A-Z (Rất tiện cho việc nhập điểm vào phần mềm quản lý VnEdu/SMAS)
+  const sheet2Students = [...students].sort((a, b) => {
+    const cmpTen = a.ten.localeCompare(b.ten, 'vi', { sensitivity: 'base' });
+    if (cmpTen !== 0) return cmpTen;
+    return a.hoVaDem.localeCompare(b.hoVaDem, 'vi', { sensitivity: 'base' });
+  });
+
+  const sheet2Rows = createSheetRows(
+    sheet2Students,
+    `BẢNG ĐIỂM TỔNG HỢP CÁC SẢN PHẨM - LỚP ${className.toUpperCase()} (SẮP XẾP TÊN A - Z)`,
+    'Đã sắp xếp sẵn theo cột Tên riêng A-Z | Thuận tiện cho giáo viên nhập điểm vào VnEdu / SMAS'
+  );
+
+  const wb = XLSX.utils.book_new();
+
+  // Thiết lập độ rộng cột cho đẹp mắt
+  const colWidths = [
+    { wch: 6 },  // STT
+    { wch: 20 }, // Họ và chữ đệm
+    { wch: 12 }, // Tên
+    { wch: 26 }, // Họ và tên đầy đủ
+    ...classAssignments.map(() => ({ wch: 16 })), // Từng cột SP
+    { wch: 14 }, // Số SP đã nộp
+    { wch: 22 }, // Điểm trung bình (ĐTB)
+    { wch: 18 }, // Xếp loại
+  ];
+
+  const wsSheet1 = XLSX.utils.aoa_to_sheet(sheet1Rows);
+  wsSheet1['!cols'] = colWidths;
+  XLSX.utils.book_append_sheet(wb, wsSheet1, `Tong_Hop_Lop_${className}`);
+
+  const wsSheet2 = XLSX.utils.aoa_to_sheet(sheet2Rows);
+  wsSheet2['!cols'] = colWidths;
+  XLSX.utils.book_append_sheet(wb, wsSheet2, 'Sap_Xep_Ten_ABC');
+
+  // Tên file chứa lớp và thời gian xuất chính xác
+  const safeClassName = className.replace(/[^a-zA-Z0-9_-]/g, '_');
+  const now = new Date();
+  const timeStr = `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, '0')}${String(now.getDate()).padStart(2, '0')}_${String(now.getHours()).padStart(2, '0')}${String(now.getMinutes()).padStart(2, '0')}`;
+  const filename = `Bang_Diem_Tong_Hop_SP_Lop_${safeClassName}_${timeStr}.xlsx`;
+
+  XLSX.writeFile(wb, filename);
+}
+

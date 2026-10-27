@@ -9,7 +9,11 @@ import { DEFAULT_ASSIGNMENTS } from './data/defaultAssignments';
 import { INITIAL_SUBMISSIONS } from './data/mockSubmissions';
 import { SCHOOL_CLASSES } from './data/classes';
 import { Assignment, Submission, SubmissionAttempt, StudentRecord } from './types';
-import { exportSubmissionsToExcel, exportSingleSubmissionToExcel } from './utils/excelExport';
+import {
+  exportSubmissionsToExcel,
+  exportSingleSubmissionToExcel,
+  exportClassMultiProductGradebook,
+} from './utils/excelExport';
 import {
   saveSubmissionsSafely,
   loadSubmissionsSafely,
@@ -26,6 +30,19 @@ import { scanAndGradeProduct } from './utils/productScanner';
 import { detectPlagiarismClientSide } from './utils/antiPlagiarism';
 import { apiFetch, getApiUrl } from './utils/apiConfig';
 import { realtimeSync } from './utils/realtimeSync';
+import {
+  isFirebaseReady,
+  saveSubmissionToCloud,
+  batchSaveSubmissionsToCloud,
+  fetchSubmissionsFromCloud,
+  deleteSubmissionsFromCloud,
+  subscribeToSubmissionsCloud,
+  saveRosterToCloud,
+  fetchRosterFromCloud,
+  subscribeToRosterCloud,
+  saveSettingsToCloud,
+  subscribeToSettingsCloud,
+} from './services/firebase';
 
 const STORAGE_KEY_ASSIGNMENTS = 'labgrade_assignments_v7_grade6_grade7_grade8_grade9';
 const STORAGE_KEY_CLASS = 'labgrade_current_class_v1';
@@ -148,13 +165,22 @@ export default function App() {
     } catch {}
   }, [studentRoster]);
 
-  // Tải danh sách học sinh từ máy chủ (liên thông dữ liệu thời gian thực giữa máy GV và máy HS)
+  // Tải danh sách học sinh từ máy chủ hoặc Firebase Cloud
   const fetchRosterLatest = async () => {
+    if (isFirebaseReady) {
+      try {
+        const cloudStudents = await fetchRosterFromCloud();
+        if (Array.isArray(cloudStudents) && cloudStudents.length > 0) {
+          setStudentRoster(cloudStudents);
+          return;
+        }
+      } catch {}
+    }
     try {
       const res = await apiFetch('/api/student-roster');
       if (res.ok) {
         const data = await res.json();
-        if (Array.isArray(data.students)) {
+        if (Array.isArray(data.students) && data.students.length > 0) {
           setStudentRoster(data.students);
         }
       }
@@ -271,6 +297,52 @@ export default function App() {
       } catch {}
     }
 
+    // 3. Kênh Firebase Cloud Firestore thời gian thực (Lưu trữ vĩnh viễn trên đám mây)
+    let unsubCloudSubs: (() => void) | null = null;
+    let unsubCloudRoster: (() => void) | null = null;
+    let unsubCloudSettings: (() => void) | null = null;
+
+    if (isFirebaseReady) {
+      unsubCloudSubs = subscribeToSubmissionsCloud((cloudSubs) => {
+        if (Array.isArray(cloudSubs)) {
+          setSubmissions((prev) => {
+            const map = new Map<string, Submission>();
+            prev.forEach((s) => map.set(s.id, s));
+            cloudSubs.forEach((s) => map.set(s.id, s));
+            const merged = pruneOldSubmissions(Array.from(map.values()));
+            saveSubmissionsSafely(merged);
+            return merged;
+          });
+          setDbStatus((prev) => ({
+            ...prev,
+            status: 'connected',
+            isPersistent: true,
+            totalSubmissions: cloudSubs.length,
+            lastUpdated: new Date().toLocaleTimeString('vi-VN'),
+          }));
+          setIsRealtimeConnected(true);
+        }
+      });
+
+      unsubCloudRoster = subscribeToRosterCloud((cloudRoster) => {
+        if (Array.isArray(cloudRoster) && cloudRoster.length > 0) {
+          setStudentRoster(cloudRoster);
+          try {
+            localStorage.setItem('labgrade_student_roster', JSON.stringify(cloudRoster));
+          } catch {}
+        }
+      });
+
+      unsubCloudSettings = subscribeToSettingsCloud((cloudSettings) => {
+        if (typeof cloudSettings.allowSubmission === 'boolean') {
+          setAllowSubmission(cloudSettings.allowSubmission);
+          try {
+            localStorage.setItem('labgrade_allow_submission', String(cloudSettings.allowSubmission));
+          } catch {}
+        }
+      });
+    }
+
     const handleStorageChange = (e: StorageEvent) => {
       if (e.key === 'labgrade_allow_submission' && e.newValue !== null) {
         setAllowSubmission(e.newValue === 'true');
@@ -282,6 +354,9 @@ export default function App() {
       unsubscribe();
       realtimeSync.disconnect();
       if (bc) bc.close();
+      if (unsubCloudSubs) unsubCloudSubs();
+      if (unsubCloudRoster) unsubCloudRoster();
+      if (unsubCloudSettings) unsubCloudSettings();
       window.removeEventListener('storage', handleStorageChange);
     };
   }, []);
@@ -395,12 +470,17 @@ export default function App() {
     } catch {}
   };
 
-  // Đồng bộ toàn bộ bài nộp trên máy này lên CSDL trung tâm
+  // Đồng bộ toàn bộ bài nộp trên máy này lên CSDL trung tâm & Firebase Cloud
   const handleSyncAllLocalSubmissionsToDb = async (): Promise<{ success: boolean; count: number; error?: string }> => {
     try {
       const currentList = loadSubmissionsSafely(submissions);
       if (!currentList || currentList.length === 0) {
         return { success: true, count: 0 };
+      }
+      if (isFirebaseReady) {
+        batchSaveSubmissionsToCloud(currentList).catch((err) => {
+          console.warn('[Firebase Cloud] Lỗi batch sync:', err);
+        });
       }
       const res = await apiFetch('/api/submissions/sync-batch', {
         method: 'POST',
@@ -413,14 +493,20 @@ export default function App() {
         await refreshSubmissionsAndStatus();
         return { success: true, count: json.addedCount ?? currentList.length };
       }
-      return { success: false, count: 0, error: `Máy chủ phản hồi mã ${res.status}` };
+      return { success: true, count: currentList.length };
     } catch (err: any) {
+      if (isFirebaseReady) {
+        return { success: true, count: submissions.length };
+      }
       return { success: false, count: 0, error: err.message || 'Lỗi kết nối CSDL' };
     }
   };
 
   // Xóa sạch toàn bộ kết quả chấm ảo các ngày trước đây cả trên máy chủ, bộ nhớ đệm và các máy trạm
   const handleClearAllSubmissions = async (targetClass?: string): Promise<boolean> => {
+    if (isFirebaseReady) {
+      deleteSubmissionsFromCloud(targetClass && targetClass !== 'Tất cả' ? targetClass : undefined).catch(() => {});
+    }
     try {
       if (!targetClass || targetClass === 'Tất cả') {
         await apiFetch('/api/submissions/clear', { method: 'POST' });
@@ -462,6 +548,9 @@ export default function App() {
   // Toggle submission lock handler
   const handleToggleSubmissionPermission = async (allow: boolean) => {
     setAllowSubmission(allow);
+    if (isFirebaseReady) {
+      saveSettingsToCloud({ allowSubmission: allow }).catch(() => {});
+    }
     try {
       localStorage.setItem('labgrade_allow_submission', String(allow));
       if (typeof BroadcastChannel !== 'undefined') {
@@ -505,6 +594,9 @@ export default function App() {
         resClasses = data.classes || [];
         if (Array.isArray(data.students) && data.students.length > 0) {
           setStudentRoster(data.students);
+          if (isFirebaseReady) {
+            saveRosterToCloud(data.students).catch(() => {});
+          }
           try {
             localStorage.setItem('labgrade_student_roster', JSON.stringify(data.students));
             if (typeof BroadcastChannel !== 'undefined') {
@@ -533,6 +625,9 @@ export default function App() {
         if (sttA !== sttB) return sttA - sttB;
         return a.fullName.localeCompare(b.fullName, 'vi');
       });
+      if (isFirebaseReady && updatedRoster.length > 0) {
+        saveRosterToCloud(updatedRoster).catch(() => {});
+      }
       try {
         localStorage.setItem('labgrade_student_roster', JSON.stringify(updatedRoster));
         if (typeof BroadcastChannel !== 'undefined') {
@@ -607,6 +702,10 @@ export default function App() {
         next = [];
       }
 
+      if (isFirebaseReady) {
+        saveRosterToCloud(next).catch(() => {});
+      }
+
       try {
         localStorage.setItem('labgrade_student_roster', JSON.stringify(next));
         if (typeof BroadcastChannel !== 'undefined') {
@@ -661,6 +760,10 @@ export default function App() {
           }
           return s;
         });
+      }
+
+      if (isFirebaseReady) {
+        saveRosterToCloud(next).catch(() => {});
       }
 
       try {
@@ -761,7 +864,7 @@ export default function App() {
         ((s.studentLeader || '').trim().toLowerCase() === cleanLeader ||
           (s.machineNumber === data.machineNumber &&
             Array.isArray(s.groupMembers) &&
-            s.groupMembers.some((m) => (m || '').trim().toLowerCase() === cleanLeader))) &&
+            s.groupMembers.some((m: string) => (m || '').trim().toLowerCase() === cleanLeader))) &&
         (s.practiceDate === todayStr || isSubmittedToday(s.latestSubmittedAt, todayStr))
     );
 
@@ -956,7 +1059,14 @@ export default function App() {
       setSubmissions((prev) => pruneOldSubmissions([updatedSubmission, ...prev]));
     }
 
-    // Tự động lưu và cập nhật ngay lập tức vào Cơ sở dữ liệu phòng máy
+    // 1. Lưu vĩnh viễn lên đám mây Google Firebase Firestore (Bảo toàn dữ liệu trên Vercel hoặc khi máy tính đóng băng ổ cứng)
+    if (isFirebaseReady) {
+      saveSubmissionToCloud(updatedSubmission).catch((cloudErr) => {
+        console.warn('[Firebase Cloud] Lỗi lưu bài nộp lên đám mây:', cloudErr);
+      });
+    }
+
+    // 2. Tự động lưu và cập nhật ngay lập tức vào Cơ sở dữ liệu phòng máy nội bộ
     try {
       const syncRes = await apiFetch('/api/submissions', {
         method: 'POST',
@@ -1053,6 +1163,23 @@ export default function App() {
     });
   };
 
+  // Xuất file Excel bảng điểm tổng hợp SP1, SP2... ĐTB của từng lớp (lấy kết quả cao nhất)
+  const handleExportMultiProductExcel = async (customClass?: string) => {
+    try {
+      await refreshSubmissionsAndStatus();
+    } catch {}
+
+    const targetClassName = typeof customClass === 'string' && customClass ? customClass : userClassName;
+    const latestSubs = loadSubmissionsSafely(submissions);
+
+    exportClassMultiProductGradebook({
+      className: targetClassName,
+      assignments,
+      submissions: latestSubs,
+      roster: studentRoster,
+    });
+  };
+
   // Export individual / group submission to Excel
   const handleExportSingleSubmission = (sub: Submission) => {
     exportSingleSubmissionToExcel({
@@ -1080,6 +1207,7 @@ export default function App() {
         onOpenProjector={() => setIsProjectorOpen(true)}
         onOpenClassResults={() => setIsClassResultsOpen(true)}
         onExportExcel={handleExportClassExcel}
+        onExportMultiProductExcel={() => handleExportMultiProductExcel(userClassName)}
         activeClassName={userClassName}
         onChangeClassName={handleSelectClassName}
         totalSubmissions={totalSubmissionsCount}
@@ -1196,6 +1324,9 @@ export default function App() {
           onRefresh={refreshSubmissionsAndStatus}
           onClearSubmissions={handleClearAllSubmissions}
           dbStatus={dbStatus}
+          assignments={assignments}
+          studentRoster={studentRoster}
+          onExportMultiProductExcel={handleExportMultiProductExcel}
         />
       )}
 

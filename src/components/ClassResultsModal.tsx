@@ -18,15 +18,22 @@ import {
   Database,
   Download,
   Trash2,
+  Table,
+  Calculator,
+  TrendingUp,
+  GraduationCap,
 } from 'lucide-react';
-import { Submission } from '../types';
+import { Submission, Assignment, StudentRecord } from '../types';
 import {
   formatMachineNumber,
   getMachineSortNumber,
   splitVietnameseName,
+  buildClassMultiProductData,
+  exportClassMultiProductGradebook,
 } from '../utils/excelExport';
 import { formatPracticeDateVi, getTodayDateString } from '../utils/storageManager';
 import { SCHOOL_CLASSES } from '../data/classes';
+import { ClassMultiProductGradebook } from './ClassMultiProductGradebook';
 
 interface ClassResultsModalProps {
   className: string;
@@ -47,6 +54,9 @@ interface ClassResultsModalProps {
     lastUpdated?: string;
     classes: Record<string, number>;
   };
+  assignments?: Assignment[];
+  studentRoster?: StudentRecord[];
+  onExportMultiProductExcel?: (cls: string) => void;
 }
 
 export const ClassResultsModal: React.FC<ClassResultsModalProps> = ({
@@ -61,7 +71,11 @@ export const ClassResultsModal: React.FC<ClassResultsModalProps> = ({
   onRefresh,
   onClearSubmissions,
   dbStatus,
+  assignments = [],
+  studentRoster = [],
+  onExportMultiProductExcel,
 }) => {
+  const [activeTab, setActiveTab] = useState<'multi_product' | 'machines'>('multi_product');
   const [search, setSearch] = useState('');
   const [sortBy, setSortBy] = useState<'machine' | 'name' | 'score'>('machine');
   const [showAttemptMode, setShowAttemptMode] = useState<'highest' | 'all'>('highest');
@@ -180,6 +194,46 @@ export const ClassResultsModal: React.FC<ClassResultsModalProps> = ({
     ? (uniqueClassList.reduce((sum, s) => sum + s.highestScore, 0) / total).toFixed(1)
     : '0';
 
+  // Tính dữ liệu bảng tổng hợp điểm các sản phẩm SP1, SP2... ĐTB (lấy kết quả cao nhất)
+  const multiProductData = useMemo(() => {
+    return buildClassMultiProductData({
+      className: activeClass,
+      assignments,
+      submissions,
+      roster: studentRoster,
+    });
+  }, [activeClass, assignments, submissions, studentRoster]);
+
+  // Tìm kiếm học sinh trong bảng tổng hợp
+  const filteredMultiProductStudents = useMemo(() => {
+    if (!search.trim()) return multiProductData.students;
+    const q = search.trim().toLowerCase();
+    return multiProductData.students.filter(
+      (s) =>
+        s.fullName.toLowerCase().includes(q) ||
+        s.hoVaDem.toLowerCase().includes(q) ||
+        s.ten.toLowerCase().includes(q) ||
+        String(s.stt).includes(q)
+    );
+  }, [multiProductData.students, search]);
+
+  // Xuất file Excel bảng điểm tổng hợp SP1, SP2... ĐTB
+  const handleExportMultiProduct = async () => {
+    if (onRefresh) await onRefresh();
+    if (onExportMultiProductExcel) {
+      onExportMultiProductExcel(activeClass);
+    } else {
+      exportClassMultiProductGradebook({
+        className: activeClass,
+        assignments,
+        submissions,
+        roster: studentRoster,
+      });
+    }
+    setSyncToast(`Đã xuất Bảng Tổng Hợp SP1, SP2... ĐTB Lớp ${activeClass} thành công!`);
+    setTimeout(() => setSyncToast(null), 3500);
+  };
+
   const handleSelectClass = (cls: string) => {
     setActiveClass(cls);
     if (onChangeClassName && cls !== 'Tất cả') {
@@ -188,24 +242,24 @@ export const ClassResultsModal: React.FC<ClassResultsModalProps> = ({
   };
 
   return (
-    <div className="fixed inset-0 z-50 bg-slate-950/70 backdrop-blur-xs flex items-center justify-center p-3 sm:p-4 overflow-y-auto">
-      <div className="bg-white rounded-3xl max-w-5xl w-full max-h-[92vh] flex flex-col shadow-2xl border border-slate-200 overflow-hidden animate-in fade-in zoom-in-95 duration-200">
+    <div className="fixed inset-0 z-50 bg-slate-950/70 backdrop-blur-xs flex items-center justify-center p-2 sm:p-4 overflow-y-auto">
+      <div className="bg-white rounded-3xl max-w-6xl w-full max-h-[94vh] flex flex-col shadow-2xl border border-slate-200 overflow-hidden animate-in fade-in zoom-in-95 duration-200">
         {/* Header */}
-        <div className="p-4 sm:p-5 border-b border-slate-200 bg-slate-900 text-white flex flex-wrap items-center justify-between gap-3">
+        <div className="p-4 sm:p-5 border-b border-slate-800 bg-slate-900 text-white flex flex-wrap items-center justify-between gap-3">
           <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-xl bg-blue-600 flex items-center justify-center text-cyan-300 shrink-0">
+            <div className="w-10 h-10 rounded-xl bg-blue-600 flex items-center justify-center text-cyan-300 shrink-0 shadow-inner">
               <Trophy className="w-5 h-5" />
             </div>
             <div>
               <div className="flex items-center gap-2 flex-wrap">
                 <h2 className="text-base sm:text-lg font-black tracking-tight text-white">
-                  Bảng Kết Quả Thực Hành Các Nhóm Trong Lớp
+                  Bảng Kết Quả Thực Hành & Sổ Điểm Lớp
                 </h2>
                 {/* Bộ chọn Lớp trực tiếp ngay trong Modal với thống kê số bài nộp */}
                 <select
                   value={activeClass}
                   onChange={(e) => handleSelectClass(e.target.value)}
-                  className="bg-blue-600/70 hover:bg-blue-600 text-cyan-200 border border-cyan-400/50 text-xs px-2.5 py-1 rounded-full font-bold focus:outline-none cursor-pointer"
+                  className="bg-blue-600 hover:bg-blue-500 text-cyan-100 border border-cyan-400/50 text-xs px-2.5 py-1 rounded-full font-bold focus:outline-none cursor-pointer"
                 >
                   <option value="Tất cả">Tất cả các lớp ({submissions.length} bài)</option>
                   {SCHOOL_CLASSES.map((c) => {
@@ -228,7 +282,7 @@ export const ClassResultsModal: React.FC<ClassResultsModalProps> = ({
                 </div>
               </div>
               <p className="text-xs text-slate-400 mt-0.5">
-                Theo dõi kết quả thực hành trực tiếp • Tự động cập nhật tức thời khi học sinh nộp bài • Thứ tự Máy 01, Máy 02...
+                Cập nhật tức thời khi học sinh nộp bài • Lấy kết quả cao nhất • Bảng điểm tổng hợp SP1, SP2... ĐTB
               </p>
             </div>
           </div>
@@ -263,26 +317,35 @@ export const ClassResultsModal: React.FC<ClassResultsModalProps> = ({
                 title="Xóa sạch toàn bộ kết quả chấm ảo hoặc bài nộp cũ để bắt đầu tiết học mới"
               >
                 <Trash2 className="w-3.5 h-3.5 text-rose-400" />
-                <span className="hidden sm:inline">Xóa Kết Quả Cũ</span>
+                <span className="hidden sm:inline">Xóa Cũ</span>
               </button>
             )}
 
             {/* Quyền Xuất File Excel: Chỉ Giáo Viên mới được xuất danh sách cả lớp */}
             {isTeacher ? (
               <div className="flex items-center gap-1.5">
+                {/* NÚT XUẤT BẢNG TỔNG HỢP SP1, SP2... ĐIỂM TRUNG BÌNH */}
+                <button
+                  type="button"
+                  onClick={handleExportMultiProduct}
+                  className="px-3.5 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-black flex items-center gap-1.5 shadow-md hover:shadow-emerald-500/20 transition-all active:scale-95 cursor-pointer"
+                  title="Xuất file Excel Bảng Tổng Hợp gồm: STT, Họ và tên, Điểm SP1, SP2... và Điểm trung bình (ĐTB) lấy điểm cao nhất!"
+                >
+                  <FileSpreadsheet className="w-4 h-4 text-emerald-100" />
+                  <span>Xuất Bảng Tổng Hợp (SP1, SP2... ĐTB)</span>
+                </button>
+
+                {/* Nút Xuất Excel Theo Buổi / Máy */}
                 <button
                   onClick={async () => {
                     if (onRefresh) await onRefresh();
                     onExportExcel(activeClass, effectiveFilterDate, dateFilterMode);
                   }}
-                  className="px-3.5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold flex items-center gap-1.5 shadow-xs transition-all active:scale-95 cursor-pointer"
-                  title="Giáo viên xuất file Excel gồm tất cả học sinh theo thứ tự Máy và cột Tên riêng"
+                  className="px-3 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition-all active:scale-95 cursor-pointer"
+                  title="Giáo viên xuất file Excel chi tiết tất cả học sinh theo thứ tự Máy và cột Tên riêng"
                 >
-                  <FileSpreadsheet className="w-4 h-4" />
-                  <span>
-                    Xuất File Excel {activeClass === 'Tất cả' ? 'Toàn Trường' : `Lớp ${activeClass}`}
-                    {effectiveFilterDate ? ` (${formatPracticeDateVi(effectiveFilterDate)})` : ''}
-                  </span>
+                  <Download className="w-3.5 h-3.5 text-slate-300" />
+                  <span className="hidden md:inline">Theo Máy</span>
                 </button>
 
                 <button
@@ -317,7 +380,7 @@ export const ClassResultsModal: React.FC<ClassResultsModalProps> = ({
 
             <button
               onClick={onClose}
-              className="p-2 text-slate-400 hover:text-white rounded-xl hover:bg-slate-800 transition-colors"
+              className="p-2 text-slate-400 hover:text-white rounded-xl hover:bg-slate-800 transition-colors cursor-pointer"
             >
               <X className="w-5 h-5" />
             </button>
@@ -326,14 +389,65 @@ export const ClassResultsModal: React.FC<ClassResultsModalProps> = ({
 
         {/* Sync Toast Notification */}
         {syncToast && (
-          <div className="bg-emerald-600 text-white text-xs font-bold px-4 py-1.5 text-center flex items-center justify-center gap-2 animate-in fade-in duration-200">
+          <div className="bg-emerald-600 text-white text-xs font-bold px-4 py-1.5 text-center flex items-center justify-center gap-2 animate-in fade-in duration-200 shrink-0">
             <CheckCircle2 className="w-4 h-4" />
             <span>{syncToast}</span>
           </div>
         )}
 
-        {/* Thanh Chọn Ngày Thực Hành (Yêu cầu 4: Xuất ngày bất kỳ hoặc ngày gần nhất của 1 lớp) */}
-        <div className="p-3 sm:px-6 bg-gradient-to-r from-slate-900 via-blue-950 to-slate-900 border-b border-blue-900 text-white flex flex-wrap items-center justify-between gap-3 text-xs">
+        {/* Thanh Điều Hướng 2 Chế Độ: Bảng Tổng Hợp (SP1, SP2... ĐTB) vs Chi Tiết Theo Máy */}
+        <div className="bg-slate-900 px-4 sm:px-6 pt-2 border-b border-slate-700 flex items-center justify-between gap-3 flex-wrap shrink-0">
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => setActiveTab('multi_product')}
+              className={`px-4 py-2.5 rounded-t-xl text-xs sm:text-sm font-bold flex items-center gap-2 transition-all cursor-pointer border-t border-x ${
+                activeTab === 'multi_product'
+                  ? 'bg-slate-50 text-blue-900 border-slate-200 shadow-sm font-black'
+                  : 'text-slate-300 hover:text-white border-transparent hover:bg-slate-800/80'
+              }`}
+            >
+              <FileSpreadsheet className={`w-4 h-4 ${activeTab === 'multi_product' ? 'text-emerald-600' : 'text-slate-400'}`} />
+              <span>Bảng Tổng Hợp SP1, SP2... (Sổ Điểm Lớp)</span>
+              <span className="px-1.5 py-0.5 rounded-full text-[10px] font-extrabold bg-emerald-500 text-white">
+                Mới
+              </span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setActiveTab('machines')}
+              className={`px-4 py-2.5 rounded-t-xl text-xs sm:text-sm font-bold flex items-center gap-2 transition-all cursor-pointer border-t border-x ${
+                activeTab === 'machines'
+                  ? 'bg-slate-50 text-blue-900 border-slate-200 shadow-sm font-black'
+                  : 'text-slate-300 hover:text-white border-transparent hover:bg-slate-800/80'
+              }`}
+            >
+              <Layers className={`w-4 h-4 ${activeTab === 'machines' ? 'text-blue-600' : 'text-slate-400'}`} />
+              <span>Chi Tiết Theo Máy & Lần Nộp ({uniqueClassList.length} nhóm)</span>
+            </button>
+          </div>
+
+          <div className="hidden sm:flex items-center gap-2 text-xs text-slate-300 pb-1">
+            <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+            <span>Thời điểm: <strong className="text-white font-mono">{multiProductData.exportTimestamp}</strong></span>
+          </div>
+        </div>
+
+        {activeTab === 'multi_product' ? (
+          <ClassMultiProductGradebook
+            className={activeClass}
+            assignments={assignments}
+            submissions={submissions}
+            roster={studentRoster}
+            isTeacher={isTeacher}
+            onRefresh={onRefresh}
+            onExportExcel={handleExportMultiProduct}
+          />
+        ) : (
+          <div className="flex-1 flex flex-col min-h-0 overflow-hidden">
+            {/* Thanh Chọn Ngày Thực Hành (Yêu cầu 4: Xuất ngày bất kỳ hoặc ngày gần nhất của 1 lớp) */}
+            <div className="p-3 sm:px-6 bg-gradient-to-r from-slate-900 via-blue-950 to-slate-900 border-b border-blue-900 text-white flex flex-wrap items-center justify-between gap-3 text-xs">
           <div className="flex items-center gap-2 flex-wrap">
             <span className="font-black flex items-center gap-1.5 text-cyan-300">
               <Calendar className="w-4 h-4" />
@@ -752,6 +866,8 @@ export const ClassResultsModal: React.FC<ClassResultsModalProps> = ({
             </div>
           )}
         </div>
+      </div>
+    )}
 
         {/* Footer */}
         <div className="p-3.5 border-t border-slate-200 bg-slate-50 flex flex-wrap items-center justify-between gap-3 text-xs text-slate-500 px-6">

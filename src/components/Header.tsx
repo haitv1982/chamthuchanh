@@ -23,6 +23,7 @@ import {
   Globe,
   UserCheck,
   FileSpreadsheet,
+  Cloud,
 } from 'lucide-react';
 import { StitchThumbsUp, StitchDetective } from './StitchMascot';
 import computerLabBg from '../assets/images/computer_lab_bg_1791628253579.jpg';
@@ -36,6 +37,7 @@ import {
   isStaticHosting,
 } from '../utils/apiConfig';
 import { realtimeSync } from '../utils/realtimeSync';
+import { isFirebaseReady } from '../services/firebase';
 
 const STORAGE_KEY_TEACHER_PIN = 'labgrade_teacher_pin_v1';
 
@@ -50,6 +52,7 @@ interface HeaderProps {
   onOpenProjector: () => void;
   onOpenClassResults: () => void;
   onExportExcel?: () => void;
+  onExportMultiProductExcel?: () => void;
   activeClassName?: string;
   onChangeClassName?: (cls: string) => void;
   totalSubmissions?: number;
@@ -78,6 +81,7 @@ export const Header: React.FC<HeaderProps> = ({
   onOpenProjector,
   onOpenClassResults,
   onExportExcel,
+  onExportMultiProductExcel,
   activeClassName,
   isTeacher = false,
   onToggleRole,
@@ -430,6 +434,19 @@ export const Header: React.FC<HeaderProps> = ({
               </button>
             )}
 
+            {/* Nút Xuất Bảng Điểm Tổng Hợp SP1, SP2... ĐTB (Chỉ Giáo Viên) */}
+            {isTeacher && onExportMultiProductExcel && (
+              <button
+                type="button"
+                onClick={onExportMultiProductExcel}
+                title={`Xuất file Excel Bảng Tổng Hợp SP1, SP2... ĐTB cho Lớp ${activeClassName || ''} (cập nhật mới nhất thời gian thực)`}
+                className="hidden xl:flex items-center gap-1.5 px-3 py-1.5 sm:py-2 rounded-xl text-xs sm:text-sm font-bold bg-emerald-500/25 hover:bg-emerald-500/40 text-emerald-100 border border-emerald-400/40 transition-all shadow-xs backdrop-blur-xs active:scale-95 cursor-pointer"
+              >
+                <FileSpreadsheet className="w-4 h-4 text-emerald-300" />
+                <span>Bảng Tổng Hợp SP</span>
+              </button>
+            )}
+
             {/* Nút Nhập Thông Tin (bên trái nút Máy Chiếu - Luôn hiện chữ 'Nhập Thông Tin') */}
             {onOpenStudentInfoModal && (
               <button
@@ -538,13 +555,19 @@ export const Header: React.FC<HeaderProps> = ({
                   fetchNetworkInfo().then(setNetworkInfo).catch(() => {});
                 }}
                 className={`flex items-center gap-1.5 px-3 py-1.5 sm:py-2 rounded-xl text-xs sm:text-sm font-bold border transition-all shadow-xs cursor-pointer ${
-                  isRealtimeConnected || pingResult?.ok || dbStatus?.status === 'connected'
+                  isFirebaseReady || isRealtimeConnected || pingResult?.ok || dbStatus?.status === 'connected'
                     ? 'bg-emerald-500/20 hover:bg-emerald-500/35 text-emerald-100 border-emerald-400/40'
                     : 'bg-rose-500/25 hover:bg-rose-500/35 text-rose-200 border-rose-400/50 animate-pulse'
                 }`}
-                title="Trạng thái kết nối CSDL máy chủ phòng máy. Nhấp vào để xem địa chỉ mạng cho học sinh hoặc kiểm tra kết nối."
+                title="Trạng thái kết nối CSDL đám mây Firebase & phòng máy. Nhấp vào để xem chi tiết."
               >
-                {isRealtimeConnected || pingResult?.ok || dbStatus?.status === 'connected' ? (
+                {isFirebaseReady ? (
+                  <>
+                    <span className="w-2 h-2 rounded-full bg-emerald-400 inline-block shadow-xs" />
+                    <Cloud className="w-3.5 h-3.5 text-cyan-300" />
+                    <span className="hidden sm:inline">CSDL Đám Mây</span>
+                  </>
+                ) : isRealtimeConnected || pingResult?.ok || dbStatus?.status === 'connected' ? (
                   <>
                     <span className="w-2 h-2 rounded-full bg-emerald-400 inline-block shadow-xs" />
                     <Database className="w-3.5 h-3.5 text-emerald-300" />
@@ -758,6 +781,25 @@ export const Header: React.FC<HeaderProps> = ({
                 <X className="w-5 h-5" />
               </button>
             </div>
+
+            {/* Thẻ CSDL Đám Mây Firebase Firestore (Lưu trữ vĩnh viễn) */}
+            {isFirebaseReady && (
+              <div className="p-3.5 rounded-2xl bg-gradient-to-br from-cyan-50 via-blue-50 to-indigo-50 border border-cyan-200 shadow-2xs space-y-2">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-black text-cyan-950 flex items-center gap-1.5">
+                    <Cloud className="w-4 h-4 text-cyan-600" />
+                    <span>CSDL Đám Mây Firebase Firestore (Miễn Phí Vĩnh Viễn)</span>
+                  </span>
+                  <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[11px] font-black bg-emerald-100 text-emerald-800 border border-emerald-300">
+                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                    Đã Kết Nối
+                  </span>
+                </div>
+                <p className="text-[11px] text-cyan-900 leading-relaxed font-medium">
+                  ☁️ Toàn bộ bài nộp thực hành của học sinh và danh sách lớp được tự động lưu trữ vĩnh viễn trên Cloud Firestore. Khi máy tính học sinh tắt hoặc bị đóng băng ổ cứng, bài nộp và điểm số vẫn còn nguyên 100%. Thầy/Cô về nhà chỉ cần mở link Vercel từ điện thoại hoặc máy tính là xem và xuất Excel được ngay!
+                </p>
+              </div>
+            )}
 
             {/* Trạng thái kết nối hiện tại */}
             <div className="p-3.5 rounded-2xl bg-slate-50 border border-slate-200 space-y-2">
