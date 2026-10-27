@@ -14,6 +14,7 @@ import {
   Info,
   Edit2,
   FolderOpen,
+  Cloud,
 } from 'lucide-react';
 import * as XLSX from 'xlsx';
 import { StudentRecord } from '../types';
@@ -42,6 +43,7 @@ export const StudentRosterModal: React.FC<StudentRosterModalProps> = ({
   const [parseSuccessMsg, setParseSuccessMsg] = useState<string | null>(null);
   const [isSaving, setIsSaving] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
+  const [isSyncingCloud, setIsSyncingCloud] = useState(false);
   const [activeTab, setActiveTab] = useState<'upload' | 'view'>(roster.length > 0 ? 'view' : 'upload');
   const [viewClassFilter, setViewClassFilter] = useState<string>('all');
   const [viewSearchTerm, setViewSearchTerm] = useState<string>('');
@@ -54,6 +56,25 @@ export const StudentRosterModal: React.FC<StudentRosterModalProps> = ({
   const [newClassNameInput, setNewClassNameInput] = useState<string>('');
 
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // Đồng bộ thủ công toàn bộ danh sách học sinh hiện có lên Firebase Cloud Firestore
+  const handleForceSyncCloud = async () => {
+    if (roster.length === 0) {
+      setParseError('Danh sách học sinh đang trống. Thầy/Cô hãy tải lên file Excel hoặc nạp danh sách mẫu trước.');
+      return;
+    }
+    setIsSyncingCloud(true);
+    setParseError(null);
+    setParseSuccessMsg(null);
+    try {
+      const res = await onSaveRoster(roster, 'replace');
+      setParseSuccessMsg(`☁️ Đã đồng bộ thành công ${res.total} học sinh (${res.classes.join(', ')}) lên Đám Mây Firebase! Tất cả máy học sinh khi truy cập link web sẽ thấy ngay danh sách.`);
+    } catch (err: any) {
+      setParseError(err.message || 'Lỗi khi đồng bộ lên Đám mây Firebase');
+    } finally {
+      setIsSyncingCloud(false);
+    }
+  };
 
   if (!isOpen) return null;
 
@@ -363,39 +384,59 @@ export const StudentRosterModal: React.FC<StudentRosterModalProps> = ({
           </button>
         </div>
 
-        {/* Tab Navigation */}
-        <div className="px-5 sm:px-6 pt-3 border-b border-slate-200 flex items-center gap-2 bg-slate-50/80">
-          <button
-            type="button"
-            onClick={() => {
-              setActiveTab('upload');
-              setParseError(null);
-            }}
-            className={`px-4 py-2 font-black text-xs sm:text-sm border-b-2 transition flex items-center gap-1.5 cursor-pointer ${
-              activeTab === 'upload'
-                ? 'border-emerald-600 text-emerald-700'
-                : 'border-transparent text-slate-500 hover:text-slate-800'
-            }`}
-          >
-            <UploadCloud className="w-4 h-4" />
-            <span>Tải Lên File Excel</span>
-          </button>
+        {/* Tab Navigation & Cloud Sync Action */}
+        <div className="px-5 sm:px-6 pt-3 border-b border-slate-200 flex items-center justify-between flex-wrap gap-2 bg-slate-50/80">
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => {
+                setActiveTab('upload');
+                setParseError(null);
+              }}
+              className={`px-4 py-2 font-black text-xs sm:text-sm border-b-2 transition flex items-center gap-1.5 cursor-pointer ${
+                activeTab === 'upload'
+                  ? 'border-emerald-600 text-emerald-700'
+                  : 'border-transparent text-slate-500 hover:text-slate-800'
+              }`}
+            >
+              <UploadCloud className="w-4 h-4" />
+              <span>Tải Lên File Excel</span>
+            </button>
 
-          <button
-            type="button"
-            onClick={() => {
-              setActiveTab('view');
-              setParseError(null);
-            }}
-            className={`px-4 py-2 font-black text-xs sm:text-sm border-b-2 transition flex items-center gap-1.5 cursor-pointer ${
-              activeTab === 'view'
-                ? 'border-emerald-600 text-emerald-700'
-                : 'border-transparent text-slate-500 hover:text-slate-800'
-            }`}
-          >
-            <Users className="w-4 h-4" />
-            <span>CSDL Học Sinh Hiện Có ({roster.length} HS • {existingClasses.length} Lớp)</span>
-          </button>
+            <button
+              type="button"
+              onClick={() => {
+                setActiveTab('view');
+                setParseError(null);
+              }}
+              className={`px-4 py-2 font-black text-xs sm:text-sm border-b-2 transition flex items-center gap-1.5 cursor-pointer ${
+                activeTab === 'view'
+                  ? 'border-emerald-600 text-emerald-700'
+                  : 'border-transparent text-slate-500 hover:text-slate-800'
+              }`}
+            >
+              <Users className="w-4 h-4" />
+              <span>CSDL Học Sinh ({roster.length} HS • {existingClasses.length} Lớp)</span>
+            </button>
+          </div>
+
+          {/* Nút Chủ Động Đồng Bộ Lên Đám Mây Firebase */}
+          <div className="pb-1.5">
+            <button
+              type="button"
+              disabled={isSyncingCloud}
+              onClick={handleForceSyncCloud}
+              className="px-3 py-1.5 bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-700 hover:to-blue-700 text-white rounded-xl text-xs font-black flex items-center gap-1.5 transition shadow-xs cursor-pointer active:scale-95 disabled:opacity-50"
+              title="Đồng bộ ngay danh sách học sinh hiện có lên Đám mây Firebase để các máy học sinh nhận được tức thì"
+            >
+              {isSyncingCloud ? (
+                <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+              ) : (
+                <Cloud className="w-3.5 h-3.5 text-cyan-200" />
+              )}
+              <span>{isSyncingCloud ? 'Đang đẩy lên Cloud...' : '☁️ Đồng Bộ Lên Đám Mây'}</span>
+            </button>
+          </div>
         </div>
 
         {/* Alert / Notifications */}

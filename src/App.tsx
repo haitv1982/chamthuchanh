@@ -165,26 +165,55 @@ export default function App() {
     } catch {}
   }, [studentRoster]);
 
-  // Tải danh sách học sinh từ máy chủ hoặc Firebase Cloud
+  // Tải & Đồng bộ hai chiều danh sách học sinh giữa Máy Giáo Viên, Máy Học Sinh và Firebase Cloud
   const fetchRosterLatest = async () => {
-    if (isFirebaseReady) {
-      try {
-        const cloudStudents = await fetchRosterFromCloud();
-        if (Array.isArray(cloudStudents) && cloudStudents.length > 0) {
-          setStudentRoster(cloudStudents);
-          return;
-        }
-      } catch {}
-    }
     try {
+      const localSaved = localStorage.getItem('labgrade_student_roster');
+      let localList: StudentRecord[] = [];
+      try {
+        if (localSaved) localList = JSON.parse(localSaved);
+      } catch {}
+
+      // 1. Kiểm tra trên Firebase Cloud Firestore trước tiên (Dành cho web Vercel & liên thông phòng máy)
+      if (isFirebaseReady) {
+        try {
+          const cloudStudents = await fetchRosterFromCloud();
+          if (Array.isArray(cloudStudents) && cloudStudents.length > 0) {
+            // Đám mây đã có dữ liệu -> nạp ngay vào máy học sinh / giáo viên
+            setStudentRoster(cloudStudents);
+            try {
+              localStorage.setItem('labgrade_student_roster', JSON.stringify(cloudStudents));
+            } catch {}
+            console.log(`[Firebase Cloud] ✅ Đã nạp thành công ${cloudStudents.length} học sinh từ Firestore Cloud.`);
+            return;
+          } else if (localList.length > 0) {
+            // Đám mây chưa có nhưng máy giáo viên đã có sẵn danh sách -> TỰ ĐỘNG ĐẨY LÊN CLOUD NGAY LẬP TỨC!
+            console.log(`[Firebase Cloud] 🚀 Đám mây chưa có dữ liệu. Tự động đồng bộ ${localList.length} học sinh từ máy lên Cloud Firestore...`);
+            await saveRosterToCloud(localList);
+            return;
+          }
+        } catch (cloudErr) {
+          console.warn('[Firebase Cloud] Lỗi đọc roster từ cloud:', cloudErr);
+        }
+      }
+
+      // 2. Dự phòng máy chủ backend nội bộ
       const res = await apiFetch('/api/student-roster');
       if (res.ok) {
         const data = await res.json();
         if (Array.isArray(data.students) && data.students.length > 0) {
           setStudentRoster(data.students);
+          try {
+            localStorage.setItem('labgrade_student_roster', JSON.stringify(data.students));
+          } catch {}
+          if (isFirebaseReady) {
+            await saveRosterToCloud(data.students);
+          }
         }
       }
-    } catch {}
+    } catch (err) {
+      console.warn('Lỗi đồng bộ danh sách học sinh:', err);
+    }
   };
 
   useEffect(() => {
@@ -578,145 +607,112 @@ export default function App() {
   const handleSaveStudentRoster = async (
     students: StudentRecord[],
     mode: 'accumulate' | 'upsert' | 'replace' = 'accumulate'
-  ) => {
-    let resTotal = students.length;
-    let resClasses: string[] = [];
-
-    try {
-      const res = await apiFetch('/api/student-roster', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ students, mode }),
-      });
-      if (res.ok) {
-        const data = await res.json();
-        resTotal = data.total;
-        resClasses = data.classes || [];
-        if (Array.isArray(data.students) && data.students.length > 0) {
-          setStudentRoster(data.students);
-          if (isFirebaseReady) {
-            saveRosterToCloud(data.students).catch(() => {});
-          }
-          try {
-            localStorage.setItem('labgrade_student_roster', JSON.stringify(data.students));
-            if (typeof BroadcastChannel !== 'undefined') {
-              const bc = new BroadcastChannel('labgrade_session_channel');
-              bc.postMessage({ type: 'ROSTER_UPDATED', students: data.students });
-              bc.close();
-            }
-          } catch {}
-          return { success: true, total: resTotal, classes: resClasses };
-        }
+  ): Promise<{ success: boolean; total: number; classes: string[] }> => {
+    // 1. Tính toán danh sách học sinh mới ngay lập tức
+    const currentList = studentRoster.length > 0 ? studentRoster : (() => {
+      try {
+        const s = localStorage.getItem('labgrade_student_roster');
+        return s ? JSON.parse(s) : [];
+      } catch {
+        return [];
       }
-    } catch (err) {
-      console.warn('Lỗi mạng khi lưu danh sách học sinh lên máy chủ:', err);
+    })();
+
+    let updatedRoster: StudentRecord[] = [];
+    if (mode === 'replace') {
+      updatedRoster = [...students];
+    } else {
+      const map = new Map<string, StudentRecord>();
+      currentList.forEach((s: StudentRecord) => map.set(`${s.className.toUpperCase()}___${s.fullName.trim().toLowerCase()}`, s));
+      students.forEach((s: StudentRecord) => map.set(`${s.className.toUpperCase()}___${s.fullName.trim().toLowerCase()}`, s));
+      updatedRoster = Array.from(map.values());
     }
 
-    // Cập nhật state cục bộ ngay lập tức theo cơ chế tích lũy (Accumulate / Upsert)
-    let updatedRoster: StudentRecord[] = [];
-    setStudentRoster((prev) => {
-      const map = new Map<string, StudentRecord>();
-      prev.forEach((s) => map.set(`${s.className.toUpperCase()}___${s.fullName.trim().toLowerCase()}`, s));
-      students.forEach((s) => map.set(`${s.className.toUpperCase()}___${s.fullName.trim().toLowerCase()}`, s));
-      updatedRoster = Array.from(map.values()).sort((a, b) => {
-        if (a.className !== b.className) return a.className.localeCompare(b.className);
-        const sttA = Number(a.stt) || 999;
-        const sttB = Number(b.stt) || 999;
-        if (sttA !== sttB) return sttA - sttB;
-        return a.fullName.localeCompare(b.fullName, 'vi');
-      });
-      if (isFirebaseReady && updatedRoster.length > 0) {
-        saveRosterToCloud(updatedRoster).catch(() => {});
-      }
-      try {
-        localStorage.setItem('labgrade_student_roster', JSON.stringify(updatedRoster));
-        if (typeof BroadcastChannel !== 'undefined') {
-          const bc = new BroadcastChannel('labgrade_session_channel');
-          bc.postMessage({ type: 'ROSTER_UPDATED', students: updatedRoster });
-          bc.close();
-        }
-      } catch {}
-      return updatedRoster;
+    // Sắp xếp theo lớp rồi đến STT / Tên
+    updatedRoster.sort((a, b) => {
+      if (a.className !== b.className) return a.className.localeCompare(b.className);
+      const sttA = Number(a.stt) || 999;
+      const sttB = Number(b.stt) || 999;
+      if (sttA !== sttB) return sttA - sttB;
+      return a.fullName.localeCompare(b.fullName, 'vi');
     });
 
     const finalClasses = Array.from(new Set(updatedRoster.map((s) => s.className)));
-    return { success: true, total: updatedRoster.length || resTotal, classes: finalClasses.length > 0 ? finalClasses : resClasses };
+
+    // 2. Cập nhật state & localStorage
+    setStudentRoster(updatedRoster);
+    try {
+      localStorage.setItem('labgrade_student_roster', JSON.stringify(updatedRoster));
+      if (typeof BroadcastChannel !== 'undefined') {
+        const bc = new BroadcastChannel('labgrade_session_channel');
+        bc.postMessage({ type: 'ROSTER_UPDATED', students: updatedRoster });
+        bc.close();
+      }
+    } catch {}
+
+    // 3. ĐẨY LÊN FIREBASE CLOUD FIRESTORE VÀ CHỜ HOÀN TẤT (AWAIT)
+    if (isFirebaseReady && updatedRoster.length > 0) {
+      try {
+        await saveRosterToCloud(updatedRoster);
+        console.log(`[Firebase Cloud] ✅ Đã lưu và đồng bộ thành công ${updatedRoster.length} học sinh lên Cloud Firestore!`);
+      } catch (cloudErr) {
+        console.warn('[Firebase Cloud] Lỗi lưu danh sách học sinh lên cloud:', cloudErr);
+      }
+    }
+
+    // 4. Nếu có backend nội bộ (/api/student-roster), đồng bộ thêm
+    try {
+      await apiFetch('/api/student-roster', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ students: updatedRoster, mode: 'replace' }),
+      }, 5000);
+    } catch {}
+
+    return {
+      success: true,
+      total: updatedRoster.length,
+      classes: finalClasses,
+    };
   };
 
   // Xóa danh sách học sinh (toàn bộ hoặc theo từng lớp - kết nối CSDL trung tâm và đồng bộ các máy)
   const handleDeleteStudentRoster = async (className?: string): Promise<boolean> => {
-    let serverStudents: StudentRecord[] | null = null;
-    let deleteSucceeded = false;
+    let next: StudentRecord[];
+    if (className && className.trim()) {
+      const rawNorm = className.trim().toUpperCase();
+      const cleanNorm = rawNorm.replace(/^LỚP\s*|^LOP\s*/i, '');
+      next = studentRoster.filter((s) => {
+        const sCls = (s.className || '').trim().toUpperCase();
+        const sClean = sCls.replace(/^LỚP\s*|^LOP\s*/i, '');
+        return sCls !== rawNorm && sClean !== cleanNorm && sCls !== cleanNorm;
+      });
+    } else {
+      next = [];
+    }
 
-    // 1. Thử gửi DELETE
+    setStudentRoster(next);
+    try {
+      localStorage.setItem('labgrade_student_roster', JSON.stringify(next));
+      if (typeof BroadcastChannel !== 'undefined') {
+        const bc = new BroadcastChannel('labgrade_session_channel');
+        bc.postMessage({ type: 'ROSTER_UPDATED', students: next });
+        bc.close();
+      }
+    } catch {}
+
+    if (isFirebaseReady) {
+      try {
+        await saveRosterToCloud(next);
+      } catch {}
+    }
+
     try {
       const url = className && className.trim()
         ? `/api/student-roster?className=${encodeURIComponent(className.trim())}`
         : '/api/student-roster';
-      const res = await apiFetch(url, { method: 'DELETE' });
-      if (res.ok) {
-        const data = await res.json();
-        if (Array.isArray(data.students)) {
-          serverStudents = data.students;
-          deleteSucceeded = true;
-        }
-      }
-    } catch (err) {
-      console.warn('Lỗi mạng khi xóa danh sách học sinh (DELETE):', err);
-    }
-
-    // 2. Dự phòng: Nếu DELETE bị proxy hoặc web server chặn, gọi POST /api/student-roster/delete
-    if (!deleteSucceeded) {
-      try {
-        const res = await apiFetch('/api/student-roster/delete', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ className: className ? className.trim() : undefined }),
-        });
-        if (res.ok) {
-          const data = await res.json();
-          if (Array.isArray(data.students)) {
-            serverStudents = data.students;
-            deleteSucceeded = true;
-          }
-        }
-      } catch (err) {
-        console.warn('Lỗi mạng khi xóa danh sách học sinh (POST fallback):', err);
-      }
-    }
-
-    // 3. Cập nhật state nội bộ và localStorage ngay lập tức
-    setStudentRoster((prev) => {
-      let next: StudentRecord[];
-      if (deleteSucceeded && serverStudents) {
-        next = serverStudents;
-      } else if (className && className.trim()) {
-        const rawNorm = className.trim().toUpperCase();
-        const cleanNorm = rawNorm.replace(/^LỚP\s*|^LOP\s*/i, '');
-        next = prev.filter((s) => {
-          const sCls = (s.className || '').trim().toUpperCase();
-          const sClean = sCls.replace(/^LỚP\s*|^LOP\s*/i, '');
-          return sCls !== rawNorm && sClean !== cleanNorm && sCls !== cleanNorm;
-        });
-      } else {
-        next = [];
-      }
-
-      if (isFirebaseReady) {
-        saveRosterToCloud(next).catch(() => {});
-      }
-
-      try {
-        localStorage.setItem('labgrade_student_roster', JSON.stringify(next));
-        if (typeof BroadcastChannel !== 'undefined') {
-          const bc = new BroadcastChannel('labgrade_session_channel');
-          bc.postMessage({ type: 'ROSTER_UPDATED', students: next });
-          bc.close();
-        }
-      } catch {}
-
-      return next;
-    });
+      await apiFetch(url, { method: 'DELETE' }, 4000);
+    } catch {}
 
     return true;
   };
@@ -724,59 +720,42 @@ export default function App() {
   // Đổi tên lớp học sinh nhanh chóng trong CSDL (ví dụ sửa nhầm 6B2 thành 6A2)
   const handleRenameStudentClass = async (oldClassName: string, newClassName: string): Promise<boolean> => {
     if (!oldClassName || !newClassName) return false;
-    let renameSucceeded = false;
-    let serverStudents: StudentRecord[] | null = null;
+    const oldNorm = oldClassName.trim().toUpperCase();
+    const oldClean = oldNorm.replace(/^LỚP\s*|^LOP\s*/i, '');
+    const newNorm = newClassName.trim().toUpperCase().replace(/^LỚP\s*|^LOP\s*/i, '');
+
+    const next = studentRoster.map((s) => {
+      const sCls = (s.className || '').trim().toUpperCase();
+      const sClean = sCls.replace(/^LỚP\s*|^LOP\s*/i, '');
+      if (sCls === oldNorm || sClean === oldClean || sCls === oldClean) {
+        return { ...s, className: newNorm };
+      }
+      return s;
+    });
+
+    setStudentRoster(next);
+    try {
+      localStorage.setItem('labgrade_student_roster', JSON.stringify(next));
+      if (typeof BroadcastChannel !== 'undefined') {
+        const bc = new BroadcastChannel('labgrade_session_channel');
+        bc.postMessage({ type: 'ROSTER_UPDATED', students: next });
+        bc.close();
+      }
+    } catch {}
+
+    if (isFirebaseReady) {
+      try {
+        await saveRosterToCloud(next);
+      } catch {}
+    }
 
     try {
-      const res = await apiFetch('/api/student-roster/rename', {
+      await apiFetch('/api/student-roster/rename', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ oldClassName: oldClassName.trim(), newClassName: newClassName.trim() }),
-      });
-      if (res.ok) {
-        const data = await res.json();
-        if (Array.isArray(data.students)) {
-          serverStudents = data.students;
-          renameSucceeded = true;
-        }
-      }
-    } catch (err) {
-      console.warn('Lỗi khi đổi tên lớp trên máy chủ:', err);
-    }
-
-    setStudentRoster((prev) => {
-      let next: StudentRecord[];
-      if (renameSucceeded && serverStudents) {
-        next = serverStudents;
-      } else {
-        const oldNorm = oldClassName.trim().toUpperCase();
-        const oldClean = oldNorm.replace(/^LỚP\s*|^LOP\s*/i, '');
-        const newNorm = newClassName.trim().toUpperCase().replace(/^LỚP\s*|^LOP\s*/i, '');
-        next = prev.map((s) => {
-          const sCls = (s.className || '').trim().toUpperCase();
-          const sClean = sCls.replace(/^LỚP\s*|^LOP\s*/i, '');
-          if (sCls === oldNorm || sClean === oldClean || sCls === oldClean) {
-            return { ...s, className: newNorm };
-          }
-          return s;
-        });
-      }
-
-      if (isFirebaseReady) {
-        saveRosterToCloud(next).catch(() => {});
-      }
-
-      try {
-        localStorage.setItem('labgrade_student_roster', JSON.stringify(next));
-        if (typeof BroadcastChannel !== 'undefined') {
-          const bc = new BroadcastChannel('labgrade_session_channel');
-          bc.postMessage({ type: 'ROSTER_UPDATED', students: next });
-          bc.close();
-        }
-      } catch {}
-
-      return next;
-    });
+      }, 4000);
+    } catch {}
 
     return true;
   };
