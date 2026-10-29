@@ -1384,6 +1384,8 @@ export default function App() {
           className={userClassName}
           assignment={activeAssignment}
           submissions={submissions}
+          assignments={assignments}
+          studentRoster={studentRoster}
           onClose={() => setIsProjectorOpen(false)}
           onRefresh={refreshSubmissionsAndStatus}
           onClearSubmissions={handleClearAllSubmissions}

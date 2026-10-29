@@ -1,28 +1,24 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import {
   Trophy,
-  Award,
   Play,
   Pause,
   RotateCcw,
   Maximize2,
   Minimize2,
   X,
-  Sparkles,
-  Users,
   Clock,
-  ArrowUpRight,
   RefreshCw,
   Filter,
   Trash2,
   CheckCircle2,
-  AlertCircle,
   AlertTriangle,
   Volume2,
   Download,
   FolderDown,
+  Lock,
 } from 'lucide-react';
-import { Submission, Assignment } from '../types';
+import { Submission, Assignment, StudentRecord } from '../types';
 import { SCHOOL_CLASSES } from '../data/classes';
 import { apiFetch } from '../utils/apiConfig';
 import { realtimeSync } from '../utils/realtimeSync';
@@ -33,6 +29,8 @@ interface ProjectorLiveBoardProps {
   className: string;
   assignment: Assignment;
   submissions: Submission[];
+  assignments?: Assignment[];
+  studentRoster?: StudentRecord[];
   onClose: () => void;
   onRefresh?: () => void;
   onClearSubmissions?: (targetClass?: string) => Promise<boolean>;
@@ -44,17 +42,50 @@ export const ProjectorLiveBoard: React.FC<ProjectorLiveBoardProps> = ({
   className,
   assignment,
   submissions,
+  assignments = [],
+  studentRoster = [],
   onClose,
   onRefresh,
   onClearSubmissions,
   isTeacher = false,
   allowSubmission = true,
 }) => {
+  // Lấy danh sách lớp duy nhất từ danh sách học sinh đã tải lên (nếu có)
+  const rosterClasses = useMemo(() => {
+    const set = new Set<string>();
+    (studentRoster || []).forEach((r) => {
+      if (r.className?.trim()) set.add(r.className.trim());
+    });
+    return Array.from(set).sort();
+  }, [studentRoster]);
+
+  // Danh sách các lớp hiển thị: Nếu có danh sách tải lên thì CHỈ hiển thị đúng các lớp đó!
+  const displayedClasses: string[] = useMemo(() => {
+    if (rosterClasses.length > 0) return rosterClasses;
+    const subClasses = Array.from(new Set((submissions || []).map((s) => s.className).filter(Boolean)));
+    if (subClasses.length > 0) return subClasses.sort();
+    return [...SCHOOL_CLASSES];
+  }, [rosterClasses, submissions]);
+
   // Timer state (45 minutes standard class duration)
   const [timeLeft, setTimeLeft] = useState<number>(45 * 60);
   const [isRunning, setIsRunning] = useState<boolean>(true);
   const [isFullscreen, setIsFullscreen] = useState<boolean>(false);
-  const [activeClassFilter, setActiveClassFilter] = useState<string>(className || 'Tất cả');
+  const [activeClassFilter, setActiveClassFilter] = useState<string>(() => {
+    if (className && className !== 'Tất cả') return className;
+    if (displayedClasses.length > 0) return displayedClasses[0];
+    return 'Tất cả';
+  });
+
+  // Tự động chuyển activeClassFilter nếu lớp hiện tại không còn trong danh sách lớp tải lên
+  useEffect(() => {
+    if (displayedClasses.length > 0 && activeClassFilter !== 'Tất cả' && !displayedClasses.includes(activeClassFilter)) {
+      setActiveClassFilter(displayedClasses[0]);
+    }
+  }, [displayedClasses, activeClassFilter]);
+
+  // Bộ lọc sản phẩm nộp (Tất cả sản phẩm / SP01 / SP02 / SP03...)
+  const [selectedProductFilter, setSelectedProductFilter] = useState<string>('all');
 
   // Real-time live submissions synchronized across all lab PCs
   const [liveSubmissions, setLiveSubmissions] = useState<Submission[]>(submissions || []);
@@ -84,7 +115,7 @@ export const ProjectorLiveBoard: React.FC<ProjectorLiveBoardProps> = ({
     timestamp: string;
   } | null>(null);
 
-  // Sync strictly when prop submissions updates (chỉ giữ lại bài nộp của ngày hôm nay, loại bỏ hoàn toàn bài ảo cũ)
+  // Sync strictly when prop submissions updates (chỉ giữ lại bài nộp của ngày hôm nay)
   useEffect(() => {
     const todayStr = new Date().toISOString().slice(0, 10);
     const validSubs = (submissions || []).filter((s) => {
@@ -116,7 +147,6 @@ export const ProjectorLiveBoard: React.FC<ProjectorLiveBoardProps> = ({
       } catch {}
     }
 
-    // Kết nối qua Server-Sent Events (SSE) để nhận sự kiện từ bất kỳ máy nào gửi lên server
     const unsub = realtimeSync.subscribe((event) => {
       if (event.type === 'PLAGIARISM_ALERT') {
         playPlagiarismWarningSound();
@@ -148,54 +178,37 @@ export const ProjectorLiveBoard: React.FC<ProjectorLiveBoardProps> = ({
 
             // Phát hiện máy vừa mới nộp bài hoặc cập nhật điểm số
             const newlyUpdated = validSubs.find((s: Submission) => {
-              const existing = liveSubmissions.find((p) => p.id === s.id);
-              return !existing || (s.latestSubmittedAt && existing.latestSubmittedAt !== s.latestSubmittedAt);
+              const old = liveSubmissions.find((o) => o.id === s.id);
+              return !old || s.attempts?.length !== old.attempts?.length || s.highestScore !== old.highestScore;
             });
 
             if (newlyUpdated) {
               setRecentMachineId(newlyUpdated.machineNumber);
               setTimeout(() => {
                 if (isMounted) setRecentMachineId(null);
-              }, 8000);
+              }, 4000);
             }
 
-            // Phản ánh trung thực 100% CSDL máy chủ (đã lọc sạch dữ liệu ảo các ngày trước)
             setLiveSubmissions(validSubs);
-
-            setLastSyncTime(
-              new Date().toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
-            );
+            setLastSyncTime(new Date().toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit', second: '2-digit' }));
           }
         }
-      } catch {
-        // Offline resilience
-      }
+      } catch {}
     };
 
-    // Immediate initial sync
-    fetchLabUpdates();
-
-    // 2.5s interval
     const interval = setInterval(fetchLabUpdates, 2500);
     return () => {
       isMounted = false;
       clearInterval(interval);
     };
-  }, []);
+  }, [liveSubmissions]);
 
-  // Cập nhật khi prop className thay đổi
-  useEffect(() => {
-    if (className) {
-      setActiveClassFilter(className);
-    }
-  }, [className]);
-
-  // Bộ đếm thời gian
+  // Countdown timer effect
   useEffect(() => {
     let interval: any = null;
     if (isRunning && timeLeft > 0) {
       interval = setInterval(() => {
-        setTimeLeft((prev) => Math.max(0, prev - 1));
+        setTimeLeft((prev) => prev - 1);
       }, 1000);
     }
     return () => clearInterval(interval);
@@ -246,7 +259,6 @@ export const ProjectorLiveBoard: React.FC<ProjectorLiveBoardProps> = ({
             return;
           }
         } else {
-          // Đối chiếu với CSDL Đám mây / local
           if (teacherPinInput.trim() !== expectedPin.trim()) {
             setPinErrorMsg(expectedPin !== '1234' ? 'Mã PIN không chính xác! (Mã 1234 mặc định đã bị thay đổi trên đám mây).' : 'Mã PIN Giáo viên không chính xác! Mã PIN mặc định là 1234.');
             return;
@@ -328,17 +340,21 @@ export const ProjectorLiveBoard: React.FC<ProjectorLiveBoardProps> = ({
     URL.revokeObjectURL(url);
   };
 
-  // Tải toàn bộ sản phẩm các máy trong lớp về máy tính giáo viên
-  const handleDownloadAllSubmissions = () => {
-    if (classSubmissions.length === 0) return;
-    classSubmissions.forEach((sub, idx) => {
-      setTimeout(() => {
-        handleDownloadSubmissionFile(sub);
-      }, idx * 250);
-    });
-  };
+  // Danh sách các bài tập phù hợp với lớp đang chọn
+  const relevantAssignments = useMemo(() => {
+    const all = assignments && assignments.length > 0 ? assignments : [assignment];
+    if (activeClassFilter === 'Tất cả') {
+      return all;
+    }
+    const gradeDigit = activeClassFilter.replace(/\D/g, '')[0];
+    if (gradeDigit) {
+      const matched = all.filter((a) => a.gradeLevel === `Lớp ${gradeDigit}`);
+      if (matched.length > 0) return matched;
+    }
+    return all;
+  }, [assignments, assignment, activeClassFilter]);
 
-  // Filter submissions by class (chỉ hiển thị bài nộp của ngày thực hành hôm nay, loại trừ hoàn toàn dữ liệu ảo các ngày trước)
+  // Filter submissions by class (chỉ hiển thị bài nộp của ngày thực hành hôm nay)
   const todayStr = new Date().toISOString().slice(0, 10);
   const activeSubs = liveSubmissions.filter((s) => {
     if (!s || String(s.id).startsWith('mock-')) return false;
@@ -350,12 +366,17 @@ export const ProjectorLiveBoard: React.FC<ProjectorLiveBoardProps> = ({
     ? activeSubs
     : activeSubs.filter((s) => s.className === activeClassFilter);
 
-  // Group into machine lookup map: Lấy submission có điểm cao nhất của từng số máy
+  // Lọc theo sản phẩm đã nộp nếu giáo viên chọn lọc SP
+  const productFilteredSubs = useMemo(() => {
+    if (selectedProductFilter === 'all') return classSubmissions;
+    return classSubmissions.filter((s) => s.assignmentId === selectedProductFilter);
+  }, [classSubmissions, selectedProductFilter]);
+
+  // Gom bài nộp theo số máy
   const submissionByMachine = new Map<string, Submission>();
   const duplicateMachineMap = new Map<string, Submission[]>();
 
-  classSubmissions.forEach((s) => {
-    // Thu thập danh sách để phát hiện nếu nhiều nhóm cùng máy
+  productFilteredSubs.forEach((s) => {
     const list = duplicateMachineMap.get(s.machineNumber) || [];
     list.push(s);
     duplicateMachineMap.set(s.machineNumber, list);
@@ -366,100 +387,149 @@ export const ProjectorLiveBoard: React.FC<ProjectorLiveBoardProps> = ({
     }
   });
 
-  // Top achievers
-  const perfectAchievers = classSubmissions.filter((s) => s.highestScore >= 10);
-  const totalSubmitted = submissionByMachine.size;
+  // Tải toàn bộ sản phẩm của các máy đang nộp về máy tính giáo viên
+  const handleDownloadAllSubmissions = () => {
+    const listToDownload = Array.from(submissionByMachine.values());
+    if (listToDownload.length === 0) return;
+    listToDownload.forEach((sub, idx) => {
+      setTimeout(() => {
+        handleDownloadSubmissionFile(sub);
+      }, idx * 250);
+    });
+  };
+
+  const totalSubmitted = allowSubmission ? submissionByMachine.size : 0;
   const avgScore = totalSubmitted > 0
     ? (Array.from(submissionByMachine.values()).reduce((sum, s) => sum + s.highestScore, 0) / totalSubmitted).toFixed(1)
     : '0';
 
-  // Generate 36 standard computer lab machines
+  // Tạo 36 máy tính phòng máy tiêu chuẩn
   const totalMachinesCount = 36;
   const machineCards = Array.from({ length: totalMachinesCount }, (_, i) => {
     const machineId = `Máy ${String(i + 1).padStart(2, '0')}`;
     const sub = submissionByMachine.get(machineId);
     const allSubs = duplicateMachineMap.get(machineId) || [];
+    // YÊU CẦU: Khi giáo viên khóa nộp bài (allowSubmission === false), reset toàn bộ màn hình máy chiếu về trạng thái đang thực hành
+    const isShowingSubmission = allowSubmission && Boolean(sub);
+
     return {
       machineId,
-      submission: sub,
+      submission: isShowingSubmission ? sub : null,
       hasMultipleGroups: allSubs.length > 1,
+      isPracticingState: !allowSubmission,
     };
   });
 
   return (
     <div className="fixed inset-0 z-50 bg-slate-950 text-white flex flex-col overflow-hidden select-none animate-in fade-in duration-200">
       {/* Top Bar for Projector */}
-      <div className="bg-slate-900 border-b border-slate-800 px-6 py-4 flex flex-wrap items-center justify-between gap-4 shadow-xl">
-        {/* Left: Lab Info & Class selector */}
-        <div className="flex items-center gap-4">
-          <div className="w-12 h-12 rounded-xl bg-gradient-to-tr from-blue-600 via-indigo-600 to-cyan-400 flex items-center justify-center shadow-lg shadow-blue-500/20">
-            <Trophy className="w-6 h-6 text-white" />
+      <div className="bg-slate-900 border-b border-slate-800 px-6 py-3.5 flex flex-wrap items-center justify-between gap-4 shadow-xl shrink-0">
+        {/* Left: Lab Info, Class Selector & Product Filter */}
+        <div className="flex items-center gap-4 flex-wrap">
+          <div className="w-11 h-11 rounded-xl bg-gradient-to-tr from-blue-600 via-indigo-600 to-cyan-400 flex items-center justify-center shadow-lg shadow-blue-500/20 shrink-0">
+            <Trophy className="w-5 h-5 text-white" />
           </div>
           <div>
-            <div className="flex items-center gap-3 flex-wrap">
-              <span className="text-xl sm:text-2xl font-black tracking-tight text-white">
-                BẢNG TRÌNH CHIẾU PHÒNG THỰC HÀNH TIN HỌC
+            <div className="flex items-center gap-2.5 flex-wrap">
+              <span className="text-lg sm:text-xl font-black tracking-tight text-white">
+                BẢNG TRÌNH CHIẾU PHÒNG THỰC HÀNH
               </span>
-              <div className="flex items-center gap-1.5">
-                <span className="text-xs text-slate-400 font-semibold">Lớp:</span>
+
+              {/* Bộ chọn Lớp: Đồng bộ duy nhất các lớp có trong danh sách tải lên */}
+              <div className="flex items-center gap-1.5 bg-blue-900/60 border border-blue-500/50 px-2 py-0.5 rounded-lg">
+                <span className="text-xs text-blue-200 font-bold">Lớp:</span>
                 <select
                   value={activeClassFilter}
                   onChange={(e) => setActiveClassFilter(e.target.value)}
-                  className="bg-blue-600 text-white text-xs px-2.5 py-1 rounded-md font-extrabold uppercase border border-blue-400 focus:outline-none cursor-pointer"
+                  className="bg-blue-600 text-white text-xs px-2 py-0.5 rounded-md font-extrabold uppercase border border-blue-400 focus:outline-none cursor-pointer"
                 >
                   <option value="Tất cả">Tất cả các lớp</option>
-                  {SCHOOL_CLASSES.map((cls) => (
+                  {displayedClasses.map((cls) => (
                     <option key={cls} value={cls}>
                       Lớp {cls}
                     </option>
                   ))}
                 </select>
               </div>
-              <span className={`text-[11px] font-bold px-2 py-0.5 rounded-full border ${
+
+              {/* Nút Chức Năng Lọc Sản Phẩm Đã Nộp (SP01, SP02...) */}
+              <div className="flex items-center gap-1.5 bg-slate-800 border border-slate-700 px-2 py-0.5 rounded-lg">
+                <Filter className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
+                <span className="text-xs text-slate-300 font-bold">Sản phẩm:</span>
+                <select
+                  value={selectedProductFilter}
+                  onChange={(e) => setSelectedProductFilter(e.target.value)}
+                  className="bg-slate-900 text-cyan-200 text-xs px-2 py-0.5 rounded-md font-bold border border-slate-600 focus:outline-none cursor-pointer max-w-[220px]"
+                >
+                  <option value="all">Tất cả SP ({classSubmissions.length} bài)</option>
+                  {relevantAssignments.map((a, idx) => {
+                    const count = classSubmissions.filter((s) => s.assignmentId === a.id).length;
+                    const spCode = `SP${String(idx + 1).padStart(2, '0')}`;
+                    return (
+                      <option key={a.id} value={a.id}>
+                        {spCode}: {a.title.replace(/^SP\d+\.?\s*/i, '').slice(0, 30)} ({count} máy)
+                      </option>
+                    );
+                  })}
+                </select>
+              </div>
+
+              {/* Badge trạng thái nộp bài */}
+              <span className={`text-[11px] font-bold px-2.5 py-0.5 rounded-full border ${
                 allowSubmission
                   ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40'
                   : 'bg-rose-500/20 text-rose-300 border-rose-500/40'
               }`}>
                 {allowSubmission ? '● Đang mở nộp bài' : '🔒 Đang khóa nộp bài'}
               </span>
-              <span className="text-[11px] font-bold px-2 py-0.5 rounded-full bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 flex items-center gap-1">
+
+              <span className="text-[11px] font-bold px-2 py-0.5 rounded-full bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 hidden md:flex items-center gap-1">
                 <span className="w-2 h-2 rounded-full bg-cyan-400 animate-ping inline-block" />
-                <span>Trực tiếp kết nối ({lastSyncTime})</span>
+                <span>Trực tiếp ({lastSyncTime})</span>
               </span>
             </div>
+
             <p className="text-xs text-slate-400 mt-0.5">
-              {assignment.title} • {totalSubmitted}/36 máy đã nộp • Điểm TB: {avgScore}đ • Tự động nhận bài nộp tức thì từ mọi máy
+              {selectedProductFilter !== 'all' ? (
+                <span>
+                  Đang lọc: <strong className="text-cyan-300">{relevantAssignments.find(a => a.id === selectedProductFilter)?.title || 'Sản phẩm chọn'}</strong> • <strong className="text-white">{totalSubmitted}/36 máy</strong> đã nộp
+                </span>
+              ) : (
+                <span>
+                  {assignment.title} • {totalSubmitted}/36 máy đã nộp • Điểm TB: {avgScore}đ
+                </span>
+              )}
             </p>
           </div>
         </div>
 
         {/* Center: Countdown Timer */}
-        <div className="hidden lg:flex items-center gap-4 bg-slate-800/90 border border-slate-700 px-5 py-2 rounded-2xl shadow-inner">
+        <div className="hidden xl:flex items-center gap-3 bg-slate-800/90 border border-slate-700 px-4 py-1.5 rounded-2xl shadow-inner">
           <div className="flex items-center gap-2">
-            <Clock className={`w-5 h-5 ${timeLeft <= 300 ? 'text-rose-500 animate-pulse' : 'text-cyan-400'}`} />
-            <span className="font-mono text-2xl font-black text-white">{timeFormatted}</span>
+            <Clock className={`w-4 h-4 ${timeLeft <= 300 ? 'text-rose-500 animate-pulse' : 'text-cyan-400'}`} />
+            <span className="font-mono text-xl font-black text-white">{timeFormatted}</span>
           </div>
-          <div className="flex items-center gap-1 border-l border-slate-700 pl-3">
+          <div className="flex items-center gap-1 border-l border-slate-700 pl-2.5">
             <button
               onClick={() => setIsRunning(!isRunning)}
-              className="p-1.5 rounded-lg bg-slate-700 hover:bg-slate-600 text-slate-200 transition-colors cursor-pointer"
+              className="p-1 rounded-lg bg-slate-700 hover:bg-slate-600 text-slate-200 transition-colors cursor-pointer"
               title={isRunning ? 'Tạm dừng' : 'Tiếp tục'}
             >
-              {isRunning ? <Pause className="w-4 h-4" /> : <Play className="w-4 h-4" />}
+              {isRunning ? <Pause className="w-3.5 h-3.5" /> : <Play className="w-3.5 h-3.5" />}
             </button>
             <button
               onClick={() => setTimeLeft(45 * 60)}
-              className="p-1.5 rounded-lg bg-slate-700 hover:bg-slate-600 text-slate-200 transition-colors cursor-pointer"
+              className="p-1 rounded-lg bg-slate-700 hover:bg-slate-600 text-slate-200 transition-colors cursor-pointer"
               title="Đặt lại 45 phút"
             >
-              <RotateCcw className="w-4 h-4" />
+              <RotateCcw className="w-3.5 h-3.5" />
             </button>
           </div>
         </div>
 
         {/* Right: Actions */}
         <div className="flex items-center gap-2">
-          {/* Nút Xóa Sạch Kết Quả Cũ (Giáo viên hoặc bảo vệ bằng mã PIN) */}
+          {/* Nút Xóa Sạch Kết Quả Cũ */}
           <button
             type="button"
             onClick={() => {
@@ -467,7 +537,7 @@ export const ProjectorLiveBoard: React.FC<ProjectorLiveBoardProps> = ({
               setPinErrorMsg(null);
               setIsConfirmClearOpen(true);
             }}
-            className="p-2.5 rounded-xl bg-slate-800 hover:bg-rose-900/70 border border-slate-700 hover:border-rose-600 text-rose-300 transition-colors flex items-center gap-1.5 text-xs font-bold cursor-pointer"
+            className="p-2 sm:px-3 rounded-xl bg-slate-800 hover:bg-rose-900/70 border border-slate-700 hover:border-rose-600 text-rose-300 transition-colors flex items-center gap-1.5 text-xs font-bold cursor-pointer"
             title="Xóa sạch toàn bộ kết quả chấm ảo hoặc bài nộp cũ các ngày trước để bắt đầu tiết học mới"
           >
             <Trash2 className="w-4 h-4 text-rose-400" />
@@ -475,22 +545,22 @@ export const ProjectorLiveBoard: React.FC<ProjectorLiveBoardProps> = ({
           </button>
 
           {/* Nút Lưu Toàn Bộ Bài Làm Của Lớp Về Máy Giáo Viên */}
-          {classSubmissions.length > 0 && (
+          {totalSubmitted > 0 && (
             <button
               type="button"
               onClick={handleDownloadAllSubmissions}
-              className="p-2.5 rounded-xl bg-slate-800 hover:bg-emerald-900/70 border border-slate-700 hover:border-emerald-600 text-emerald-300 transition-colors flex items-center gap-1.5 text-xs font-bold cursor-pointer"
-              title={`Lưu toàn bộ bài làm của ${classSubmissions.length} máy trong lớp về máy tính giáo viên`}
+              className="p-2 sm:px-3 rounded-xl bg-emerald-950/80 hover:bg-emerald-900 border border-emerald-600/60 text-emerald-300 transition-colors flex items-center gap-1.5 text-xs font-bold cursor-pointer shadow-md"
+              title={`Lưu toàn bộ bài làm của ${totalSubmitted} máy đã nộp về máy tính giáo viên`}
             >
               <FolderDown className="w-4 h-4 text-emerald-400" />
-              <span className="hidden md:inline">Lưu Tất Cả Bài ({classSubmissions.length})</span>
+              <span className="hidden sm:inline">Lưu Tất Cả Bài ({totalSubmitted})</span>
             </button>
           )}
 
           {onRefresh && (
             <button
               onClick={onRefresh}
-              className="p-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 transition-colors flex items-center gap-1.5 text-xs font-bold cursor-pointer"
+              className="p-2 sm:px-3 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 transition-colors flex items-center gap-1.5 text-xs font-bold cursor-pointer"
               title="Cập nhật kết quả mới nhất từ phòng máy"
             >
               <RefreshCw className="w-4 h-4 text-cyan-400" />
@@ -499,32 +569,44 @@ export const ProjectorLiveBoard: React.FC<ProjectorLiveBoardProps> = ({
           )}
           <button
             onClick={toggleFullscreen}
-            className="p-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 transition-colors cursor-pointer"
+            className="p-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 transition-colors cursor-pointer"
             title="Toàn màn hình"
           >
-            {isFullscreen ? <Minimize2 className="w-5 h-5" /> : <Maximize2 className="w-5 h-5" />}
+            {isFullscreen ? <Minimize2 className="w-4 h-4" /> : <Maximize2 className="w-4 h-4" />}
           </button>
           <button
             onClick={onClose}
-            className="p-2.5 rounded-xl bg-rose-950/60 hover:bg-rose-900 border border-rose-800 text-rose-300 transition-colors cursor-pointer"
+            className="p-2 rounded-xl bg-rose-950/60 hover:bg-rose-900 border border-rose-800 text-rose-300 transition-colors cursor-pointer"
             title="Đóng trình chiếu"
           >
-            <X className="w-5 h-5" />
+            <X className="w-4 h-4" />
           </button>
         </div>
       </div>
 
       {/* Thông báo xóa thành công */}
       {clearSuccessNotice && (
-        <div className="mx-6 mt-3 p-3 bg-emerald-950/90 border border-emerald-500 rounded-2xl text-emerald-300 text-xs sm:text-sm font-bold flex items-center gap-2 animate-in fade-in">
+        <div className="mx-6 mt-3 p-3 bg-emerald-950/90 border border-emerald-500 rounded-2xl text-emerald-300 text-xs sm:text-sm font-bold flex items-center gap-2 animate-in fade-in shrink-0">
           <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
           <span>{clearSuccessNotice}</span>
         </div>
       )}
 
+      {/* CẢNH BÁO KHI GIÁO VIÊN KHÓA NỘP BÀI */}
+      {!allowSubmission && (
+        <div className="mx-6 mt-3 p-3 bg-blue-950/90 border border-blue-500/60 rounded-2xl text-blue-200 text-xs sm:text-sm font-bold flex items-center justify-between gap-3 shadow-lg shrink-0">
+          <div className="flex items-center gap-2">
+            <Lock className="w-4 h-4 text-amber-400 shrink-0" />
+            <span>
+              🔒 Đang khóa nộp bài: Toàn bộ phòng máy đang trong trạng thái <strong>Đang thực hành</strong>. Màn hình các máy sẽ phát sáng khi Thầy/Cô bật cho phép nộp bài.
+            </span>
+          </div>
+        </div>
+      )}
+
       {/* CẢNH BÁO SAO CHÉP TỆP LỚP TRƯỚC TRÊN MÁY CHIẾU PHÒNG THỰC HÀNH */}
       {activePlagiarismAlert && (
-        <div className="mx-6 mt-3 p-4 bg-rose-950/95 border-2 border-rose-500 rounded-2xl text-rose-200 text-xs sm:text-sm font-bold flex items-start justify-between gap-3 shadow-2xl animate-pulse">
+        <div className="mx-6 mt-3 p-4 bg-rose-950/95 border-2 border-rose-500 rounded-2xl text-rose-200 text-xs sm:text-sm font-bold flex items-start justify-between gap-3 shadow-2xl animate-pulse shrink-0">
           <div className="flex items-start gap-3">
             <div className="w-10 h-10 rounded-xl bg-rose-600 text-white flex items-center justify-center shrink-0 animate-bounce shadow-lg">
               <AlertTriangle className="w-6 h-6" />
@@ -556,37 +638,10 @@ export const ProjectorLiveBoard: React.FC<ProjectorLiveBoardProps> = ({
         </div>
       )}
 
-      {/* Main Grid View */}
-      <div className="flex-1 p-6 overflow-y-auto space-y-6">
-        {/* Hall of Fame: Điểm 10 Tuyệt Đối */}
-        {perfectAchievers.length > 0 && (
-          <div className="bg-gradient-to-r from-amber-950/60 via-yellow-950/40 to-slate-900 border border-amber-600/40 p-4 rounded-2xl shadow-xl">
-            <div className="flex items-center gap-2 mb-3">
-              <Award className="w-5 h-5 text-amber-400 animate-bounce" />
-              <h2 className="text-sm font-extrabold text-amber-300 uppercase tracking-wider">
-                Bảng Vàng Xuất Sắc 10/10 ({perfectAchievers.length} Nhóm Đạt Điểm Tối Đa)
-              </h2>
-            </div>
-            <div className="flex flex-wrap gap-3">
-              {perfectAchievers.map((p) => (
-                <div
-                  key={p.id}
-                  className="flex items-center gap-2 px-3 py-1.5 rounded-xl bg-amber-500/10 border border-amber-500/30 text-amber-200 text-xs font-bold"
-                >
-                  <span className="w-6 h-6 rounded-lg bg-amber-500/20 text-amber-300 flex items-center justify-center font-black">
-                    {p.machineNumber.replace('Máy ', '')}
-                  </span>
-                  <span>{p.studentLeader}</span>
-                  <span className="text-amber-400 font-extrabold">10.0đ</span>
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
-
-        {/* 36 Máy Tính Grid */}
-        <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-3.5">
-          {machineCards.map(({ machineId, submission, hasMultipleGroups }) => {
+      {/* Main Grid 36 Máy Tính */}
+      <div className="flex-1 p-4 sm:p-6 overflow-y-auto">
+        <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-3 sm:gap-3.5">
+          {machineCards.map(({ machineId, submission, isPracticingState }) => {
             const isJustUpdated = recentMachineId === machineId;
             const hasSubmitted = Boolean(submission);
             const isPlagiarized = Boolean(
@@ -599,33 +654,33 @@ export const ProjectorLiveBoard: React.FC<ProjectorLiveBoardProps> = ({
             return (
               <div
                 key={machineId}
-                className={`relative rounded-2xl p-3 border transition-all duration-300 flex flex-col justify-between min-h-[105px] ${
+                className={`relative rounded-2xl p-3 border transition-all duration-300 flex flex-col justify-between min-h-[115px] ${
                   isPlagiarized
                     ? 'bg-rose-950/95 border-rose-500 ring-2 ring-rose-500 shadow-2xl animate-pulse text-white'
                     : isJustUpdated
-                    ? 'ring-4 ring-cyan-400 scale-105 z-10 bg-cyan-950/80 border-cyan-400 shadow-xl'
+                    ? 'ring-4 ring-cyan-400 scale-105 z-10 bg-cyan-950/90 border-cyan-400 shadow-xl'
                     : hasSubmitted
                     ? score !== null && score >= 9
-                      ? 'bg-emerald-950/40 border-emerald-600/60 hover:border-emerald-400'
+                      ? 'bg-emerald-950/60 border-emerald-500 shadow-lg shadow-emerald-950/50 ring-1 ring-emerald-500/40'
                       : score !== null && score >= 7
-                      ? 'bg-blue-950/40 border-blue-600/60 hover:border-blue-400'
-                      : 'bg-amber-950/40 border-amber-600/60 hover:border-amber-400'
-                    : 'bg-slate-900/60 border-slate-800 text-slate-500'
+                      ? 'bg-blue-950/60 border-blue-500 shadow-lg shadow-blue-950/50 ring-1 ring-blue-500/40'
+                      : 'bg-amber-950/60 border-amber-500 shadow-lg shadow-amber-950/50 ring-1 ring-amber-500/40'
+                    : 'bg-slate-900/50 border-slate-800 text-slate-500'
                 }`}
               >
-                {/* Header card: Số máy & Điểm */}
+                {/* Header card: Số máy & Điểm phát sáng */}
                 <div className="flex items-center justify-between gap-1">
-                  <span className={`text-xs font-black uppercase tracking-wider ${isPlagiarized ? 'text-rose-200' : hasSubmitted ? 'text-white' : 'text-slate-400'}`}>
+                  <span className={`text-xs font-black uppercase tracking-wider ${isPlagiarized ? 'text-rose-200' : hasSubmitted ? 'text-white font-extrabold' : 'text-slate-400'}`}>
                     {machineId}
                   </span>
                   {isPlagiarized ? (
                     <span className="text-xs font-black px-2 py-0.5 rounded-lg bg-rose-600 text-white shadow-sm flex items-center gap-1 animate-bounce">
-                      <AlertTriangle className="w-3.5 h-3.5" />
+                      <AlertTriangle className="w-3 h-3" />
                       0.0đ
                     </span>
                   ) : hasSubmitted && score !== null ? (
                     <span
-                      className={`text-sm sm:text-base font-black px-2 py-0.5 rounded-lg shadow-sm ${
+                      className={`text-xs sm:text-sm font-black px-2 py-0.5 rounded-lg shadow-sm ${
                         score >= 9
                           ? 'bg-emerald-500 text-white'
                           : score >= 7
@@ -640,30 +695,27 @@ export const ProjectorLiveBoard: React.FC<ProjectorLiveBoardProps> = ({
                   )}
                 </div>
 
-                {/* Body card: Tên học sinh */}
-                <div className="my-1.5 min-w-0">
+                {/* Body card: Tên học sinh & Lớp */}
+                <div className="my-1 min-w-0">
                   {hasSubmitted && submission ? (
                     <div>
                       <div className="text-xs sm:text-sm font-bold text-white truncate" title={submission.studentLeader}>
                         {submission.studentLeader}
                       </div>
                       <div className="text-[10px] text-slate-400 flex items-center justify-between gap-1 mt-0.5">
-                        <span className="truncate">{submission.className}</span>
+                        <span className="truncate font-semibold text-slate-300">{submission.className}</span>
                         <span>{submission.attempts?.length || 1} lần nộp</span>
                       </div>
-                      {isPlagiarized && (
-                        <div className="text-[10px] text-rose-300 font-extrabold flex items-center gap-1 mt-0.5 animate-pulse">
-                          <AlertTriangle className="w-3 h-3 text-rose-400 shrink-0" />
-                          <span>Lấy tệp lớp trước!</span>
-                        </div>
-                      )}
                     </div>
                   ) : (
-                    <div className="text-[11px] text-slate-600 italic">Đang thực hành...</div>
+                    <div className="text-[11px] text-slate-500 italic flex items-center gap-1">
+                      <span className="w-1.5 h-1.5 rounded-full bg-slate-600" />
+                      <span>{isPracticingState ? 'Đang thực hành...' : 'Đang làm bài...'}</span>
+                    </div>
                   )}
                 </div>
 
-                {/* Footer card: Trạng thái & Lần nộp */}
+                {/* Footer card: Thời gian nộp & Nút Lưu bài về máy giáo viên */}
                 {isPlagiarized ? (
                   <div className="flex items-center justify-between text-[10px] text-rose-300 pt-1 border-t border-rose-500/40 font-bold">
                     <span className="truncate">
@@ -672,8 +724,8 @@ export const ProjectorLiveBoard: React.FC<ProjectorLiveBoardProps> = ({
                     <span className="text-rose-400 uppercase text-[9px] font-mono">VI PHẠM</span>
                   </div>
                 ) : hasSubmitted && submission ? (
-                  <div className="flex items-center justify-between text-[10px] text-slate-400 pt-1 border-t border-white/5 gap-1">
-                    <span className="truncate font-mono font-bold text-cyan-300" title={`Thời gian nộp: ${submission.latestSubmittedAt ? new Date(submission.latestSubmittedAt).toLocaleTimeString('vi-VN') : ''}`}>
+                  <div className="flex items-center justify-between text-[10px] text-slate-400 pt-1 border-t border-white/10 gap-1">
+                    <span className="truncate font-mono font-bold text-cyan-300 text-[10px]" title={`Thời gian nộp: ${submission.latestSubmittedAt ? new Date(submission.latestSubmittedAt).toLocaleTimeString('vi-VN') : ''}`}>
                       ⏱️ {submission.latestSubmittedAt ? new Date(submission.latestSubmittedAt).toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit', second: '2-digit' }) : ''}
                     </span>
                     <button
@@ -682,7 +734,7 @@ export const ProjectorLiveBoard: React.FC<ProjectorLiveBoardProps> = ({
                         e.stopPropagation();
                         handleDownloadSubmissionFile(submission);
                       }}
-                      className="px-1.5 py-0.5 rounded bg-cyan-950 hover:bg-cyan-700 border border-cyan-500/40 text-cyan-200 hover:text-white text-[10px] font-bold flex items-center gap-1 transition cursor-pointer shadow-xs shrink-0"
+                      className="px-2 py-0.5 rounded-md bg-cyan-950 hover:bg-cyan-700 border border-cyan-500/50 text-cyan-200 hover:text-white text-[10px] font-bold flex items-center gap-1 transition cursor-pointer shadow-xs shrink-0"
                       title={`Lưu sản phẩm của ${machineId} (${submission.studentLeader}) về máy giáo viên`}
                     >
                       <Download className="w-3 h-3 text-cyan-300" />

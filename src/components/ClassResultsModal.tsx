@@ -5,7 +5,6 @@ import {
   FileSpreadsheet,
   Sparkles,
   Lock,
-  Unlock,
   CheckCircle2,
   RefreshCw,
   Calendar,
@@ -16,8 +15,9 @@ import {
 import { Submission, Assignment, StudentRecord } from '../types';
 import {
   exportClassMultiProductGradebook,
+  exportSubmissionsToExcel,
 } from '../utils/excelExport';
-import { formatPracticeDateVi } from '../utils/storageManager';
+import { formatPracticeDateVi, getTodayDateString } from '../utils/storageManager';
 import { SCHOOL_CLASSES } from '../data/classes';
 import { ClassMultiProductGradebook } from './ClassMultiProductGradebook';
 
@@ -50,8 +50,6 @@ export const ClassResultsModal: React.FC<ClassResultsModalProps> = ({
   submissions,
   onClose,
   isTeacher = false,
-  onToggleSubmissionPermission,
-  allowSubmission = true,
   onChangeClassName,
   onRefresh,
   onClearSubmissions,
@@ -60,7 +58,7 @@ export const ClassResultsModal: React.FC<ClassResultsModalProps> = ({
   studentRoster = [],
   onExportMultiProductExcel,
 }) => {
-  // Lấy danh sách lớp duy nhất từ danh sách học sinh đã tải lên (nếu có) để thay thế lớp mặc định
+  // Lấy danh sách lớp duy nhất từ danh sách học sinh đã tải lên (nếu có)
   const rosterClasses = useMemo(() => {
     const set = new Set<string>();
     studentRoster.forEach((r) => {
@@ -176,6 +174,20 @@ export const ClassResultsModal: React.FC<ClassResultsModalProps> = ({
     setTimeout(() => setSyncToast(null), 3500);
   };
 
+  // Xuất file Excel danh sách kết quả của lớp trong ngày thực hành đang chọn (không phải bảng tổng hợp)
+  const handleExportDailyResults = async () => {
+    if (onRefresh) await onRefresh();
+    exportSubmissionsToExcel({
+      className: activeClass,
+      submissions: dateFilteredList,
+      targetDate: effectiveFilterDate,
+      dateMode: dateFilterMode,
+    });
+    const dateLabel = effectiveFilterDate ? `ngày ${formatPracticeDateVi(effectiveFilterDate)}` : 'tất cả các ngày';
+    setSyncToast(`Đã tải DS Kết Quả Lớp ${activeClass} (${dateLabel}) thành công!`);
+    setTimeout(() => setSyncToast(null), 3500);
+  };
+
   // Các ngày trước đó (loại trừ ngày gần nhất)
   const previousDates = useMemo(() => {
     return availableDates.filter((d) => d !== latestDate);
@@ -261,37 +273,29 @@ export const ClassResultsModal: React.FC<ClassResultsModalProps> = ({
               </button>
             )}
 
-            {/* Nút Xuất Bảng Tổng Hợp SP1, SP2... ĐTB */}
+            {/* Nút Tải DS Kết Quả Theo Ngày & Xuất Bảng Tổng Hợp */}
             {isTeacher ? (
-              <div className="flex items-center gap-1.5">
+              <div className="flex items-center gap-1.5 flex-wrap">
+                {/* NÚT TẢI DANH SÁCH KẾT QUẢ CỦA LỚP THEO NGÀY (Yêu cầu: Không phải bảng tổng hợp) */}
+                <button
+                  type="button"
+                  onClick={handleExportDailyResults}
+                  className="px-3 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-xl text-xs font-black flex items-center gap-1.5 shadow-md hover:shadow-blue-500/20 transition-all active:scale-95 cursor-pointer"
+                  title={`Tải file Excel danh sách kết quả bài làm của Lớp ${activeClass} trong ngày ${effectiveFilterDate ? formatPracticeDateVi(effectiveFilterDate) : 'này'} (STT, Máy, Tên, Điểm, Giờ nộp...)`}
+                >
+                  <Download className="w-4 h-4 text-cyan-200" />
+                  <span>Tải DS Kết Quả Ngày {effectiveFilterDate ? formatPracticeDateVi(effectiveFilterDate) : ''}</span>
+                </button>
+
+                {/* NÚT XUẤT BẢNG TỔNG HỢP SP1, SP2... ĐIỂM TRUNG BÌNH */}
                 <button
                   type="button"
                   onClick={handleExportMultiProduct}
-                  className="px-3.5 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-black flex items-center gap-1.5 shadow-md hover:shadow-emerald-500/20 transition-all active:scale-95 cursor-pointer"
+                  className="px-3 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-black flex items-center gap-1.5 shadow-md hover:shadow-emerald-500/20 transition-all active:scale-95 cursor-pointer"
                   title="Xuất file Excel Bảng Tổng Hợp gồm: STT, Họ và tên, Điểm SP1, SP2... và Điểm trung bình (ĐTB) lấy điểm cao nhất!"
                 >
                   <FileSpreadsheet className="w-4 h-4 text-emerald-100" />
-                  <span>Xuất Bảng Tổng Hợp (SP1, SP2... ĐTB)</span>
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => {
-                    const jsonStr = JSON.stringify(submissions, null, 2);
-                    const blob = new Blob([jsonStr], { type: 'application/json' });
-                    const url = URL.createObjectURL(blob);
-                    const a = document.createElement('a');
-                    a.href = url;
-                    a.download = `CSDL_PhongMay_BaiNop_${new Date().toISOString().slice(0, 10)}.json`;
-                    document.body.appendChild(a);
-                    a.click();
-                    document.body.removeChild(a);
-                    URL.revokeObjectURL(url);
-                  }}
-                  className="p-2 text-slate-300 hover:text-white rounded-xl bg-slate-800 hover:bg-slate-700 transition-colors border border-slate-700 hidden sm:flex items-center cursor-pointer"
-                  title="Tải về bản sao lưu Cơ sở dữ liệu đầy đủ (.JSON) của phòng máy để lưu trữ an toàn"
-                >
-                  <Download className="w-4 h-4 text-cyan-400" />
+                  <span>Xuất Bảng Tổng Hợp</span>
                 </button>
               </div>
             ) : (
@@ -321,43 +325,7 @@ export const ClassResultsModal: React.FC<ClassResultsModalProps> = ({
           </div>
         )}
 
-        {/* Quản lý Khóa / Mở Nhận Bài Nộp (Giáo viên) */}
-        {isTeacher && onToggleSubmissionPermission && (
-          <div className="p-2.5 sm:px-6 bg-gradient-to-r from-blue-950 via-slate-900 to-blue-950 border-b border-blue-900/60 text-white flex flex-wrap items-center justify-between gap-2 text-xs shrink-0">
-            <div className="flex items-center gap-2">
-              <span className={`w-2.5 h-2.5 rounded-full ${allowSubmission ? 'bg-emerald-400 animate-pulse' : 'bg-rose-500'}`} />
-              <span className="font-bold">Quyền nộp bài của học sinh:</span>
-              <span className="text-slate-300 font-medium hidden sm:inline">
-                {allowSubmission
-                  ? 'Đang mở cho phép học sinh nộp bài thực hành trên phòng máy.'
-                  : 'Đang khóa nộp bài (tránh học sinh làm bài ở nhà nộp trước khi ổn định lớp).'}
-              </span>
-            </div>
-            <button
-              type="button"
-              onClick={() => onToggleSubmissionPermission(!allowSubmission)}
-              className={`px-3 py-1 rounded-xl font-black text-xs flex items-center gap-1.5 transition-all shadow-xs cursor-pointer ${
-                allowSubmission
-                  ? 'bg-rose-600 hover:bg-rose-700 text-white'
-                  : 'bg-emerald-500 hover:bg-emerald-600 text-slate-950 font-black'
-              }`}
-            >
-              {allowSubmission ? (
-                <>
-                  <Lock className="w-3.5 h-3.5" />
-                  <span>Khóa Nộp Bài</span>
-                </>
-              ) : (
-                <>
-                  <Unlock className="w-3.5 h-3.5" />
-                  <span>Bật Cho Phép Nộp</span>
-                </>
-              )}
-            </button>
-          </div>
-        )}
-
-        {/* Thanh Lọc Tiết Thực Hành: Tiết gần nhất (mặc định) & Chọn các ngày trước đó */}
+        {/* Thanh Lọc Tiết Thực Hành: Tiết gần nhất (mặc định), Chọn các ngày trước đó & Chọn ngày bất kỳ */}
         <div className="p-3 sm:px-6 bg-gradient-to-r from-slate-900 via-indigo-950 to-slate-900 border-b border-indigo-900/80 text-white flex flex-wrap items-center justify-between gap-3 text-xs shrink-0">
           <div className="flex items-center gap-2 flex-wrap">
             <span className="font-bold flex items-center gap-1.5 text-cyan-300">
@@ -386,7 +354,7 @@ export const ClassResultsModal: React.FC<ClassResultsModalProps> = ({
               </span>
             </button>
 
-            {/* Dropdown: Các ngày thực hành trước đó (chỉ hiển thị các ngày trước đó) */}
+            {/* Dropdown: Các ngày thực hành trước đó */}
             {previousDates.length > 0 && (
               <div className="flex items-center gap-1.5 bg-slate-800/80 px-2.5 py-1 rounded-xl border border-indigo-500/40">
                 <span className="text-[11px] text-slate-300 font-medium">Các ngày trước đó:</span>
@@ -410,6 +378,22 @@ export const ClassResultsModal: React.FC<ClassResultsModalProps> = ({
               </div>
             )}
 
+            {/* Ô Chọn ngày bất kỳ (HTML5 Date Input) */}
+            <div className="flex items-center gap-1.5 bg-slate-800/80 px-2.5 py-1 rounded-xl border border-indigo-500/40">
+              <span className="text-[11px] text-slate-300 font-medium">Chọn ngày khác:</span>
+              <input
+                type="date"
+                value={customDate}
+                onChange={(e) => {
+                  setCustomDate(e.target.value);
+                  if (e.target.value) {
+                    setDateFilterMode('custom');
+                  }
+                }}
+                className="bg-slate-900 text-cyan-200 text-xs px-2 py-0.5 rounded-lg font-bold focus:outline-none cursor-pointer border border-slate-700"
+              />
+            </div>
+
             {/* Nút: Xem tất cả các ngày */}
             <button
               type="button"
@@ -431,13 +415,13 @@ export const ClassResultsModal: React.FC<ClassResultsModalProps> = ({
           <div className="text-[11px] text-cyan-200 font-medium flex items-center gap-1.5">
             {effectiveFilterDate ? (
               <span>
-                Đang hiển thị kết quả: <strong className="text-white font-bold">{formatPracticeDateVi(effectiveFilterDate)}</strong>
+                Đang xem kết quả: <strong className="text-white font-bold">{formatPracticeDateVi(effectiveFilterDate)}</strong>
                 {dateFilterMode === 'latest' && <span className="ml-1 text-amber-300 font-semibold">(Tiết gần nhất)</span>}
                 <span className="text-slate-400 ml-1">({dateFilteredList.length} bài nộp)</span>
               </span>
             ) : (
               <span>
-                Đang hiển thị: <strong className="text-white font-bold">Toàn bộ các ngày thực hành</strong>
+                Đang xem: <strong className="text-white font-bold">Toàn bộ các ngày thực hành</strong>
                 <span className="text-slate-400 ml-1">({dateFilteredList.length} bài nộp)</span>
               </span>
             )}

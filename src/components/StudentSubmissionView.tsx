@@ -152,7 +152,36 @@ export const StudentSubmissionView: React.FC<StudentSubmissionViewProps> = ({
     return assign.gradeLevel === selectedGrade;
   });
 
+  // Kiểm tra điều kiện mở khóa bài thực hành:
+  // "Nguyên tắc là làm sản phẩm 1 chấm có điểm từ 5 trở lên mới được làm sản phẩm tiếp theo"
+  const getPrerequisiteStatus = (assignIndex: number) => {
+    if (isTeacher || assignIndex <= 0) {
+      return { isUnlocked: true, prevAssignment: null, prevScore: 0 };
+    }
+    const prevAssignment = displayedAssignments[assignIndex - 1];
+    if (!prevAssignment) {
+      return { isUnlocked: true, prevAssignment: null, prevScore: 0 };
+    }
+    // Tìm điểm số cao nhất của bài trước đó cho học sinh này / máy này
+    const prevSubs = mySubmissions.filter((s) => {
+      if (!s) return false;
+      if (s.assignmentId !== prevAssignment.id) return false;
+      if (userClassName && s.className !== userClassName) return false;
+      if (studentLeader && s.studentLeader.trim().toLowerCase() === studentLeader.trim().toLowerCase()) return true;
+      if (machineNumber && s.machineNumber === machineNumber) return true;
+      return false;
+    });
+
+    const maxScore = prevSubs.reduce((max, s) => Math.max(max, s.highestScore || 0), 0);
+    return {
+      isUnlocked: maxScore >= 5.0,
+      prevAssignment,
+      prevScore: maxScore,
+    };
+  };
+
   const currentAssignmentIndex = displayedAssignments.findIndex((a) => a.id === activeAssignmentId);
+  const currentPrerequisite = getPrerequisiteStatus(currentAssignmentIndex);
 
   const filteredDropdownAssignments = displayedAssignments.filter((assign) => {
     if (!productSearchTerm.trim()) return true;
@@ -309,6 +338,12 @@ export const StudentSubmissionView: React.FC<StudentSubmissionViewProps> = ({
     // 0. Kiểm tra quyền nộp bài
     if (!allowSubmission) {
       setErrorMsg('🔒 Giáo viên đang khóa nhận bài nộp. Thầy/Cô chưa bật cho phép nộp bài. Em hãy tiếp tục hoàn thiện trên máy nhé!');
+      return;
+    }
+
+    // 0.1 Kiểm tra nguyên tắc mở khóa bài thực hành (Sản phẩm trước phải đạt >= 5.0đ)
+    if (!currentPrerequisite.isUnlocked) {
+      setErrorMsg(`🔒 Bạn chưa đủ điều kiện nộp bài này! Nguyên tắc phòng máy: Cần hoàn thành và đạt từ 5.0 điểm trở lên ở bài "${currentPrerequisite.prevAssignment?.title}" trước. (Điểm bài trước hiện tại: ${currentPrerequisite.prevScore > 0 ? currentPrerequisite.prevScore + 'đ' : 'Chưa có điểm'}).`);
       return;
     }
 
@@ -493,11 +528,19 @@ export const StudentSubmissionView: React.FC<StudentSubmissionViewProps> = ({
                 <div className="max-h-56 overflow-y-auto space-y-1 pr-1 divide-y divide-slate-100">
                   {filteredDropdownAssignments.map((assign, idx) => {
                     const isSelected = assign.id === activeAssignmentId;
+                    const originalIndex = displayedAssignments.findIndex((a) => a.id === assign.id);
+                    const prereq = getPrerequisiteStatus(originalIndex);
+
                     return (
                       <button
                         key={assign.id}
                         type="button"
                         onClick={() => {
+                          if (!prereq.isUnlocked) {
+                            setErrorMsg(`🔒 Bài "${assign.title}" chưa mở khóa! Nguyên tắc phòng máy: Em cần hoàn thành bài "${prereq.prevAssignment?.title}" đạt từ 5.0 điểm trở lên trước. (Điểm bài trước: ${prereq.prevScore > 0 ? prereq.prevScore + 'đ' : 'Chưa có điểm'}).`);
+                            setIsProductDropdownOpen(false);
+                            return;
+                          }
                           onSelectAssignment(assign.id);
                           setIsProductDropdownOpen(false);
                           setProductSearchTerm('');
@@ -505,22 +548,37 @@ export const StudentSubmissionView: React.FC<StudentSubmissionViewProps> = ({
                         className={`w-full text-left p-2 rounded-xl transition-all flex items-center justify-between gap-2 cursor-pointer ${
                           isSelected
                             ? 'bg-blue-600 text-white font-black'
+                            : !prereq.isUnlocked
+                            ? 'bg-amber-50/50 hover:bg-amber-100/60 text-slate-700'
                             : 'hover:bg-blue-50 text-slate-800'
                         }`}
                       >
                         <div className="flex items-center gap-2 min-w-0">
                           <span
                             className={`w-6 h-6 rounded-lg flex items-center justify-center text-[10px] font-black shrink-0 ${
-                              isSelected ? 'bg-white/20 text-white' : 'bg-slate-100 text-slate-700'
+                              isSelected
+                                ? 'bg-white/20 text-white'
+                                : !prereq.isUnlocked
+                                ? 'bg-amber-200 text-amber-950'
+                                : 'bg-slate-100 text-slate-700'
                             }`}
                           >
-                            {idx + 1}
+                            {!prereq.isUnlocked ? '🔒' : originalIndex + 1}
                           </span>
-                          <span className="text-xs font-bold truncate">{assign.title}</span>
+                          <span className={`text-xs truncate ${!prereq.isUnlocked ? 'font-semibold text-slate-700' : 'font-bold'}`}>
+                            {assign.title}
+                          </span>
                         </div>
-                        <span className={`text-[10px] font-semibold shrink-0 ${isSelected ? 'text-blue-100' : 'text-slate-400'}`}>
-                          {assign.gradeLevel}
-                        </span>
+                        <div className="flex items-center gap-1.5 shrink-0">
+                          {!prereq.isUnlocked && (
+                            <span className="text-[10px] font-black px-1.5 py-0.5 rounded bg-amber-200 text-amber-950 border border-amber-300">
+                              Cần SP{originalIndex} ≥ 5đ
+                            </span>
+                          )}
+                          <span className={`text-[10px] font-semibold ${isSelected ? 'text-blue-100' : 'text-slate-400'}`}>
+                            {assign.gradeLevel}
+                          </span>
+                        </div>
                       </button>
                     );
                   })}
@@ -586,35 +644,78 @@ export const StudentSubmissionView: React.FC<StudentSubmissionViewProps> = ({
               type="file"
               ref={fileInputRef}
               onChange={handleFileChange}
+              disabled={!currentPrerequisite.isUnlocked}
               className="hidden"
               accept=".docx,.doc,.xlsx,.xls,.pptx,.ppt,.py,.cpp,.sb3,.html,.zip,.pdf,.png,.jpg,.jpeg"
             />
+
+            {/* Cảnh báo khi bài chưa mở khóa do bài trước chưa đạt >= 5.0đ */}
+            {!currentPrerequisite.isUnlocked && (
+              <div className="p-3 bg-amber-50 border-2 border-amber-300 rounded-2xl text-amber-950 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 text-xs animate-in fade-in">
+                <div className="flex items-start gap-2.5">
+                  <div className="w-8 h-8 rounded-xl bg-amber-200 text-amber-900 flex items-center justify-center shrink-0 font-black text-sm">
+                    🔒
+                  </div>
+                  <div>
+                    <div className="font-black text-amber-950 text-xs sm:text-sm">
+                      BÀI NÀY CHƯA MỞ KHÓA (CẦN ĐẠT ≥ 5.0Đ Ở BÀI TRƯỚC)
+                    </div>
+                    <div className="text-slate-700 mt-0.5 leading-relaxed">
+                      Nguyên tắc phòng máy: Em cần hoàn thành bài <strong>{currentPrerequisite.prevAssignment?.title}</strong> đạt từ <strong>5.0 điểm trở lên</strong> mới được làm bài tiếp theo. (Điểm hiện tại bài trước: <strong>{currentPrerequisite.prevScore > 0 ? `${currentPrerequisite.prevScore}đ` : 'Chưa có điểm'}</strong>).
+                    </div>
+                  </div>
+                </div>
+                {currentPrerequisite.prevAssignment && (
+                  <button
+                    type="button"
+                    onClick={() => onSelectAssignment(currentPrerequisite.prevAssignment!.id)}
+                    className="px-3 py-1.5 bg-amber-600 hover:bg-amber-700 text-white rounded-xl text-xs font-black shrink-0 transition cursor-pointer shadow-xs"
+                  >
+                    ← Làm bài trước ngay
+                  </button>
+                )}
+              </div>
+            )}
 
             {/* Vùng Drop Area nhỏ gọn kèm hình ảnh động Stitch */}
             {!selectedFile ? (
               <div
                 onDragOver={(e) => e.preventDefault()}
-                onDrop={handleDrop}
-                onClick={() => fileInputRef.current?.click()}
-                className="min-h-[90px] sm:min-h-[96px] border-2 border-dashed border-blue-300 hover:border-blue-500 hover:bg-blue-50/50 bg-slate-50/60 rounded-2xl flex items-center justify-center gap-3 sm:gap-4 transition-all cursor-pointer p-2.5 sm:p-3 text-center sm:text-left group"
+                onDrop={currentPrerequisite.isUnlocked ? handleDrop : undefined}
+                onClick={() => {
+                  if (!currentPrerequisite.isUnlocked) {
+                    setErrorMsg(`🔒 Bạn chưa thể nộp bài này! Cần hoàn thành bài "${currentPrerequisite.prevAssignment?.title}" đạt từ 5.0 điểm trở lên trước.`);
+                    return;
+                  }
+                  fileInputRef.current?.click();
+                }}
+                className={`min-h-[90px] sm:min-h-[96px] border-2 border-dashed rounded-2xl flex items-center justify-center gap-3 sm:gap-4 transition-all p-2.5 sm:p-3 text-center sm:text-left group ${
+                  !currentPrerequisite.isUnlocked
+                    ? 'border-amber-300 bg-amber-50/40 cursor-not-allowed opacity-85'
+                    : 'border-blue-300 hover:border-blue-500 hover:bg-blue-50/50 bg-slate-50/60 cursor-pointer'
+                }`}
               >
                 {/* Hình ảnh động Stitch cầm thư mục bài nộp */}
                 <div className="relative shrink-0 flex items-center justify-center">
                   <StitchUploadMascot className="w-14 h-14 sm:w-16 sm:h-16 group-hover:scale-110 transition-transform drop-shadow-md animate-bounce [animation-duration:2.5s]" />
-                  <span className="absolute -bottom-1 -right-1 w-5 h-5 rounded-full bg-blue-600 text-white flex items-center justify-center shadow-xs">
-                    <UploadCloud className="w-3 h-3" />
+                  <span className={`absolute -bottom-1 -right-1 w-5 h-5 rounded-full text-white flex items-center justify-center shadow-xs ${!currentPrerequisite.isUnlocked ? 'bg-amber-600' : 'bg-blue-600'}`}>
+                    {!currentPrerequisite.isUnlocked ? <Lock className="w-3 h-3" /> : <UploadCloud className="w-3 h-3" />}
                   </span>
                 </div>
 
                 <div className="min-w-0">
                   <div className="flex items-center gap-1.5 flex-wrap text-blue-700 font-black text-xs sm:text-sm sm:text-base">
-                    <span>Kéo thả tệp vào đây hoặc</span>
-                    <span className="underline decoration-2 text-indigo-700 hover:text-blue-900 font-black">
-                      Chọn tệp trên máy
-                    </span>
+                    <span>{!currentPrerequisite.isUnlocked ? 'Bài này đang tạm khóa' : 'Kéo thả tệp vào đây hoặc'}</span>
+                    {currentPrerequisite.isUnlocked && (
+                      <span className="underline decoration-2 text-indigo-700 hover:text-blue-900 font-black">
+                        Chọn tệp trên máy
+                      </span>
+                    )}
                   </div>
                   <p className="text-[11px] sm:text-xs text-slate-600 font-semibold mt-0.5">
-                    Stitch cùng AI sẽ đối chiếu từng bước và chấm điểm ngay cho em!
+                    {!currentPrerequisite.isUnlocked
+                      ? 'Hoàn thành bài trước đạt từ 5.0 điểm trở lên để mở khóa nộp bài này nhé!'
+                      : 'Stitch cùng AI sẽ đối chiếu từng bước và chấm điểm ngay cho em!'}
                   </p>
                   <span className="text-[10px] sm:text-[11px] text-slate-400 font-medium hidden sm:block">
                     Hỗ trợ: Word (.docx), Excel (.xlsx), PowerPoint (.pptx), Python (.py), Scratch (.sb3), HTML, Ảnh...
@@ -693,20 +794,27 @@ export const StudentSubmissionView: React.FC<StudentSubmissionViewProps> = ({
               </div>
             )}
 
-            {/* 5. NÚT CHẤM ĐIỂM AI (Gọn gàng, độ cao ~46px) */}
+            {/* 5. NÚT CHẤM ĐIỂM AI */}
             <button
               type="button"
-              disabled={isGrading || !allowSubmission}
+              disabled={isGrading || !allowSubmission || !currentPrerequisite.isUnlocked}
               onClick={handleGradeWithAI}
               className={`w-full py-3 px-4 rounded-xl font-black text-sm sm:text-base text-white flex items-center justify-center gap-2.5 shadow-md transition-all active:scale-[0.99] cursor-pointer ${
-                !allowSubmission
+                !currentPrerequisite.isUnlocked
+                  ? 'bg-amber-600/80 cursor-not-allowed opacity-90'
+                  : !allowSubmission
                   ? 'bg-slate-400 cursor-not-allowed opacity-90'
                   : isGrading
                   ? 'bg-blue-400 cursor-not-allowed'
                   : 'bg-gradient-to-r from-blue-600 via-indigo-600 to-cyan-600 hover:from-blue-700 hover:to-cyan-700 hover:shadow-lg'
               }`}
             >
-              {!allowSubmission ? (
+              {!currentPrerequisite.isUnlocked ? (
+                <>
+                  <Lock className="w-5 h-5 text-white" />
+                  <span>Chưa Mở Khóa (Cần Đạt ≥ 5.0đ Ở Bài Trước)</span>
+                </>
+              ) : !allowSubmission ? (
                 <>
                   <Lock className="w-5 h-5 text-white" />
                   <span>Đang Khóa Nộp Bài (Chờ Thầy/Cô Bật Quyền Nộp)</span>
