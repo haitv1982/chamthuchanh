@@ -256,6 +256,31 @@ export async function saveSettingsToCloud(settings: {
 }
 
 /**
+ * Tải cài đặt phiên thực hành (quyền nộp bài, mã pin...) trực tiếp từ Firebase Cloud Firestore
+ */
+export async function fetchSettingsFromCloud(): Promise<{
+  allowSubmission?: boolean;
+  teacherPin?: string;
+} | null> {
+  if (!db) return null;
+  try {
+    const settingsRef = doc(db, 'app_settings', 'session_config');
+    const snap = await getDoc(settingsRef);
+    if (snap.exists()) {
+      const data = snap.data();
+      return {
+        allowSubmission: typeof data.allowSubmission === 'boolean' ? data.allowSubmission : undefined,
+        teacherPin: typeof data.teacherPin === 'string' && data.teacherPin.trim() ? data.teacherPin.trim() : undefined,
+      };
+    }
+    return null;
+  } catch (err) {
+    console.warn('[Firebase Cloud] Lỗi đọc cài đặt phiên:', err);
+    return null;
+  }
+}
+
+/**
  * Lắng nghe cài đặt phiên thực hành thời gian thực từ Firebase Cloud
  */
 export function subscribeToSettingsCloud(
@@ -269,7 +294,7 @@ export function subscribeToSettingsCloud(
         const data = snap.data();
         onUpdate({
           allowSubmission: typeof data.allowSubmission === 'boolean' ? data.allowSubmission : undefined,
-          teacherPin: typeof data.teacherPin === 'string' ? data.teacherPin : undefined,
+          teacherPin: typeof data.teacherPin === 'string' && data.teacherPin.trim() ? data.teacherPin.trim() : undefined,
         });
       }
     });

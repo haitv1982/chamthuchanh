@@ -6,7 +6,6 @@
   "scripts": {
     "dev": "tsx server.ts",
     "build": "vite build",
-    "prestart": "node -e \"const fs=require('fs'); const cp=require('child_process'); if(!fs.existsSync('node_modules/vite')){ console.log('[Install Check] Dang tu dong cai dat thu vien phong may...'); cp.execSync('npm install', {stdio:'inherit'}); } if(!fs.existsSync('dist/index.html')){ console.log('[Build Check] Dang tao ban dist...'); cp.execSync('npx vite build', {stdio:'inherit'}); }\"",
     "start": "tsx server.ts",
     "preview": "vite preview",
     "clean": "rm -rf dist server.js",

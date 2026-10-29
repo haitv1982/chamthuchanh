@@ -19,12 +19,15 @@ import {
   AlertCircle,
   AlertTriangle,
   Volume2,
+  Download,
+  FolderDown,
 } from 'lucide-react';
 import { Submission, Assignment } from '../types';
 import { SCHOOL_CLASSES } from '../data/classes';
 import { apiFetch } from '../utils/apiConfig';
 import { realtimeSync } from '../utils/realtimeSync';
 import { playPlagiarismWarningSound } from '../utils/antiPlagiarism';
+import { isFirebaseReady, fetchSettingsFromCloud } from '../services/firebase';
 
 interface ProjectorLiveBoardProps {
   className: string;
@@ -219,30 +222,39 @@ export const ProjectorLiveBoard: React.FC<ProjectorLiveBoardProps> = ({
         setPinErrorMsg('Vui lòng nhập mã PIN Giáo viên.');
         return;
       }
-      const localPin = localStorage.getItem('labgrade_teacher_pin_v1') || '1234';
+      let expectedPin = localStorage.getItem('labgrade_teacher_pin_v1') || localStorage.getItem('labgrade_teacher_pin') || '1234';
+      if (isFirebaseReady) {
+        try {
+          const cloudSettings = await fetchSettingsFromCloud();
+          if (cloudSettings?.teacherPin) {
+            expectedPin = cloudSettings.teacherPin.trim();
+          }
+        } catch {}
+      }
+
       try {
         const verifyRes = await apiFetch('/api/verify-pin', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ pin: teacherPinInput.trim() }),
-        }, 5000);
+        }, 3000);
         const contentType = verifyRes.headers.get('content-type') || '';
         if (verifyRes.ok && contentType.includes('application/json')) {
           const vData = await verifyRes.json().catch(() => ({}));
           if (!vData.success) {
-            setPinErrorMsg(vData.error || 'Mã PIN Giáo viên không chính xác! (Mặc định: 1234).');
+            setPinErrorMsg(vData.error || 'Mã PIN Giáo viên không chính xác!');
             return;
           }
         } else {
-          // Đối chiếu cục bộ trên Vercel / GitHub Pages
-          if (teacherPinInput.trim() !== localPin) {
-            setPinErrorMsg('Mã PIN Giáo viên không chính xác! Mã PIN mặc định là 1234.');
+          // Đối chiếu với CSDL Đám mây / local
+          if (teacherPinInput.trim() !== expectedPin.trim()) {
+            setPinErrorMsg(expectedPin !== '1234' ? 'Mã PIN không chính xác! (Mã 1234 mặc định đã bị thay đổi trên đám mây).' : 'Mã PIN Giáo viên không chính xác! Mã PIN mặc định là 1234.');
             return;
           }
         }
-      } catch (err) {
-        if (teacherPinInput.trim() !== localPin) {
-          setPinErrorMsg('Mã PIN Giáo viên không chính xác! Mã PIN mặc định là 1234.');
+      } catch {
+        if (teacherPinInput.trim() !== expectedPin.trim()) {
+          setPinErrorMsg(expectedPin !== '1234' ? 'Mã PIN không chính xác! (Mã 1234 mặc định đã bị thay đổi trên đám mây).' : 'Mã PIN Giáo viên không chính xác! Mã PIN mặc định là 1234.');
           return;
         }
       }
@@ -269,6 +281,61 @@ export const ProjectorLiveBoard: React.FC<ProjectorLiveBoardProps> = ({
       if (onRefresh) onRefresh();
     } catch {}
     setIsClearing(false);
+  };
+
+  // Tải tệp sản phẩm bài làm của 1 máy về máy tính giáo viên
+  const handleDownloadSubmissionFile = (sub: Submission) => {
+    if (!sub || !Array.isArray(sub.attempts) || sub.attempts.length === 0) return;
+    const lastAttempt = sub.attempts[sub.attempts.length - 1];
+    const safeStudent = (sub.studentLeader || 'HocSinh').replace(/[/\\?%*:|"<>]/g, '_');
+    const safeMachine = (sub.machineNumber || 'May').replace(/\s+/g, '');
+    const safeClass = (sub.className || 'Lop').replace(/\s+/g, '');
+    const originalFileName = lastAttempt.fileName || 'SanPham.txt';
+    const finalDownloadName = `${safeClass}_${safeMachine}_${safeStudent}_${originalFileName}`;
+
+    if (lastAttempt.imageBase64 && lastAttempt.imageBase64.startsWith('data:')) {
+      const a = document.createElement('a');
+      a.href = lastAttempt.imageBase64;
+      a.download = finalDownloadName;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      return;
+    }
+
+    if (lastAttempt.fileContent) {
+      const blob = new Blob([lastAttempt.fileContent], { type: 'text/plain;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = finalDownloadName;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      return;
+    }
+
+    const summaryText = `BÀI NỘP THỰC HÀNH PHÒNG MÁY LABGRADE AI\n- Lớp: ${sub.className}\n- Vị trí: ${sub.machineNumber}\n- Học sinh: ${sub.studentLeader}\n- Điểm: ${sub.highestScore}đ\n- Thời gian nộp: ${sub.latestSubmittedAt}\n- Tên tệp gốc: ${lastAttempt.fileName} (${lastAttempt.fileSize} bytes)\n`;
+    const blob = new Blob([summaryText], { type: 'text/plain;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${safeClass}_${safeMachine}_${safeStudent}_ThongTin.txt`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
+  // Tải toàn bộ sản phẩm các máy trong lớp về máy tính giáo viên
+  const handleDownloadAllSubmissions = () => {
+    if (classSubmissions.length === 0) return;
+    classSubmissions.forEach((sub, idx) => {
+      setTimeout(() => {
+        handleDownloadSubmissionFile(sub);
+      }, idx * 250);
+    });
   };
 
   // Filter submissions by class (chỉ hiển thị bài nộp của ngày thực hành hôm nay, loại trừ hoàn toàn dữ liệu ảo các ngày trước)
@@ -406,6 +473,19 @@ export const ProjectorLiveBoard: React.FC<ProjectorLiveBoardProps> = ({
             <Trash2 className="w-4 h-4 text-rose-400" />
             <span className="hidden md:inline">Xóa Kết Quả Cũ</span>
           </button>
+
+          {/* Nút Lưu Toàn Bộ Bài Làm Của Lớp Về Máy Giáo Viên */}
+          {classSubmissions.length > 0 && (
+            <button
+              type="button"
+              onClick={handleDownloadAllSubmissions}
+              className="p-2.5 rounded-xl bg-slate-800 hover:bg-emerald-900/70 border border-slate-700 hover:border-emerald-600 text-emerald-300 transition-colors flex items-center gap-1.5 text-xs font-bold cursor-pointer"
+              title={`Lưu toàn bộ bài làm của ${classSubmissions.length} máy trong lớp về máy tính giáo viên`}
+            >
+              <FolderDown className="w-4 h-4 text-emerald-400" />
+              <span className="hidden md:inline">Lưu Tất Cả Bài ({classSubmissions.length})</span>
+            </button>
+          )}
 
           {onRefresh && (
             <button
@@ -591,16 +671,23 @@ export const ProjectorLiveBoard: React.FC<ProjectorLiveBoardProps> = ({
                     </span>
                     <span className="text-rose-400 uppercase text-[9px] font-mono">VI PHẠM</span>
                   </div>
-                ) : hasSubmitted ? (
-                  <div className="flex items-center justify-between text-[10px] text-slate-400 pt-1 border-t border-white/5">
-                    <span className="truncate">
-                      {submission?.latestSubmittedAt ? submission.latestSubmittedAt.slice(11, 16) : ''}
+                ) : hasSubmitted && submission ? (
+                  <div className="flex items-center justify-between text-[10px] text-slate-400 pt-1 border-t border-white/5 gap-1">
+                    <span className="truncate font-mono font-bold text-cyan-300" title={`Thời gian nộp: ${submission.latestSubmittedAt ? new Date(submission.latestSubmittedAt).toLocaleTimeString('vi-VN') : ''}`}>
+                      ⏱️ {submission.latestSubmittedAt ? new Date(submission.latestSubmittedAt).toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit', second: '2-digit' }) : ''}
                     </span>
-                    {hasMultipleGroups && (
-                      <span className="text-amber-400 font-bold" title="Có nhiều nhóm nộp từ máy này">
-                        ● Trùng máy
-                      </span>
-                    )}
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handleDownloadSubmissionFile(submission);
+                      }}
+                      className="px-1.5 py-0.5 rounded bg-cyan-950 hover:bg-cyan-700 border border-cyan-500/40 text-cyan-200 hover:text-white text-[10px] font-bold flex items-center gap-1 transition cursor-pointer shadow-xs shrink-0"
+                      title={`Lưu sản phẩm của ${machineId} (${submission.studentLeader}) về máy giáo viên`}
+                    >
+                      <Download className="w-3 h-3 text-cyan-300" />
+                      <span>Lưu bài</span>
+                    </button>
                   </div>
                 ) : null}
               </div>

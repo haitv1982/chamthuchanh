@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import {
   X,
   UserCheck,
@@ -16,8 +16,14 @@ import {
   RefreshCw,
   Edit2,
   Settings,
+  Search,
 } from 'lucide-react';
-import { SCHOOL_CLASSES, getClassesByGrade } from '../data/classes';
+import {
+  SCHOOL_CLASSES,
+  getClassesByGrade,
+  extractGradeDigit,
+  normalizeClassName,
+} from '../data/classes';
 import { StudentRecord } from '../types';
 import { parseStudentExcel } from '../utils/excelRosterParser';
 
@@ -36,6 +42,7 @@ interface StudentInfoModalProps {
   onChangeGroupMembers: (members: string[]) => void;
   onSavedNotice?: (msg: string) => void;
   roster?: StudentRecord[];
+  existingSubmissions?: any[];
   onSaveRoster?: (students: StudentRecord[], mode?: 'accumulate' | 'upsert' | 'replace') => Promise<{ success: boolean; total: number; classes: string[] }>;
   onDeleteRoster?: (className?: string) => Promise<boolean>;
   onRenameClass?: (oldName: string, newName: string) => Promise<boolean>;
@@ -65,6 +72,7 @@ export const StudentInfoModal: React.FC<StudentInfoModalProps> = ({
   groupMembers,
   onChangeGroupMembers,
   roster = [],
+  existingSubmissions = [],
   onSaveRoster,
   onDeleteRoster,
   onRenameClass,
@@ -73,7 +81,7 @@ export const StudentInfoModal: React.FC<StudentInfoModalProps> = ({
   isTeacher = false,
 }) => {
   const [tempGrade, setTempGrade] = useState(selectedGrade || 'Lớp 6');
-  const [tempClass, setTempClass] = useState(className || '6A2');
+  const [tempClass, setTempClass] = useState(className || '6A1');
   const [tempMachine, setTempMachine] = useState(machineNumber || 'Máy 01');
   const [tempLeader, setTempLeader] = useState(studentLeader || '');
   const [tempMembers, setTempMembers] = useState<string[]>(groupMembers || []);
@@ -83,6 +91,8 @@ export const StudentInfoModal: React.FC<StudentInfoModalProps> = ({
   const [isUploading, setIsUploading] = useState<boolean>(false);
   const [isActionLoading, setIsActionLoading] = useState<boolean>(false);
   const [isRefreshingRoster, setIsRefreshingRoster] = useState<boolean>(false);
+  const [searchStudentQuery, setSearchStudentQuery] = useState<string>('');
+  const [isManualNameMode, setIsManualNameMode] = useState<boolean>(false);
 
   // Modal xác nhận xóa danh sách lớp này
   const [isConfirmDeleteClassOpen, setIsConfirmDeleteClassOpen] = useState<boolean>(false);
@@ -93,11 +103,51 @@ export const StudentInfoModal: React.FC<StudentInfoModalProps> = ({
 
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  // Toàn bộ các lớp thực tế có học sinh trong CSDL kèm số lượng học sinh
+  const allRosterClassesWithCount = useMemo(() => {
+    const map = new Map<string, { rawClass: string; normalized: string; count: number; gradeDigit: string; gradeLabel: string }>();
+    roster.forEach((s) => {
+      const raw = (s.className || '').trim();
+      const norm = normalizeClassName(raw);
+      if (!norm) return;
+      const existing = map.get(norm);
+      if (existing) {
+        existing.count += 1;
+      } else {
+        const gradeDigit = extractGradeDigit(raw);
+        map.set(norm, {
+          rawClass: raw,
+          normalized: norm,
+          count: 1,
+          gradeDigit,
+          gradeLabel: gradeDigit ? `Lớp ${gradeDigit}` : 'Khác',
+        });
+      }
+    });
+    return Array.from(map.values()).sort((a, b) => a.normalized.localeCompare(b.normalized, 'vi', { numeric: true }));
+  }, [roster]);
+
   useEffect(() => {
     if (isOpen) {
       if (onRefreshRoster) onRefreshRoster();
-      setTempGrade(selectedGrade || 'Lớp 6');
-      setTempClass(className || '6A2');
+      
+      let initialGrade = selectedGrade || 'Lớp 6';
+      let initialClass = className || '6A1';
+
+      // Nếu máy học sinh chưa chọn tên (lần đầu vào) và lớp hiện tại (vd 6A2) không có học sinh,
+      // nhưng trong CSDL ĐÃ CÓ các lớp khác mà thầy cô vừa nạp (vd 8A1): TỰ ĐỘNG CHUYỂN SANG LỚP CÓ HỌC SINH!
+      const currentNorm = normalizeClassName(initialClass);
+      const currentClassHasStudents = roster.some((s) => normalizeClassName(s.className) === currentNorm);
+      if (!currentClassHasStudents && !studentLeader && allRosterClassesWithCount.length > 0) {
+        const firstAvailable = allRosterClassesWithCount[0];
+        initialClass = firstAvailable.rawClass;
+        if (firstAvailable.gradeDigit) {
+          initialGrade = `Lớp ${firstAvailable.gradeDigit}`;
+        }
+      }
+
+      setTempGrade(initialGrade);
+      setTempClass(initialClass);
       setTempMachine(machineNumber || 'Máy 01');
       setTempLeader(studentLeader || '');
       setTempMembers(groupMembers || []);
@@ -106,42 +156,59 @@ export const StudentInfoModal: React.FC<StudentInfoModalProps> = ({
       setUploadNotice(null);
       setIsConfirmDeleteClassOpen(false);
       setIsRenameClassOpen(false);
+      setIsManualNameMode(false);
+      setSearchStudentQuery('');
     }
-  }, [isOpen, selectedGrade, className, machineNumber, studentLeader, groupMembers]);
+  }, [isOpen, selectedGrade, className, machineNumber, studentLeader, groupMembers, allRosterClassesWithCount]);
 
   if (!isOpen) return null;
 
   // Lọc danh sách lớp học sinh phù hợp với khối đã chọn
+  const gradeDigit = extractGradeDigit(tempGrade);
   const defaultClasses = getClassesByGrade(tempGrade);
-  // Các lớp đã có danh sách trong hệ thống CSDL
-  const rosterClasses = Array.from(new Set(roster.map((s) => s.className)));
-  const combinedClasses = Array.from(
-    new Set([...defaultClasses, ...rosterClasses.filter((c) => {
-      if (tempGrade === 'Lớp 6') return c.startsWith('6');
-      if (tempGrade === 'Lớp 7') return c.startsWith('7');
-      if (tempGrade === 'Lớp 8') return c.startsWith('8');
-      if (tempGrade === 'Lớp 9') return c.startsWith('9');
-      return true;
-    })])
-  ).sort();
 
-  // Đổi khối thì tự động chọn lớp đầu tiên của khối đó
+  // Lấy các lớp từ CSDL phù hợp với khối đã chọn (hoặc tất cả nếu không xác định)
+  const matchedRosterClasses = allRosterClassesWithCount
+    .filter((c) => !gradeDigit || !c.gradeDigit || c.gradeDigit === gradeDigit)
+    .map((c) => c.rawClass);
+
+  // Gộp danh sách: lớp có học sinh được đưa lên trước
+  const combinedClasses = Array.from(
+    new Set([...matchedRosterClasses, ...defaultClasses])
+  ).sort((a, b) => {
+    const normA = normalizeClassName(a);
+    const normB = normalizeClassName(b);
+    const countA = roster.filter((s) => normalizeClassName(s.className) === normA).length;
+    const countB = roster.filter((s) => normalizeClassName(s.className) === normB).length;
+    if (countA > 0 && countB === 0) return -1;
+    if (countB > 0 && countA === 0) return 1;
+    return a.localeCompare(b, 'vi', { numeric: true });
+  });
+
+  // Đổi khối thì tự động chọn lớp có sẵn học sinh của khối đó hoặc lớp đầu tiên
   const handleGradeChange = (newGrade: string) => {
     setTempGrade(newGrade);
-    const classesForNewGrade = getClassesByGrade(newGrade);
-    const fallbackClass = classesForNewGrade[0] || (newGrade.includes('6') ? '6A2' : newGrade.includes('7') ? '7A2' : newGrade.includes('8') ? '8A2' : '9A2');
-    setTempClass(fallbackClass);
+    const newDigit = extractGradeDigit(newGrade);
+    const rosterInNewGrade = allRosterClassesWithCount.find((c) => c.gradeDigit === newDigit);
+    if (rosterInNewGrade) {
+      setTempClass(rosterInNewGrade.rawClass);
+    } else {
+      const classesForNewGrade = getClassesByGrade(newGrade);
+      setTempClass(classesForNewGrade[0] || (newDigit ? `${newDigit}A1` : '6A1'));
+    }
     setTempLeader('');
     setTempMembers([]);
     setErrorMsg(null);
+    setIsManualNameMode(false);
+    setSearchStudentQuery('');
   };
 
-  // Danh sách học sinh của lớp đang chọn (chuẩn hóa không phân biệt hoa thường và tiền tố 'Lớp')
+  // Danh sách học sinh của lớp đang chọn
+  const normalizedTempClass = normalizeClassName(tempClass);
   const classStudents = roster
     .filter((s) => {
-      const sCls = (s.className || '').trim().toUpperCase().replace(/^LỚP\s*|^LOP\s*/i, '');
-      const tCls = (tempClass || '').trim().toUpperCase().replace(/^LỚP\s*|^LOP\s*/i, '');
-      return sCls === tCls || (s.className || '').trim().toUpperCase() === (tempClass || '').trim().toUpperCase();
+      const sCls = normalizeClassName(s.className);
+      return sCls === normalizedTempClass || (s.className || '').trim().toUpperCase() === (tempClass || '').trim().toUpperCase();
     })
     .sort((a, b) => {
       const sttA = Number(a.stt) || 999;
@@ -149,6 +216,34 @@ export const StudentInfoModal: React.FC<StudentInfoModalProps> = ({
       if (sttA !== sttB) return sttA - sttB;
       return a.fullName.localeCompare(b.fullName, 'vi');
     });
+
+  const filteredStudents = classStudents.filter((s) => {
+    if (!searchStudentQuery.trim()) return true;
+    const q = searchStudentQuery.trim().toLowerCase();
+    return s.fullName.toLowerCase().includes(q) || String(s.stt) === q;
+  });
+
+  // Bản đồ các máy tính đã có học sinh nộp bài / đăng ký trong lớp hiện tại
+  const occupiedMachineMap = useMemo(() => {
+    const map = new Map<string, string>();
+    const normClass = normalizeClassName(tempClass);
+    if (Array.isArray(existingSubmissions)) {
+      existingSubmissions.forEach((sub: any) => {
+        if (normalizeClassName(sub.className) === normClass && sub.machineNumber && sub.studentLeader) {
+          map.set(sub.machineNumber.trim().toLowerCase(), sub.studentLeader);
+        }
+      });
+    }
+    return map;
+  }, [existingSubmissions, tempClass]);
+
+  const cleanCurrentMachine = (tempMachine || '').trim().toLowerCase();
+  const machineOccupant = occupiedMachineMap.get(cleanCurrentMachine);
+  const isDuplicateMachineOccupied = Boolean(
+    machineOccupant &&
+    tempLeader &&
+    machineOccupant.trim().toLowerCase() !== tempLeader.trim().toLowerCase()
+  );
 
   // Tải lên tệp Excel danh sách học sinh trực tiếp tại modal (CHỈ GIÁO VIÊN)
   const handleUploadExcelDirect = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -294,9 +389,14 @@ export const StudentInfoModal: React.FC<StudentInfoModalProps> = ({
       return;
     }
 
-    // 2. Kiểm tra Số máy
+    // 2. Kiểm tra Số máy & Chống Trùng Máy
     if (!tempMachine.trim()) {
       setErrorMsg('⚠️ Vui lòng chọn số máy tính đang ngồi.');
+      return;
+    }
+
+    if (isDuplicateMachineOccupied) {
+      setErrorMsg(`⚠️ TRÙNG SỐ MÁY: ${tempMachine} đã có bạn "${machineOccupant}" đăng ký trong lớp ${tempClass}! Bạn không thể chọn trùng số máy để tránh ghi đè bài làm của bạn khác. Vui lòng chọn đúng số máy thực tế của em.`);
       return;
     }
 
@@ -456,17 +556,29 @@ export const StudentInfoModal: React.FC<StudentInfoModalProps> = ({
                   setTempMachine(e.target.value);
                   setErrorMsg(null);
                 }}
-                className="w-full bg-slate-50 border-2 border-slate-200 focus:border-blue-500 focus:bg-white rounded-xl px-3.5 py-2.5 text-sm sm:text-base font-bold text-slate-900 transition outline-none cursor-pointer"
+                className={`w-full border-2 rounded-xl px-3.5 py-2.5 text-sm sm:text-base font-bold transition outline-none cursor-pointer ${
+                  isDuplicateMachineOccupied
+                    ? 'bg-rose-50 border-rose-400 text-rose-900 focus:ring-2 focus:ring-rose-400'
+                    : 'bg-slate-50 border-slate-200 focus:border-blue-500 focus:bg-white text-slate-900'
+                }`}
               >
                 {Array.from({ length: 45 }, (_, i) => {
                   const mStr = `Máy ${String(i + 1).padStart(2, '0')}`;
+                  const isOcc = occupiedMachineMap.has(mStr.toLowerCase());
+                  const occupant = occupiedMachineMap.get(mStr.toLowerCase());
                   return (
                     <option key={mStr} value={mStr}>
-                      {mStr}
+                      {mStr} {isOcc ? `• [Đã có: ${occupant}]` : '• [Trống]'}
                     </option>
                   );
                 })}
               </select>
+              {isDuplicateMachineOccupied && (
+                <p className="text-[11px] font-bold text-rose-600 flex items-center gap-1 mt-1">
+                  <AlertCircle className="w-3.5 h-3.5 shrink-0" />
+                  <span>Máy này đã có bạn "{machineOccupant}" nộp bài trong lớp {tempClass}.</span>
+                </p>
+              )}
             </div>
           </div>
 
@@ -552,82 +664,155 @@ export const StudentInfoModal: React.FC<StudentInfoModalProps> = ({
               </div>
             )}
 
-            {/* Dropdown danh sách học sinh */}
-            <select
-              value={tempLeader}
-              onChange={(e) => {
-                setTempLeader(e.target.value);
-                setErrorMsg(null);
-              }}
-              className={`w-full border-2 rounded-xl px-3.5 py-2.5 text-sm sm:text-base font-bold transition outline-none cursor-pointer ${
-                classStudents.length > 0
-                  ? 'bg-slate-50 border-slate-200 focus:border-blue-500 focus:bg-white text-slate-900'
-                  : 'bg-amber-50/60 border-amber-300 text-amber-900'
-              }`}
-            >
-              {classStudents.length > 0 ? (
-                <>
-                  <option value="">-- Nháy vào đây để chọn tên em trong danh sách lớp {tempClass} --</option>
-                  {classStudents.map((s, idx) => (
+            {/* Thanh tìm kiếm nhanh học sinh khi danh sách có người */}
+            {classStudents.length > 0 && !isManualNameMode && (
+              <div className="relative">
+                <input
+                  type="text"
+                  value={searchStudentQuery}
+                  onChange={(e) => setSearchStudentQuery(e.target.value)}
+                  placeholder="🔍 Gõ tên hoặc STT để tìm nhanh trong danh sách..."
+                  className="w-full text-xs py-2 pl-8 pr-8 bg-slate-50 border border-slate-200 rounded-xl text-slate-800 placeholder-slate-400 focus:bg-white focus:border-blue-400 outline-none transition"
+                />
+                <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-3 pointer-events-none" />
+                {searchStudentQuery && (
+                  <button
+                    type="button"
+                    onClick={() => setSearchStudentQuery('')}
+                    className="absolute right-2.5 top-2.5 text-slate-400 hover:text-slate-600 text-xs font-bold"
+                  >
+                    ✕
+                  </button>
+                )}
+              </div>
+            )}
+
+            {/* Chọn từ danh sách học sinh hoặc tự nhập nếu chưa có */}
+            {classStudents.length > 0 && !isManualNameMode ? (
+              <div className="space-y-1.5">
+                <select
+                  value={tempLeader}
+                  onChange={(e) => {
+                    const val = e.target.value;
+                    if (val === '__manual_input__') {
+                      setIsManualNameMode(true);
+                      setTempLeader('');
+                    } else {
+                      setTempLeader(val);
+                    }
+                    setErrorMsg(null);
+                  }}
+                  className="w-full border-2 rounded-xl px-3.5 py-2.5 text-sm sm:text-base font-bold transition outline-none cursor-pointer bg-slate-50 border-slate-200 focus:border-blue-500 focus:bg-white text-slate-900"
+                >
+                  <option value="">
+                    -- Nháy vào đây để chọn tên em trong danh sách lớp {tempClass} ({classStudents.length} HS) --
+                  </option>
+                  {filteredStudents.map((s, idx) => (
                     <option key={idx} value={s.fullName}>
                       {s.stt ? `${s.stt}. ` : ''}{s.fullName}
                     </option>
                   ))}
-                </>
-              ) : (
-                <option value="">
-                  -- Chưa có danh sách học sinh lớp {tempClass} --
-                </option>
-              )}
-            </select>
+                  <option value="__manual_input__">
+                    ✏️ [Tự nhập tên khác nếu em chưa có tên trong danh sách]
+                  </option>
+                </select>
+                <div className="flex items-center justify-between text-[11px] text-slate-500 px-1">
+                  <span>{filteredStudents.length}/{classStudents.length} học sinh phù hợp</span>
+                  <button
+                    type="button"
+                    onClick={() => setIsManualNameMode(true)}
+                    className="text-blue-600 hover:underline font-bold"
+                  >
+                    Chưa có tên em? Bấm để tự nhập
+                  </button>
+                </div>
+              </div>
+            ) : (
+              /* Ô tự nhập tên khi lớp chưa có danh sách hoặc học sinh muốn tự gõ */
+              <div className="space-y-2">
+                <div className="relative">
+                  <input
+                    type="text"
+                    value={tempLeader}
+                    onChange={(e) => {
+                      setTempLeader(e.target.value);
+                      setErrorMsg(null);
+                    }}
+                    placeholder={`Nhập đầy đủ Họ và Tên của em (Lớp ${tempClass})...`}
+                    className="w-full bg-white border-2 border-amber-400 focus:border-blue-500 rounded-xl px-3.5 py-2.5 text-sm sm:text-base font-bold text-slate-900 transition outline-none shadow-xs"
+                  />
+                  {classStudents.length > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => setIsManualNameMode(false)}
+                      className="absolute right-2.5 top-2.5 text-xs text-blue-600 hover:text-blue-800 font-bold px-2 py-0.5 bg-blue-50 rounded-lg"
+                    >
+                      Quay lại danh sách
+                    </button>
+                  )}
+                </div>
+                {classStudents.length === 0 && (
+                  <p className="text-[11px] text-amber-800 font-medium leading-relaxed">
+                    ℹ️ Lớp {tempClass} chưa được nạp danh sách sẵn trên hệ thống. Em vẫn có thể tự gõ Họ và Tên vào ô trên để nộp bài và chấm điểm bình thường!
+                  </p>
+                )}
+              </div>
+            )}
 
-            {/* Khu vực nạp tệp Excel (chỉ Giáo viên) hoặc thông báo nhắc nhở (đối với Học sinh) */}
+            {/* Khi lớp này chưa có học sinh, gợi ý các lớp ĐÃ CÓ trong CSDL */}
             {classStudents.length === 0 && (
-              isTeacher ? (
-                <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-2xl space-y-2.5">
-                  <div className="flex items-center justify-between flex-wrap gap-2 text-xs">
-                    <span className="font-bold text-slate-700 flex items-center gap-1">
-                      <FileSpreadsheet className="w-4 h-4 text-emerald-600" />
-                      <span>Lớp {tempClass} chưa có danh sách trong hệ thống:</span>
-                    </span>
-                    <div className="flex items-center gap-1.5 flex-wrap">
-                      <input
-                        type="file"
-                        ref={fileInputRef}
-                        accept=".xlsx,.xls,.csv"
-                        className="hidden"
-                        onChange={handleUploadExcelDirect}
-                      />
-                      <button
-                        type="button"
-                        disabled={isUploading}
-                        onClick={() => fileInputRef.current?.click()}
-                        className="px-2.5 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg font-bold text-xs flex items-center gap-1 transition shadow-xs cursor-pointer active:scale-95"
-                      >
-                        {isUploading ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <UploadCloud className="w-3.5 h-3.5" />}
-                        <span>Tải Excel (3 Cột)</span>
-                      </button>
-                      <button
-                        type="button"
-                        disabled={isUploading}
-                        onClick={handleLoadDemoRoster}
-                        className="px-2.5 py-1.5 bg-blue-50 hover:bg-blue-100 text-blue-700 border border-blue-200 rounded-lg font-bold text-xs flex items-center gap-1 transition cursor-pointer"
-                      >
-                        <Sparkles className="w-3.5 h-3.5 text-blue-600" />
-                        <span>Nạp DS Mẫu</span>
-                      </button>
+              <div className="space-y-2 pt-1">
+                {allRosterClassesWithCount.length > 0 ? (
+                  <div className="p-3 bg-blue-50/90 border border-blue-200 rounded-2xl space-y-2 text-xs">
+                    <div className="font-bold text-blue-900 flex items-center justify-between gap-1 flex-wrap">
+                      <span className="flex items-center gap-1.5">
+                        <Sparkles className="w-4 h-4 text-blue-600 shrink-0" />
+                        <span>Có thể em chọn nhầm lớp? Các lớp ĐÃ CÓ danh sách học sinh:</span>
+                      </span>
+                      {onRefreshRoster && (
+                        <button
+                          type="button"
+                          disabled={isRefreshingRoster}
+                          onClick={async () => {
+                            setIsRefreshingRoster(true);
+                            await onRefreshRoster();
+                            setTimeout(() => setIsRefreshingRoster(false), 800);
+                          }}
+                          className="text-[11px] text-blue-700 hover:text-blue-900 font-bold flex items-center gap-1"
+                        >
+                          <RefreshCw className={`w-3 h-3 ${isRefreshingRoster ? 'animate-spin' : ''}`} />
+                          <span>Làm mới</span>
+                        </button>
+                      )}
+                    </div>
+                    <div className="flex items-center gap-2 flex-wrap pt-0.5">
+                      {allRosterClassesWithCount.map((rc) => (
+                        <button
+                          key={rc.normalized}
+                          type="button"
+                          onClick={() => {
+                            setTempGrade(rc.gradeLabel);
+                            setTempClass(rc.rawClass);
+                            setTempLeader('');
+                            setTempMembers([]);
+                            setErrorMsg(null);
+                            setIsManualNameMode(false);
+                            setSearchStudentQuery('');
+                          }}
+                          className="px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl font-bold text-xs shadow-xs transition cursor-pointer flex items-center gap-1.5 active:scale-95"
+                          title={`Bấm để chọn ngay Lớp ${rc.rawClass} (${rc.count} học sinh)`}
+                        >
+                          <span>👉 Lớp {rc.rawClass}</span>
+                          <span className="bg-white/25 px-1.5 py-0.2 rounded text-[10px] font-mono">{rc.count} HS</span>
+                        </button>
+                      ))}
                     </div>
                   </div>
-                  <p className="text-[11px] text-slate-500 leading-relaxed">
-                    💡 Thầy/Cô chỉ cần tải file Excel gồm 3 cột (TT, Họ và tên, Lớp). Mỗi lớp sẽ tự động lưu vào CSDL riêng, không bị ghi đè.
-                  </p>
-                </div>
-              ) : (
-                <div className="p-3 bg-amber-50/90 border border-amber-300 rounded-2xl text-xs text-amber-900 font-medium space-y-2">
-                  <div className="flex items-center justify-between gap-2">
-                    <div className="flex items-center gap-2">
+                ) : (
+                  <div className="p-3 bg-amber-50 border border-amber-200 rounded-2xl flex items-center justify-between gap-2 text-xs text-amber-900">
+                    <div className="flex items-center gap-1.5">
                       <AlertCircle className="w-4 h-4 text-amber-600 shrink-0" />
-                      <span>Lớp {tempClass} chưa có danh sách học sinh.</span>
+                      <span>Hệ thống chưa tải danh sách lớp nào từ đám mây.</span>
                     </div>
                     {onRefreshRoster && (
                       <button
@@ -638,45 +823,18 @@ export const StudentInfoModal: React.FC<StudentInfoModalProps> = ({
                           await onRefreshRoster();
                           setTimeout(() => setIsRefreshingRoster(false), 800);
                         }}
-                        className="px-2.5 py-1 bg-amber-200 hover:bg-amber-300 text-amber-950 font-bold rounded-lg text-xs flex items-center gap-1 transition cursor-pointer shrink-0 disabled:opacity-50"
-                        title="Bấm để đồng bộ tức thì nếu Thầy/Cô vừa cập nhật danh sách lớp"
+                        className="px-2.5 py-1 bg-amber-200 hover:bg-amber-300 text-amber-950 font-bold rounded-lg transition cursor-pointer shrink-0"
                       >
-                        <RefreshCw className={`w-3.5 h-3.5 ${isRefreshingRoster ? 'animate-spin' : ''}`} />
-                        <span>{isRefreshingRoster ? 'Đang đồng bộ...' : 'Làm mới CSDL'}</span>
+                        {isRefreshingRoster ? 'Đang đồng bộ...' : 'Đồng bộ CSDL'}
                       </button>
                     )}
                   </div>
-                  {combinedClasses.filter((c) => roster.some((s) => s.className.toUpperCase() === c.toUpperCase()) && c !== tempClass).length > 0 && (
-                    <div className="pt-1.5 border-t border-amber-200/80 flex items-center gap-1.5 flex-wrap">
-                      <span className="text-[11px] text-amber-800 font-bold">Các lớp đã có danh sách:</span>
-                      {combinedClasses
-                        .filter((c) => roster.some((s) => s.className.toUpperCase() === c.toUpperCase()) && c !== tempClass)
-                        .map((c) => {
-                          const count = roster.filter((s) => s.className.toUpperCase() === c.toUpperCase()).length;
-                          return (
-                            <button
-                              key={c}
-                              type="button"
-                              onClick={() => {
-                                setTempClass(c);
-                                setTempLeader('');
-                                setTempMembers([]);
-                                setErrorMsg(null);
-                              }}
-                              className="px-2 py-0.5 bg-amber-200/70 hover:bg-amber-300 text-amber-950 rounded-md font-bold text-[11px] cursor-pointer"
-                            >
-                              Lớp {c} ({count} HS)
-                            </button>
-                          );
-                        })}
-                    </div>
-                  )}
-                </div>
-              )
+                )}
+              </div>
             )}
           </div>
 
-          {/* 4. CHỌN BẠN CÙNG NHÓM (CHỈ CHỌN TỪ DANH SÁCH LỚP) */}
+          {/* 4. CHỌN BẠN CÙNG NHÓM (CHỌN TỪ DANH SÁCH HOẶC GÕ TÊN) */}
           <div className="space-y-2 pt-1 border-t border-slate-100">
             <div className="flex items-center justify-between">
               <label className="text-xs sm:text-sm font-black uppercase tracking-wider text-slate-700 flex items-center gap-1.5">
@@ -688,30 +846,41 @@ export const StudentInfoModal: React.FC<StudentInfoModalProps> = ({
               </span>
             </div>
 
-            {/* Chọn thành viên nhóm từ Dropdown danh sách lớp */}
+            {/* Chọn thành viên nhóm từ Dropdown danh sách lớp hoặc gõ tên trực tiếp */}
             <div className="flex items-center gap-2">
-              <select
-                value={selectedGroupMemberOption}
-                onChange={(e) => setSelectedGroupMemberOption(e.target.value)}
-                disabled={classStudents.length === 0}
-                className="flex-1 bg-slate-50 border-2 border-slate-200 focus:border-blue-500 focus:bg-white rounded-xl px-3 py-2 text-xs sm:text-sm font-bold text-slate-900 transition outline-none disabled:opacity-50 cursor-pointer"
-              >
-                <option value="">
-                  {classStudents.length > 0
-                    ? `-- Chọn bạn cùng nhóm trong lớp ${tempClass} --`
-                    : `-- Cần tải danh sách lớp ${tempClass} trước để chọn bạn cùng nhóm --`}
-                </option>
-                {classStudents
-                  .filter((s) => s.fullName !== tempLeader && !tempMembers.includes(s.fullName))
-                  .map((s, idx) => (
-                    <option key={idx} value={s.fullName}>
-                      {s.stt ? `${s.stt}. ` : ''}{s.fullName}
-                    </option>
-                  ))}
-              </select>
+              {classStudents.length > 0 ? (
+                <select
+                  value={selectedGroupMemberOption}
+                  onChange={(e) => setSelectedGroupMemberOption(e.target.value)}
+                  className="flex-1 bg-slate-50 border-2 border-slate-200 focus:border-blue-500 focus:bg-white rounded-xl px-3 py-2 text-xs sm:text-sm font-bold text-slate-900 transition outline-none cursor-pointer"
+                >
+                  <option value="">-- Chọn bạn cùng nhóm trong lớp {tempClass} --</option>
+                  {classStudents
+                    .filter((s) => s.fullName !== tempLeader && !tempMembers.includes(s.fullName))
+                    .map((s, idx) => (
+                      <option key={idx} value={s.fullName}>
+                        {s.stt ? `${s.stt}. ` : ''}{s.fullName}
+                      </option>
+                    ))}
+                </select>
+              ) : (
+                <input
+                  type="text"
+                  value={selectedGroupMemberOption}
+                  onChange={(e) => setSelectedGroupMemberOption(e.target.value)}
+                  placeholder="Gõ tên bạn cùng nhóm (nếu làm bài theo nhóm)..."
+                  className="flex-1 bg-white border-2 border-slate-200 focus:border-blue-500 rounded-xl px-3 py-2 text-xs sm:text-sm font-bold text-slate-900 transition outline-none"
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      e.preventDefault();
+                      handleAddMember();
+                    }
+                  }}
+                />
+              )}
               <button
                 type="button"
-                disabled={!selectedGroupMemberOption}
+                disabled={!selectedGroupMemberOption.trim()}
                 onClick={handleAddMember}
                 className="px-3.5 py-2 bg-blue-600 hover:bg-blue-700 disabled:opacity-40 text-white rounded-xl text-xs sm:text-sm font-bold flex items-center gap-1 transition shadow-xs cursor-pointer shrink-0"
               >

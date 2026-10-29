@@ -37,14 +37,22 @@ echo Node.js: DA SAN SANG!
 call node -v
 echo.
 
-echo [2/3] Kiem tra thu vien he thong...
-if exist "node_modules\vite" goto modules_ok
-if exist "node_modules\tsx" goto modules_ok
+echo [2/3] Kiem tra thu vien he thong (node_modules)...
+if not exist "node_modules\vite" goto do_install
+if not exist "node_modules\tsx" goto do_install
+if not exist "node_modules\express" goto do_install
+goto modules_ok
 
-echo Dang cai dat thu vien phong may (chi chay lan dau tien, vui long cho 1-2 phut)...
+:do_install
+echo.
+echo =========================================================================
+echo [THONG BAO] He thong phat hien chua cai thu vien phong may (node_modules).
+echo Dang tu dong cai dat thu vien (chi mat 1-2 phut, vui long cho)...
+echo =========================================================================
+echo.
 call npm install
 if %errorlevel% neq 0 (
-    echo [CANH BAO] npm install gap su co. Dang thu lai voi --legacy-peer-deps...
+    echo [CANH BAO] npm install gap loi nhe, dang thu cai lai voi --legacy-peer-deps...
     call npm install --legacy-peer-deps
 )
 
@@ -64,13 +72,7 @@ echo Vi du neu IPv4 la 192.168.1.15 thi link la: http://192.168.1.15:3000
 echo.
 echo Dang khoi dong may chu... Vui long khong tat cua so nay trong tiet hoc!
 echo -------------------------------------------------------------------------
-call npm start
-
-if %errorlevel% neq 0 (
-    echo.
-    echo [THONG BAO] npm start gap su co, dang chuyen sang chay truc tiep...
-    call npx tsx server.ts
-)
+call npx tsx server.ts
 
 echo.
 pause

@@ -68,6 +68,7 @@ export interface SubmissionAttempt {
   timestamp: string;
   fileName: string;
   fileSize: number;
+  fileLastModified?: number; // Thời gian khởi tạo/lưu tệp trên máy tính (millisecond)
   fileContent?: string;
   imageBase64?: string; // Dữ liệu ảnh sản phẩm để AI chấm trực quan (Vision)
   score: number;

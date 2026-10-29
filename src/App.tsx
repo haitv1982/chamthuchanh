@@ -7,7 +7,7 @@ import { ClassResultsModal } from './components/ClassResultsModal';
 import { ProjectorLiveBoard } from './components/ProjectorLiveBoard';
 import { DEFAULT_ASSIGNMENTS } from './data/defaultAssignments';
 import { INITIAL_SUBMISSIONS } from './data/mockSubmissions';
-import { SCHOOL_CLASSES } from './data/classes';
+import { SCHOOL_CLASSES, normalizeClassName, extractGradeDigit } from './data/classes';
 import { Assignment, Submission, SubmissionAttempt, StudentRecord } from './types';
 import {
   exportSubmissionsToExcel,
@@ -41,6 +41,7 @@ import {
   fetchRosterFromCloud,
   subscribeToRosterCloud,
   saveSettingsToCloud,
+  fetchSettingsFromCloud,
   subscribeToSettingsCloud,
 } from './services/firebase';
 
@@ -218,7 +219,36 @@ export default function App() {
 
   useEffect(() => {
     fetchRosterLatest();
+    // Thử lại sau 2.5s và 6s để đảm bảo các máy mạng chậm hoặc máy học sinh tải trang đều nhận được danh sách
+    const t1 = setTimeout(() => fetchRosterLatest(), 2500);
+    const t2 = setTimeout(() => fetchRosterLatest(), 6000);
+    return () => {
+      clearTimeout(t1);
+      clearTimeout(t2);
+    };
   }, []);
+
+  // Tự động nhận diện lớp đang có học sinh trong CSDL khi máy học sinh mới truy cập lần đầu
+  useEffect(() => {
+    if (studentRoster.length > 0 && !studentLeader) {
+      const currentNorm = normalizeClassName(userClassName);
+      const hasCurrent = studentRoster.some((s) => normalizeClassName(s.className) === currentNorm);
+      if (!hasCurrent) {
+        const firstStudentClass = studentRoster[0]?.className;
+        if (firstStudentClass) {
+          setUserClassName(firstStudentClass);
+          try {
+            localStorage.setItem(STORAGE_KEY_CLASS, firstStudentClass);
+            const digit = extractGradeDigit(firstStudentClass);
+            if (digit) {
+              setSelectedGrade(`Lớp ${digit}`);
+              localStorage.setItem('labgrade_selected_grade', `Lớp ${digit}`);
+            }
+          } catch {}
+        }
+      }
+    }
+  }, [studentRoster, studentLeader, userClassName]);
 
   // Role: 'teacher' (Giáo viên) vs 'student' (Học sinh) - Mặc định trên máy mới là Học sinh (chỉ chuyển Giáo viên khi nhập mã PIN)
   const [isTeacherRole, setIsTeacherRole] = useState<boolean>(() => {
@@ -300,9 +330,12 @@ export default function App() {
         setAllowSubmission(event.allow);
       } else if (event.type === 'TEACHER_PIN_CHANGED') {
         console.log('[Bảo Mật] Mã PIN giáo viên đã được đổi trên máy chủ CSDL.');
-        try {
-          localStorage.removeItem('labgrade_teacher_pin_v1');
-        } catch {}
+        if (event.newPin) {
+          try {
+            localStorage.setItem('labgrade_teacher_pin_v1', event.newPin);
+            localStorage.setItem('labgrade_teacher_pin', event.newPin);
+          } catch {}
+        }
       }
     });
 
@@ -322,6 +355,12 @@ export default function App() {
             setSubmissions([]);
             saveSubmissionsSafely([]);
           }
+          if (event.data?.type === 'TEACHER_PIN_CHANGED' && event.data.newPin) {
+            try {
+              localStorage.setItem('labgrade_teacher_pin_v1', event.data.newPin);
+              localStorage.setItem('labgrade_teacher_pin', event.data.newPin);
+            } catch {}
+          }
         };
       } catch {}
     }
@@ -332,6 +371,24 @@ export default function App() {
     let unsubCloudSettings: (() => void) | null = null;
 
     if (isFirebaseReady) {
+      // Tải cài đặt và mã PIN mới nhất từ đám mây khi khởi động
+      fetchSettingsFromCloud().then((cloudSettings) => {
+        if (!cloudSettings) return;
+        if (typeof cloudSettings.allowSubmission === 'boolean') {
+          setAllowSubmission(cloudSettings.allowSubmission);
+          try {
+            localStorage.setItem('labgrade_allow_submission', String(cloudSettings.allowSubmission));
+          } catch {}
+        }
+        if (typeof cloudSettings.teacherPin === 'string' && cloudSettings.teacherPin.trim()) {
+          const pin = cloudSettings.teacherPin.trim();
+          try {
+            localStorage.setItem('labgrade_teacher_pin_v1', pin);
+            localStorage.setItem('labgrade_teacher_pin', pin);
+          } catch {}
+        }
+      }).catch(() => {});
+
       unsubCloudSubs = subscribeToSubmissionsCloud((cloudSubs) => {
         if (Array.isArray(cloudSubs)) {
           setSubmissions((prev) => {
@@ -367,6 +424,13 @@ export default function App() {
           setAllowSubmission(cloudSettings.allowSubmission);
           try {
             localStorage.setItem('labgrade_allow_submission', String(cloudSettings.allowSubmission));
+          } catch {}
+        }
+        if (typeof cloudSettings.teacherPin === 'string' && cloudSettings.teacherPin.trim()) {
+          const pin = cloudSettings.teacherPin.trim();
+          try {
+            localStorage.setItem('labgrade_teacher_pin_v1', pin);
+            localStorage.setItem('labgrade_teacher_pin', pin);
           } catch {}
         }
       });
@@ -800,6 +864,7 @@ export default function App() {
     groupMembers: string[];
     fileName: string;
     fileSize: number;
+    fileLastModified?: number;
     fileContent: string;
     imageBase64?: string;
   }): Promise<SubmissionAttempt | null> => {
@@ -861,6 +926,7 @@ export default function App() {
           assignment: currentAssignment,
           fileName: data.fileName,
           fileSize: data.fileSize,
+          fileLastModified: data.fileLastModified,
           fileContent: data.fileContent,
           imageBase64: data.imageBase64,
           attemptNumber,
@@ -893,6 +959,7 @@ export default function App() {
           studentLeader: data.studentLeader,
           fileName: data.fileName,
           fileSize: data.fileSize,
+          fileLastModified: data.fileLastModified,
           fileContent: data.fileContent,
           imageBase64: data.imageBase64,
         },
@@ -977,6 +1044,7 @@ export default function App() {
       timestamp: new Date().toISOString(),
       fileName: data.fileName,
       fileSize: data.fileSize,
+      fileLastModified: data.fileLastModified,
       fileContent: data.fileContent,
       imageBase64: data.imageBase64,
       score: gradeData.score,
@@ -1271,6 +1339,7 @@ export default function App() {
           } catch {}
         }}
         roster={studentRoster}
+        existingSubmissions={submissions}
         onSaveRoster={handleSaveStudentRoster}
         onDeleteRoster={handleDeleteStudentRoster}
         onRenameClass={handleRenameStudentClass}

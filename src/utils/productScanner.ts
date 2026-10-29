@@ -328,12 +328,32 @@ export function scanAndGradeProduct(params: {
   // Tính tỷ lệ liên quan nội dung (0 - 100%)
   let contentScorePercent = 0;
   let isOffTopic = false;
+  const imageBase64Length = (imageBase64 || '').length;
 
   if (isImageSubmission && isImageExpected) {
-    // TỆP HÌNH ẢNH SƠ ĐỒ HỢP LỆ: Công nhận sản phẩm đồ họa của học sinh
-    isOffTopic = false;
-    contentScorePercent = 95;
-    structure.formatScorePercent = 95;
+    // TỆP HÌNH ẢNH SƠ ĐỒ / SẢN PHẨM ĐỒ HỌA:
+    // Kiểm tra độ phong phú dựa trên kích thước và dung lượng byte thực tế của ảnh
+    if (imageBase64Length < 8000) {
+      // Dưới 6KB: Ảnh rỗng, icon nhỏ hoặc vẽ quẹt sơ sài
+      isOffTopic = false;
+      contentScorePercent = 25;
+      structure.formatScorePercent = 30;
+    } else if (imageBase64Length < 35000) {
+      // 6KB - 25KB: Ảnh mức độ cơ bản, còn sơ sài
+      isOffTopic = false;
+      contentScorePercent = 60;
+      structure.formatScorePercent = 65;
+    } else if (imageBase64Length < 75000) {
+      // 25KB - 55KB: Ảnh đầy đủ, tương đối chi tiết
+      isOffTopic = false;
+      contentScorePercent = 82;
+      structure.formatScorePercent = 85;
+    } else {
+      // Trên 55KB: Ảnh đồ họa chất lượng cao, đầy đủ thành phần
+      isOffTopic = false;
+      contentScorePercent = 92;
+      structure.formatScorePercent = 94;
+    }
   } else {
     const totalCore = coreTerms.length;
     if (totalCore > 0) {
@@ -341,22 +361,28 @@ export function scanAndGradeProduct(params: {
       const secondaryBonus = Math.min(25, secondaryMatches * 5);
       contentScorePercent = Math.round(coreRatio * 75 + secondaryBonus);
 
-      // Phát hiện tệp lạc đề / nộp nhầm bài Word khác / tệp rỗng
-      if (structure.wordCount > 15 && coreMatches === 0 && secondaryMatches <= 1) {
+      // Phát hiện tệp quá sơ sài / làm đối phó / tệp rỗng / lạc đề
+      if (structure.wordCount < 15 && !['png', 'jpg', 'jpeg', 'sb3'].includes(ext)) {
+        isOffTopic = true;
+        contentScorePercent = 15;
+      } else if (structure.wordCount < 40 && !['png', 'jpg', 'jpeg', 'sb3', 'xlsx'].includes(ext)) {
+        // Bài văn bản Word nhưng chỉ gõ dưới 40 từ: sơ sài
+        contentScorePercent = Math.min(45, contentScorePercent);
+      } else if (structure.wordCount > 15 && coreMatches === 0 && secondaryMatches <= 1) {
         isOffTopic = true;
         contentScorePercent = Math.min(20, contentScorePercent);
-      } else if (structure.wordCount < 10 && !['png', 'jpg', 'jpeg', 'sb3'].includes(ext)) {
-        isOffTopic = true;
-        contentScorePercent = 10;
       }
     } else {
       // Nếu bài tập không định nghĩa sẵn từ khóa chuyên biệt (ví dụ code Python hoặc Scratch)
       if (assignment.subjectType === 'python') {
         const hasPyOps = normContent.includes('input') || normContent.includes('print') || normContent.includes('for') || normContent.includes('def');
-        contentScorePercent = hasPyOps ? 80 : 30;
+        contentScorePercent = hasPyOps ? (normContent.length > 150 ? 85 : 55) : 25;
         isOffTopic = !hasPyOps && structure.wordCount > 10;
+      } else if (assignment.subjectType === 'excel') {
+        const hasFormulas = normContent.includes('=') || normContent.includes('sum') || normContent.includes('average') || normContent.includes('if');
+        contentScorePercent = hasFormulas ? 85 : (structure.wordCount > 30 ? 55 : 35);
       } else {
-        contentScorePercent = structure.wordCount > 30 ? 75 : 40;
+        contentScorePercent = structure.wordCount > 80 ? 80 : (structure.wordCount > 30 ? 55 : 30);
       }
     }
   }
@@ -385,10 +411,26 @@ export function scanAndGradeProduct(params: {
     let status: 'passed' | 'partial' | 'failed' = 'passed';
     let detail = '';
 
-    // Trường hợp tệp hình ảnh sơ đồ hợp lệ:
+    // Trường hợp tệp hình ảnh sơ đồ:
     if (isImageSubmission && isImageExpected) {
-      status = 'passed';
-      detail = `Đã hoàn thành tốt yêu cầu của bước này trên sản phẩm sơ đồ đồ họa (${fileName}).`;
+      if (imageBase64Length < 8000) {
+        status = index === 0 ? 'partial' : 'failed';
+        detail = `Ảnh sản phẩm quá nhỏ hoặc rỗng (${(imageBase64Length / 1024).toFixed(1)} KB), chưa đạt yêu cầu của bước này.`;
+      } else if (imageBase64Length < 35000) {
+        if (index === 0) {
+          status = 'passed';
+          detail = `Đã tạo tệp ảnh đồ họa (.${ext.toUpperCase()}).`;
+        } else if (index === steps.length - 1) {
+          status = 'passed';
+          detail = `Đã xuất và lưu tệp ảnh sản phẩm.`;
+        } else {
+          status = 'partial';
+          detail = `Sản phẩm sơ đồ còn đơn giản, cần bổ sung thêm chi tiết, nhãn văn bản và mũi tên liên kết.`;
+        }
+      } else {
+        status = 'passed';
+        detail = `Đã hoàn thành tốt yêu cầu của bước này trên sản phẩm sơ đồ đồ họa (${fileName}).`;
+      }
     } else if (isOffTopic && structure.wordCount < 10) {
       status = 'failed';
       detail = `Chưa thực hiện. Tệp nộp rỗng hoặc quá ngắn (${structure.wordCount} từ), không có nội dung bước này.`;
@@ -530,6 +572,9 @@ export function scanAndGradeProduct(params: {
   const stepScoreRatio = totalSteps > 0 ? (passedStepsCount * 1.0 + partialStepsCount * 0.5) / totalSteps : 0.8;
   const stepCompletionRate = `${passedStepsCount}/${totalSteps} bước đã hoàn thành`;
 
+  const isImageTinyOrRough = isImageSubmission && imageBase64Length < 25000;
+  const isDocSuperficial = !isImageSubmission && !['sb3', 'py', 'cpp'].includes(ext) && structure.wordCount < 35;
+
   let finalScore = 0;
 
   if (isOffTopic) {
@@ -549,15 +594,36 @@ export function scanAndGradeProduct(params: {
 
     finalScore = Math.round(rawScore * 10) / 10;
 
-    // Chỉ đạt 10.0 điểm tuyệt đối khi hoàn thành đầy đủ tất cả các bước VÀ nội dung phong phú, chất lượng cao
-    if (passedStepsCount === totalSteps && contentScorePercent >= 80 && structure.formatScorePercent >= 80 && (structure.wordCount >= 25 || ['png', 'jpg', 'jpeg', 'sb3'].includes(ext))) {
-      finalScore = 10.0;
-    } else if (passedStepsCount === totalSteps && contentScorePercent >= 65) {
-      finalScore = Math.min(9.5, Math.max(8.5, finalScore));
+    // ĐÁNH GIÁ CHẶT CHẼ THEO MỨC ĐỘ HOÀN THIỆN:
+    // Tuyệt đối không cho 10.0 đối với sản phẩm làm sơ sài, thiếu bước hoặc đối phó
+    if (isImageTinyOrRough) {
+      finalScore = Math.min(5.5, Math.max(2.0, finalScore));
+    } else if (isDocSuperficial) {
+      finalScore = Math.min(5.0, Math.max(2.0, finalScore));
+    } else if (passedStepsCount === totalSteps && contentScorePercent >= 90 && structure.formatScorePercent >= 90) {
+      // Chỉ cho 10.0 điểm khi:
+      // 1. Toàn bộ các bước đều passed
+      // 2. Nội dung đạt >= 90% và hình thức >= 90%
+      // 3. Nếu là văn bản: độ dài >= 65 từ; nếu là ảnh: dung lượng >= 50KB; nếu là Excel: có bảng và dữ liệu
+      const isWordAdequate = structure.wordCount >= 65;
+      const isImageRich = isImageSubmission ? imageBase64Length >= 45000 : true;
+      const isExcelAdequate = ext === 'xlsx' || ext === 'xls' ? structure.hasTable || normContent.includes('sum') || normContent.includes('=') : true;
+
+      if (isWordAdequate && isImageRich && isExcelAdequate) {
+        finalScore = 10.0;
+      } else {
+        finalScore = 9.0;
+      }
+    } else if (passedStepsCount === totalSteps && contentScorePercent >= 75) {
+      finalScore = Math.min(9.0, Math.max(8.0, finalScore));
+    } else if (stepScoreRatio >= 0.7) {
+      finalScore = Math.min(8.0, Math.max(6.5, finalScore));
+    } else {
+      finalScore = Math.min(6.0, Math.max(2.5, finalScore));
     }
   }
 
-  finalScore = Math.min(10.0, Math.max(1.0, finalScore));
+  finalScore = Math.min(10.0, Math.max(1.0, Math.round(finalScore * 10) / 10));
 
   // 5. TẠO CÁC NHẬN XÉT CHI TIẾT (Strengths, Weaknesses, HowToGetTen)
   const strengths: string[] = [];
@@ -587,6 +653,15 @@ export function scanAndGradeProduct(params: {
     }
     if (passedStepsCount > 0) {
       strengths.push(`Đã hoàn thành tốt ${passedStepsCount}/${totalSteps} bước thực hành.`);
+    }
+
+    if (isImageTinyOrRough) {
+      weaknesses.push(`⚠️ Sản phẩm hình ảnh còn sơ sài (${(imageBase64Length / 1024).toFixed(1)} KB), chưa thể hiện đầy đủ các khối nội dung, nhãn và mũi tên liên kết.`);
+      howToGetTen.push(`Bổ sung các khối chữ nhật bo góc, gõ đầy đủ các từ khóa, vẽ mũi tên kết nối tuần tự và định dạng màu sắc đẹp mắt.`);
+    }
+    if (isDocSuperficial) {
+      weaknesses.push(`⚠️ Nội dung bài làm còn ngắn gọn và sơ sài (chỉ có ${structure.wordCount} từ). Chưa phân tích sâu các ý của bài học.`);
+      howToGetTen.push(`Mở rộng nội dung văn bản (tối thiểu 65 từ), bổ sung bảng biểu hoặc các ví dụ thực tiễn.`);
     }
 
     // Liệt kê các bước bị failed hoặc partial vào weaknesses

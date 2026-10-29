@@ -162,14 +162,16 @@ export function detectPlagiarism(params: {
   assignmentId?: string;
   fileName: string;
   fileSize: number;
+  fileLastModified?: number;
   fileContent?: string;
   imageBase64?: string;
 }): PlagiarismAlert | null {
-  const { className, machineNumber, studentLeader, fileName, fileSize, fileContent, imageBase64 } = params;
+  const { className, machineNumber, studentLeader, fileName, fileSize, fileLastModified, fileContent, imageBase64 } = params;
   if (!fileSize || fileSize < 50) return null;
 
   const currentContent = (fileContent || '').trim();
   const cleanCurrentLeader = (studentLeader || '').trim().toLowerCase();
+  const currentMachineClean = (machineNumber || '').trim().toLowerCase();
 
   // Duyệt qua tất cả các bài nộp đã có trong CSDL
   for (const sub of dbState.submissions) {
@@ -178,6 +180,7 @@ export function detectPlagiarism(params: {
     const subLeader = (sub.studentLeader || '').trim().toLowerCase();
     const isDifferentClass = sub.className !== className;
     const isDifferentStudentSameClass = sub.className === className && subLeader !== cleanCurrentLeader;
+    const isSameMachine = (sub.machineNumber || '').trim().toLowerCase() === currentMachineClean;
 
     // Chỉ phát hiện khi đối chiếu với bài của lớp khác hoặc học sinh khác
     if (!isDifferentClass && !isDifferentStudentSameClass) continue;
@@ -188,20 +191,38 @@ export function detectPlagiarism(params: {
       // 1. Kiểm tra kích thước byte trùng khớp tuyệt đối
       const isExactSize = Math.abs(attempt.fileSize - fileSize) === 0;
 
-      // 2. Kiểm tra nội dung văn bản trùng khớp
+      // 2. Kiểm tra thời gian khởi tạo/chỉnh sửa tệp trên máy tính (lastModified timestamp)
+      const isExactLastModified = Boolean(
+        fileLastModified &&
+        attempt.fileLastModified &&
+        Math.abs(attempt.fileLastModified - fileLastModified) < 3000
+      );
+
+      // 3. Kiểm tra nội dung văn bản trùng khớp
       const attemptContent = (attempt.fileContent || '').trim();
       const isExactTextContent = currentContent.length > 50 && attemptContent.length > 50 && currentContent === attemptContent;
 
-      // 3. Kiểm tra dữ liệu hình ảnh trùng khớp tuyệt đối
+      // 4. Kiểm tra dữ liệu hình ảnh trùng khớp tuyệt đối
       const isExactImage = Boolean(imageBase64 && attempt.imageBase64 && imageBase64.length > 500 && imageBase64 === attempt.imageBase64);
 
-      // 4. Nếu tệp có cùng dung lượng byte và cùng tên tệp hoặc cùng nội dung/ảnh
+      // 5. Kiểm tra cùng máy lớp trước để lại tệp
+      const isSameMachineOldFileReuse =
+        isSameMachine &&
+        isDifferentClass &&
+        (isExactSize || isExactLastModified || isExactImage || (fileName && attempt.fileName && fileName.toLowerCase() === attempt.fileName.toLowerCase()));
+
       const isExactCopy =
-        (isExactSize && (isExactTextContent || isExactImage || (fileName && attempt.fileName && fileName.toLowerCase() === attempt.fileName.toLowerCase() && fileSize > 500))) ||
+        isSameMachineOldFileReuse ||
+        (isExactSize && (isExactTextContent || isExactImage || isExactLastModified || (fileName && attempt.fileName && fileName.toLowerCase() === attempt.fileName.toLowerCase() && fileSize > 500))) ||
         isExactTextContent ||
         isExactImage;
 
       if (isExactCopy) {
+        let msg = `🚨 CẢNH BÁO SAO CHÉP: Tệp nộp trùng khớp y nguyên 100% với sản phẩm của bạn ${sub.studentLeader} (${sub.className} - ${sub.machineNumber}) đã nộp trước đó!`;
+        if (isSameMachineOldFileReuse) {
+          msg = `🚨 PHÁT HIỆN DÙNG LẠI TỆP LỚP TRƯỚC TRÊN ${machineNumber}: Tệp "${fileName}" là bài làm của bạn ${sub.studentLeader} (${sub.className}) để lại trên máy tính này. Hệ thống không chấm điểm tệp có sẵn!`;
+        }
+
         return {
           isCopied: true,
           copiedFromStudent: sub.studentLeader || 'Học sinh lớp trước',
@@ -209,7 +230,7 @@ export function detectPlagiarism(params: {
           copiedFromMachine: sub.machineNumber,
           copiedAt: attempt.timestamp || sub.latestSubmittedAt,
           similarityPercent: 100,
-          message: `🚨 CẢNH BÁO SAO CHÉP: Tệp nộp trùng khớp y nguyên 100% với sản phẩm của bạn ${sub.studentLeader} (${sub.className} - ${sub.machineNumber}) đã nộp trước đó!`,
+          message: msg,
         };
       }
     }

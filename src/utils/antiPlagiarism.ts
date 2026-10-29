@@ -28,16 +28,27 @@ export function detectPlagiarismClientSide(
     studentLeader: string;
     fileName: string;
     fileSize: number;
+    fileLastModified?: number;
     fileContent?: string;
     imageBase64?: string;
   },
   existingSubmissions: Submission[]
 ): PlagiarismAlert | null {
-  const { className, machineNumber, studentLeader, fileName, fileSize, fileContent, imageBase64 } = params;
+  const {
+    className,
+    machineNumber,
+    studentLeader,
+    fileName,
+    fileSize,
+    fileLastModified,
+    fileContent,
+    imageBase64,
+  } = params;
   if (!fileSize || fileSize < 50 || !Array.isArray(existingSubmissions)) return null;
 
   const currentContent = (fileContent || '').trim();
   const cleanCurrentLeader = (studentLeader || '').trim().toLowerCase();
+  const currentMachineClean = (machineNumber || '').trim().toLowerCase();
 
   for (const sub of existingSubmissions) {
     if (!sub || !Array.isArray(sub.attempts)) continue;
@@ -45,6 +56,7 @@ export function detectPlagiarismClientSide(
     const subLeader = (sub.studentLeader || '').trim().toLowerCase();
     const isDifferentClass = sub.className !== className;
     const isDifferentStudent = subLeader !== cleanCurrentLeader;
+    const isSameMachine = (sub.machineNumber || '').trim().toLowerCase() === currentMachineClean;
 
     // Chỉ kiểm tra khi đối chiếu với bài của lớp khác hoặc của học sinh khác
     if (!isDifferentClass && !isDifferentStudent) continue;
@@ -55,14 +67,21 @@ export function detectPlagiarismClientSide(
       // 1. Kiểm tra kích thước byte trùng khớp tuyệt đối
       const isExactSize = Math.abs(attempt.fileSize - fileSize) === 0;
 
-      // 2. Kiểm tra văn bản nội dung trùng khớp
+      // 2. Kiểm tra thời gian khởi tạo/chỉnh sửa tệp trên máy tính (lastModified timestamp)
+      const isExactLastModified = Boolean(
+        fileLastModified &&
+        attempt.fileLastModified &&
+        Math.abs(attempt.fileLastModified - fileLastModified) < 3000 // sai lệch dưới 3 giây
+      );
+
+      // 3. Kiểm tra văn bản nội dung trùng khớp
       const attemptContent = (attempt.fileContent || '').trim();
       const isExactTextContent =
         currentContent.length > 40 &&
         attemptContent.length > 40 &&
         currentContent === attemptContent;
 
-      // 3. Kiểm tra ảnh/sơ đồ trùng khớp tuyệt đối
+      // 4. Kiểm tra ảnh/sơ đồ trùng khớp tuyệt đối
       const isExactImage = Boolean(
         imageBase64 &&
         attempt.imageBase64 &&
@@ -70,7 +89,7 @@ export function detectPlagiarismClientSide(
         imageBase64 === attempt.imageBase64
       );
 
-      // 4. Kiểm tra cùng kích thước byte + cùng tên tệp
+      // 5. Kiểm tra cùng kích thước byte + cùng tên tệp
       const isExactFileNameAndSize =
         isExactSize &&
         fileSize > 400 &&
@@ -80,16 +99,45 @@ export function detectPlagiarismClientSide(
           fileName.toLowerCase() === attempt.fileName.toLowerCase()
         );
 
+      // 6. TRƯỜNG HỢP ĐẶC BIỆT: HỌC SINH LỚP SAU NGỒI CÙNG MÁY CHỌN LẠI TỆP CÓ SẴN CỦA LỚP TRƯỚC
+      const isSameMachineOldFileReuse =
+        isSameMachine &&
+        isDifferentClass &&
+        (isExactSize || isExactLastModified || isExactFileNameAndSize || isExactImage);
+
       const isExactCopy =
-        (isExactSize && (isExactTextContent || isExactImage || isExactFileNameAndSize)) ||
+        isSameMachineOldFileReuse ||
+        (isExactSize && (isExactTextContent || isExactImage || isExactFileNameAndSize || isExactLastModified)) ||
         isExactTextContent ||
         isExactImage;
 
       if (isExactCopy) {
         const fromClass = sub.className;
         const fromStudent = sub.studentLeader || 'Học sinh lớp trước';
-        const fromMachine = sub.machineNumber || 'Máy phòng Tin học';
-        const timeStr = attempt.timestamp ? new Date(attempt.timestamp).toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit' }) : '';
+        const fromMachine = sub.machineNumber || machineNumber;
+        const fileCreatedDateStr = fileLastModified
+          ? new Date(fileLastModified).toLocaleString('vi-VN', {
+              hour: '2-digit',
+              minute: '2-digit',
+              second: '2-digit',
+              day: '2-digit',
+              month: '2-digit',
+            })
+          : '';
+        const previousSubmittedDateStr = attempt.timestamp
+          ? new Date(attempt.timestamp).toLocaleString('vi-VN', {
+              hour: '2-digit',
+              minute: '2-digit',
+              day: '2-digit',
+              month: '2-digit',
+            })
+          : '';
+
+        let alertMessage = `🚨 CẢNH BÁO SAO CHÉP TỆP: Tệp nộp trùng khớp 100% với bài làm của bạn ${fromStudent} (${fromClass} - ${fromMachine}${previousSubmittedDateStr ? ` nộp lúc ${previousSubmittedDateStr}` : ''})!`;
+
+        if (isSameMachineOldFileReuse) {
+          alertMessage = `🚨 PHÁT HIỆN DÙNG LẠI TỆP LỚP TRƯỚC TRÊN ${machineNumber}: Tệp "${fileName}" (${(fileSize / 1024).toFixed(1)} KB${fileCreatedDateStr ? `, lưu lúc ${fileCreatedDateStr}` : ''}) là tệp có sẵn do bạn ${fromStudent} (${fromClass}) để lại trên máy tính này. Hệ thống không chấm điểm tệp có sẵn!`;
+        }
 
         return {
           isCopied: true,
@@ -98,7 +146,7 @@ export function detectPlagiarismClientSide(
           copiedFromMachine: fromMachine,
           copiedAt: attempt.timestamp || sub.latestSubmittedAt,
           similarityPercent: 100,
-          message: `🚨 CẢNH BÁO SAO CHÉP TỆP: Tệp nộp trùng khớp y nguyên 100% với bài làm của bạn ${fromStudent} (${fromClass} - ${fromMachine}${timeStr ? ` lúc ${timeStr}` : ''}) đã nộp trước đó!`,
+          message: alertMessage,
         };
       }
     }

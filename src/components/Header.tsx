@@ -37,7 +37,12 @@ import {
   isStaticHosting,
 } from '../utils/apiConfig';
 import { realtimeSync } from '../utils/realtimeSync';
-import { isFirebaseReady } from '../services/firebase';
+import {
+  isFirebaseReady,
+  saveSettingsToCloud,
+  fetchSettingsFromCloud,
+  subscribeToSettingsCloud,
+} from '../services/firebase';
 
 const STORAGE_KEY_TEACHER_PIN = 'labgrade_teacher_pin_v1';
 
@@ -95,7 +100,11 @@ export const Header: React.FC<HeaderProps> = ({
 }) => {
   // Quản lý mã PIN bảo vệ quyền Giáo viên
   const [teacherPin, setTeacherPin] = useState<string>(() => {
-    return localStorage.getItem(STORAGE_KEY_TEACHER_PIN) || '1234';
+    return (
+      localStorage.getItem(STORAGE_KEY_TEACHER_PIN) ||
+      localStorage.getItem('labgrade_teacher_pin') ||
+      '1234'
+    );
   });
 
   // Modal xác thực quyền Giáo viên (dành cho người muốn chuyển từ Học sinh -> Giáo viên)
@@ -138,8 +147,35 @@ export const Header: React.FC<HeaderProps> = ({
     }
   }, [isServerConfigModalOpen]);
 
-  // Đồng bộ mã PIN thời gian thực từ máy chủ hoặc từ máy Giáo viên qua BroadcastChannel & SSE
+  // Đồng bộ mã PIN thời gian thực từ Firebase Cloud, máy chủ hoặc từ máy Giáo viên qua BroadcastChannel & SSE
   useEffect(() => {
+    // 1. Tải và lắng nghe cài đặt mã PIN từ Firebase Cloud Firestore
+    let unsubCloudSettings: (() => void) | null = null;
+    if (isFirebaseReady) {
+      fetchSettingsFromCloud().then((cloudSettings) => {
+        if (cloudSettings?.teacherPin) {
+          const pin = cloudSettings.teacherPin.trim();
+          setTeacherPin(pin);
+          try {
+            localStorage.setItem(STORAGE_KEY_TEACHER_PIN, pin);
+            localStorage.setItem('labgrade_teacher_pin', pin);
+          } catch {}
+        }
+      }).catch(() => {});
+
+      unsubCloudSettings = subscribeToSettingsCloud((cloudSettings) => {
+        if (cloudSettings.teacherPin) {
+          const pin = cloudSettings.teacherPin.trim();
+          setTeacherPin(pin);
+          try {
+            localStorage.setItem(STORAGE_KEY_TEACHER_PIN, pin);
+            localStorage.setItem('labgrade_teacher_pin', pin);
+          } catch {}
+        }
+      });
+    }
+
+    // 2. Kênh BroadcastChannel giữa các tab trên cùng máy
     let bc: BroadcastChannel | null = null;
     if (typeof BroadcastChannel !== 'undefined') {
       try {
@@ -149,22 +185,26 @@ export const Header: React.FC<HeaderProps> = ({
             setTeacherPin(event.data.newPin);
             try {
               localStorage.setItem(STORAGE_KEY_TEACHER_PIN, event.data.newPin);
+              localStorage.setItem('labgrade_teacher_pin', event.data.newPin);
             } catch {}
           }
         };
       } catch {}
     }
 
+    // 3. Kênh SSE LAN phòng máy
     const unsub = realtimeSync.subscribe((event) => {
       if (event.type === 'TEACHER_PIN_CHANGED' && event.newPin) {
         setTeacherPin(event.newPin);
         try {
           localStorage.setItem(STORAGE_KEY_TEACHER_PIN, event.newPin);
+          localStorage.setItem('labgrade_teacher_pin', event.newPin);
         } catch {}
       }
     });
 
     return () => {
+      if (unsubCloudSettings) unsubCloudSettings();
       if (bc) bc.close();
       unsub();
     };
@@ -193,15 +233,31 @@ export const Header: React.FC<HeaderProps> = ({
     setIsVerifying(true);
     setPinError(null);
 
-    const savedPin = localStorage.getItem(STORAGE_KEY_TEACHER_PIN) || teacherPin || '1234';
+    // 1. Kiểm tra trực tiếp với Firebase Cloud Firestore để luôn có mã PIN chuẩn xác nhất
+    let authoritativePin = teacherPin;
+    if (isFirebaseReady) {
+      try {
+        const cloudSettings = await fetchSettingsFromCloud();
+        if (cloudSettings && typeof cloudSettings.teacherPin === 'string' && cloudSettings.teacherPin.trim()) {
+          authoritativePin = cloudSettings.teacherPin.trim();
+          setTeacherPin(authoritativePin);
+          try {
+            localStorage.setItem(STORAGE_KEY_TEACHER_PIN, authoritativePin);
+            localStorage.setItem('labgrade_teacher_pin', authoritativePin);
+          } catch {}
+        }
+      } catch (cloudErr) {
+        console.warn('[Firebase Cloud] Lỗi tải mã PIN xác thực:', cloudErr);
+      }
+    }
 
-    // 1. Thử xác thực với máy chủ nếu có API backend phản hồi JSON
+    // 2. Thử xác thực với máy chủ Express LAN nếu có API backend phản hồi JSON
     try {
       const res = await apiFetch('/api/verify-pin', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ pin: entered }),
-      }, 5000);
+      }, 3000);
 
       const contentType = res.headers.get('content-type') || '';
       if (res.ok && contentType.includes('application/json')) {
@@ -210,6 +266,7 @@ export const Header: React.FC<HeaderProps> = ({
           setTeacherPin(entered);
           try {
             localStorage.setItem(STORAGE_KEY_TEACHER_PIN, entered);
+            localStorage.setItem('labgrade_teacher_pin', entered);
           } catch {}
           setIsPinModalOpen(false);
           setPinInput('');
@@ -219,20 +276,24 @@ export const Header: React.FC<HeaderProps> = ({
           return;
         } else {
           setIsVerifying(false);
-          setPinError(data.error || 'Mã PIN không chính xác! (Mã PIN mặc định là 1234)');
+          setPinError(data.error || 'Mã PIN không chính xác!');
           return;
         }
       }
-    } catch (netErr) {
-      console.warn('Lỗi kết nối máy chủ xác thực PIN, chuyển sang đối chiếu cục bộ:', netErr);
+    } catch {
+      // Backend LAN không phản hồi (đang chạy trên Vercel hoặc static), chuyển sang đối chiếu với CSDL Đám mây
     }
 
-    // 2. Chế độ Web tĩnh (Vercel, GitHub Pages) hoặc khi ngoại tuyến:
-    // Đối chiếu trực tiếp với mã PIN lưu trong máy hoặc mã mặc định 1234!
-    if (entered === savedPin.trim()) {
+    // 3. Chế độ Web đám mây (Vercel, GitHub Pages) hoặc khi ngoại tuyến:
+    // Đối chiếu trực tiếp với mã PIN lưu trong CSDL Đám mây Firebase / máy
+    const localSaved = localStorage.getItem(STORAGE_KEY_TEACHER_PIN) || localStorage.getItem('labgrade_teacher_pin');
+    const finalExpectedPin = (authoritativePin || localSaved || '1234').trim();
+
+    if (entered === finalExpectedPin) {
       setTeacherPin(entered);
       try {
         localStorage.setItem(STORAGE_KEY_TEACHER_PIN, entered);
+        localStorage.setItem('labgrade_teacher_pin', entered);
       } catch {}
       setIsPinModalOpen(false);
       setPinInput('');
@@ -243,7 +304,11 @@ export const Header: React.FC<HeaderProps> = ({
     }
 
     setIsVerifying(false);
-    setPinError('Mã PIN không chính xác! Mã PIN mặc định là 1234 (nếu Thầy/Cô chưa đổi lần nào).');
+    if (finalExpectedPin !== '1234') {
+      setPinError('Mã PIN không chính xác! Mã PIN phòng máy đã được Giáo viên thay đổi trên CSDL đám mây (mã 1234 mặc định ban đầu đã bị vô hiệu hóa). Vui lòng nhập đúng mã PIN mới đã thiết lập.');
+    } else {
+      setPinError('Mã PIN không chính xác! Mã PIN mặc định ban đầu là 1234 (nếu Thầy/Cô chưa đổi lần nào).');
+    }
   };
 
   const handleChangePinSubmit = async (e: React.FormEvent) => {
@@ -251,49 +316,99 @@ export const Header: React.FC<HeaderProps> = ({
     setChangePinError(null);
     setChangePinSuccess(null);
 
-    if (newPinInput.trim().length < 4) {
+    const enteredCurrent = currentPinInput.trim();
+    const enteredNew = newPinInput.trim();
+    const enteredConfirm = confirmPinInput.trim();
+
+    if (enteredNew.length < 4) {
       setChangePinError('Mã PIN mới phải có tối thiểu 4 ký tự!');
       return;
     }
-    if (newPinInput.trim() !== confirmPinInput.trim()) {
+    if (enteredNew !== enteredConfirm) {
       setChangePinError('Mã PIN mới và Xác nhận mã PIN không trùng khớp!');
       return;
     }
 
-    let syncedToServer = false;
-    // Gửi cập nhật lên máy chủ phòng máy
+    // Xác định mã PIN hiện tại để đối chiếu trước khi cho phép đổi
+    let expectedCurrentPin = teacherPin.trim();
+    if (isFirebaseReady) {
+      try {
+        const cloudSettings = await fetchSettingsFromCloud();
+        if (cloudSettings?.teacherPin) {
+          expectedCurrentPin = cloudSettings.teacherPin.trim();
+        }
+      } catch {}
+    }
+    if (!expectedCurrentPin) {
+      expectedCurrentPin = (localStorage.getItem(STORAGE_KEY_TEACHER_PIN) || localStorage.getItem('labgrade_teacher_pin') || '1234').trim();
+    }
+
+    // 1. Thử gửi cập nhật lên máy chủ phòng máy nội bộ (nếu có server LAN)
+    let syncedToBackend = false;
     try {
       const res = await apiFetch('/api/change-pin', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          currentPin: currentPinInput.trim(),
-          newPin: newPinInput.trim(),
+          currentPin: enteredCurrent,
+          newPin: enteredNew,
         }),
-      });
-      const data = await res.json();
-      if (!res.ok || !data.success) {
+      }, 3000);
+      const data = await res.json().catch(() => ({}));
+      if (res.ok && data.success) {
+        syncedToBackend = true;
+      } else if (res.status === 401 || (data.error && data.error.includes('hiện tại'))) {
         setChangePinError(data.error || 'Mã PIN hiện tại không chính xác!');
         return;
       }
-      syncedToServer = true;
     } catch {
-      // Fallback cục bộ nếu không kết nối được máy chủ
-      if (currentPinInput.trim() !== teacherPin.trim()) {
+      // Backend LAN không phản hồi (ví dụ chạy trên Vercel)
+    }
+
+    // 2. Nếu không có backend LAN, tự đối chiếu mã PIN hiện tại với CSDL Đám mây / local
+    if (!syncedToBackend) {
+      if (enteredCurrent !== expectedCurrentPin) {
         setChangePinError('Mã PIN hiện tại không chính xác!');
         return;
       }
-      syncedToServer = false;
     }
 
-    const updatedPin = newPinInput.trim();
-    setTeacherPin(updatedPin);
-    localStorage.setItem(STORAGE_KEY_TEACHER_PIN, updatedPin);
+    // 3. GHI MÃ PIN MỚI NGAY LẬP TỨC LÊN CƠ SỞ DỮ LIỆU ĐÁM MÂY FIREBASE FIRESTORE
+    let syncedToCloud = false;
+    if (isFirebaseReady) {
+      try {
+        const ok = await saveSettingsToCloud({ teacherPin: enteredNew });
+        if (ok) {
+          syncedToCloud = true;
+          console.log('[Firebase Cloud] ✅ Đã lưu mã PIN mới lên Cloud Firestore app_settings/session_config');
+        }
+      } catch (cloudErr) {
+        console.warn('[Firebase Cloud] Lỗi lưu mã PIN lên đám mây:', cloudErr);
+      }
+    }
 
-    if (syncedToServer) {
-      setChangePinSuccess('✅ Đã đổi mã PIN thành công trên máy chủ CSDL 24/7! Toàn bộ máy học sinh và giáo viên sẽ dùng mã PIN mới này.');
+    // 4. Phát sóng qua BroadcastChannel cho các tab khác trên máy này
+    if (typeof BroadcastChannel !== 'undefined') {
+      try {
+        const bc = new BroadcastChannel('labgrade_session_channel');
+        bc.postMessage({ type: 'TEACHER_PIN_CHANGED', newPin: enteredNew });
+        bc.close();
+      } catch {}
+    }
+
+    // 5. Cập nhật state & localStorage
+    setTeacherPin(enteredNew);
+    try {
+      localStorage.setItem(STORAGE_KEY_TEACHER_PIN, enteredNew);
+      localStorage.setItem('labgrade_teacher_pin', enteredNew);
+    } catch {}
+
+    if (syncedToCloud) {
+      setChangePinSuccess('✅ ĐÃ ĐỔI MÃ PIN THÀNH CÔNG VÀ LƯU VÀO CSDL ĐÁM MÂY! Toàn bộ các máy khác (kể cả máy học sinh, máy giáo viên khác) sẽ tự động áp dụng mã PIN mới ngay lập tức. Mã 1234 cũ đã bị vô hiệu hóa.');
+    } else if (syncedToBackend) {
+      setChangePinSuccess('✅ Đã đổi mã PIN thành công trên máy chủ phòng máy! Toàn bộ máy học sinh sẽ dùng mã PIN mới này.');
     } else {
-      setChangePinSuccess('⚠️ Đã đổi mã PIN trên máy này (Chế độ cục bộ). Chưa kết nối máy chủ CSDL nên mã PIN chưa tự động đổi trên các máy khác.');
+      setChangePinSuccess('⚠️ Đã đổi mã PIN trên máy này (chế độ offline). Khi có mạng, mã PIN sẽ tự động đồng bộ lên Đám mây.');
     }
 
     setTimeout(() => {
@@ -302,7 +417,7 @@ export const Header: React.FC<HeaderProps> = ({
       setNewPinInput('');
       setConfirmPinInput('');
       setChangePinSuccess(null);
-    }, 2500);
+    }, 2800);
   };
 
   const handleTestPing = async () => {
@@ -468,15 +583,17 @@ export const Header: React.FC<HeaderProps> = ({
               </button>
             )}
 
-            {/* Button 2: Màn Hình Máy Chiếu */}
-            <button
-              onClick={onOpenProjector}
-              title="Bật màn hình máy chiếu phòng thực hành kết nối toàn bộ máy"
-              className="hidden sm:flex items-center gap-1.5 px-3 py-1.5 sm:py-2 rounded-xl text-xs sm:text-sm font-bold bg-white/10 hover:bg-white/20 text-blue-100 border border-white/20 transition-all shadow-xs backdrop-blur-xs active:scale-95 cursor-pointer"
-            >
-              <Tv className="w-4 h-4 text-cyan-300" />
-              <span>Máy Chiếu</span>
-            </button>
+            {/* Button 2: Màn Hình Máy Chiếu (Chỉ hiển thị cho Giáo Viên, ẩn hoàn toàn khỏi máy học sinh) */}
+            {isTeacher && (
+              <button
+                onClick={onOpenProjector}
+                title="Bật màn hình máy chiếu phòng thực hành kết nối toàn bộ máy"
+                className="hidden sm:flex items-center gap-1.5 px-3 py-1.5 sm:py-2 rounded-xl text-xs sm:text-sm font-bold bg-white/10 hover:bg-white/20 text-blue-100 border border-white/20 transition-all shadow-xs backdrop-blur-xs active:scale-95 cursor-pointer"
+              >
+                <Tv className="w-4 h-4 text-cyan-300" />
+                <span>Máy Chiếu</span>
+              </button>
+            )}
 
             {/* Nút Quyền Giáo Viên (chuyển về bên phải nút Máy Chiếu theo yêu cầu của Thầy/Cô) */}
             {onToggleRole && (

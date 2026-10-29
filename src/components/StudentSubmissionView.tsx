@@ -65,6 +65,7 @@ interface StudentSubmissionViewProps {
     groupMembers: string[];
     fileName: string;
     fileSize: number;
+    fileLastModified?: number;
     fileContent: string;
     imageBase64?: string;
   }) => Promise<SubmissionAttempt | null>;
@@ -340,6 +341,7 @@ export const StudentSubmissionView: React.FC<StudentSubmissionViewProps> = ({
         groupMembers,
         fileName: selectedFile.name,
         fileSize: selectedFile.size,
+        fileLastModified: selectedFile.lastModified,
         fileContent: fileContent,
         imageBase64: imagePreviewUrl || undefined,
       });

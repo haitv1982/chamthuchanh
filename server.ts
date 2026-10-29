@@ -104,6 +104,7 @@ app.post('/api/grade', async (req, res) => {
       assignment,
       fileName,
       fileSize,
+      fileLastModified,
       fileContent = '',
       imageBase64,
       attemptNumber = 1,
@@ -128,6 +129,7 @@ app.post('/api/grade', async (req, res) => {
       assignmentId: assignment?.id,
       fileName,
       fileSize: fileSize || 0,
+      fileLastModified: fileLastModified ? Number(fileLastModified) : undefined,
       fileContent,
       imageBase64,
     });
@@ -236,17 +238,27 @@ THÔNG TIN SẢN PHẨM HỌC SINH NỘP:
 - Tên tệp nộp: ${fileName} (${fileSize || 0} bytes)
 - Lần nộp thứ: ${attemptNumber}
 
+NGUYÊN TẮC ĐÁNH GIÁ NGHIÊM KHẮC CỦA GIÁO VIÊN (CHỐNG CHO ĐIỂM 10 DỄ DÃI / PHẠT NẶNG BÀI LÀM SƠ SÀI):
+- TUYỆT ĐỐI KHÔNG TỰ ĐỘNG CHO 10.0 ĐIỂM! Bạn là giám khảo chấm thực hành nghiêm túc, công bằng.
+- Nếu học sinh làm sơ sài, vẽ vài nét quẹt, viết một hai câu ngắn ngủi, bảng tính không có công thức, sơ đồ thiếu khối hoặc thiếu mũi tên liên kết: BẮT BUỘC chấm từ 2.0 đến 5.0 điểm và chỉ rõ từng điểm thiếu sót để học sinh sửa.
+- Phân tầng điểm số thực tế:
+  + Từ 1.0 - 4.5đ: Bài quá sơ sài, lạc đề, làm đối phó, thiếu hầu hết các bước.
+  + Từ 5.0 - 6.5đ: Bài ở mức trung bình, có tệp nhưng sơ sài, thiếu nhiều chi tiết nội dung hoặc hình thức cẩu thả.
+  + Từ 7.0 - 8.0đ: Bài đạt yêu cầu cơ bản, đã thực hiện được các bước chính nhưng chưa sâu sắc, còn vài hạt sạn.
+  + Từ 8.5 - 9.0đ: Bài khá - tốt, trình bày chỉn chu, đúng đa số yêu cầu.
+  + 9.5 - 10.0đ: CHỈ DÀNH CHO bài thực sự xuất sắc, đầy đủ 100% các bước, nội dung phong phú, bố cục thẩm mỹ chuẩn mực.
+
 ${isImageFile ? `
 ĐẶC BIỆT QUAN TRỌNG - ĐÂY LÀ TỆP HÌNH ẢNH SƠ ĐỒ / SẢN PHẨM THỰC HÀNH (PNG/JPG):
 Tệp ảnh thực tế của học sinh đã được đính kèm vào tin nhắn này (qua Vision).
 Bạn PHẢI phân tích trực tiếp hình ảnh đính kèm:
 1. ĐỌC TẤT CẢ VĂN BẢN TRÊN ẢNH: Xem có tiêu đề không? Có các khối hình chữ nhật/bo góc không? Trên các khối có ghi các thành phần/hoạt động không?
-2. KIỂM TRA MŨI TÊN & LIÊN KẾT: Các mũi tên có nối đúng chiều trình tự quy trình hoặc luồng dữ liệu không?
+2. KIỂM TRA MŨI TÊN & LIÊN KẾT: Các mũi tên có nối đúng chiều trình tự quy trình hoặc luồng dữ liệu không? Nếu không có mũi tên liên kết hoặc thiếu các khối, trừ điểm nghiêm khắc (chỉ cho 4 - 6 điểm).
 3. HÌNH ẢNH MINH HỌA & THẨM MỸ: Bố cục có cân đối, dễ nhìn, màu sắc tương phản rõ ràng không? Có biểu tượng minh họa không?
 4. ĐỐI CHIẾU THEO ĐẶC THÙ BÀI HỌC:
-   - Bài sơ đồ quy trình xử lí thông tin (SP01): Cả 2 dạng (4 khối tuần tự "Thu nhận -> Xử lí -> Lưu trữ -> Truyền thông tin" HOẶC mô hình kiến trúc máy tính "Thiết bị vào -> CPU -> Thiết bị ra & Bộ nhớ") đều đạt 10.0 điểm tuyệt đối!
-   - Bài ảnh chụp cây thư mục (SP02): Xem có thư mục gốc TINHOC6 và các thư mục con (BaiTap, HinhAnh, VanBan, SanPham) hay không.
-   - Bài sơ đồ mạng (SP03), Poster (SP04), Sơ đồ khối (SP13, TH7_SP12), Sơ đồ tư duy (SP11, TH9_SP06), Infographic (TH9_SP02): Nếu có bố cục rõ ràng, đúng các thành phần chủ đề -> Đạt 9.0 - 10.0 điểm!
+   - Bài sơ đồ quy trình xử lí thông tin (SP01): Cần đủ 4 hoạt động và mũi tên tuần tự mới đạt 9.0 - 10.0 điểm. Nếu chỉ vẽ 1-2 khối sơ sài, chỉ cho 3.0 - 5.0 điểm.
+   - Bài ảnh chụp cây thư mục (SP02): Xem có cây thư mục gốc TINHOC6 và các thư mục con đầy đủ hay không.
+   - Bài sơ đồ mạng (SP03), Poster (SP04), Sơ đồ khối (SP13, TH7_SP12), Sơ đồ tư duy (SP11, TH9_SP06), Infographic (TH9_SP02): Đánh giá tính đầy đủ và cân đối.
 ` : `
 NỘI DUNG VÀ CẤU TRÚC TRÍCH XUẤT TỪ TỆP NỘP:
 \`\`\`
@@ -255,20 +267,15 @@ ${fileContent ? fileContent.slice(0, 15000) : '[Tệp rỗng hoặc không có n
 
 HƯỚNG DẪN ĐÁNH GIÁ THEO THỂ LOẠI MÔN TIN HỌC (CHUẨN GDPT 2018):
 - BẢNG TÍNH EXCEL (.XLSX):
-  + Kiểm tra sự hiện diện của bảng dữ liệu có tiêu đề cột rõ ràng.
-  + Kiểm tra các công thức/hàm (SUM, AVERAGE, IF, RANK, COUNTIF, MAX, MIN, các hàm lồng nhau) hoặc các kết quả tính toán số học. Nếu học sinh đã lập bảng và tính đúng kết quả/dùng đúng hàm, cho điểm tối đa ở tiêu chí công thức và bảng tính.
-  + Với bài vẽ biểu đồ hoặc lọc/sắp xếp: Kiểm tra cấu trúc dữ liệu tóm tắt và định dạng bảng.
+  + Kiểm tra sự hiện diện của bảng dữ liệu có tiêu đề cột rõ ràng và số dòng dữ liệu.
+  + Kiểm tra các công thức/hàm (SUM, AVERAGE, IF, RANK, COUNTIF, MAX, MIN, các phép tính). Nếu chỉ gõ dữ liệu thô không có công thức, tối đa 6.0 điểm.
 - VĂN BẢN WORD (.DOCX):
-  + Kiểm tra tiêu đề lớn, các đề mục, bảng biểu phân loại (ví dụ: bảng 8 thiết bị vào-ra của TH7_SP01, phiếu tìm kiếm SP05, cẩm nang SP07, đánh giá độ tin cậy TH8_SP01/TH9_SP01).
-  + Kiểm tra tính đầy đủ của nội dung: Nếu đã trả lời đúng các câu hỏi bài học, nêu được các giải pháp, cho điểm cao (8.5 - 10.0).
+  + Kiểm tra độ dài văn bản và số lượng đề mục. Nếu chỉ gõ dưới 40 từ, chấm tối đa 4.5 điểm vì bài làm quá sơ sài.
+  + Để đạt 8.5 - 10.0 điểm, bài Word phải có tiêu đề, nội dung phân tích rõ ràng và các bảng biểu/gạch đầu dòng cụ thể.
 - TRÌNH CHIẾU POWERPOINT (.PPTX):
-  + Kiểm tra số lượng slide (thường từ 3 - 6 slide), tiêu đề từng slide, nội dung tóm tắt theo gạch đầu dòng, nội dung khoa học, văn hóa mạng, bảo vệ thông tin cá nhân.
-  + Đánh giá cao các bài có cấu trúc rõ ràng từ mở đầu đến kết luận.
-- LẬP TRÌNH SCRATCH (.SB3):
-  + Kiểm tra các nhân vật (sprites), khối sự kiện (Khi bấm cờ xanh), khối lặp (lặp lại, liên tục), khối điều kiện (nếu...thì), biến số tính điểm, trả lời câu hỏi trắc nghiệm.
-  + Nếu chương trình có logic hoạt động, có tương tác -> Đạt 9.0 - 10.0 điểm!
-- LẬP TRÌNH PYTHON (.PY) / C++ (.CPP):
-  + Kiểm tra cú pháp, lệnh nhập xuất (input, print), vòng lặp for/while, câu lệnh điều kiện if/else, thuật toán tìm kiếm/sắp xếp.
+  + Kiểm tra số lượng slide, tiêu đề và nội dung. Tối thiểu 3 slide mới đạt điểm khá.
+- LẬP TRÌNH SCRATCH (.SB3) / PYTHON (.PY) / C++ (.CPP):
+  + Kiểm tra cấu trúc câu lệnh, biến số, vòng lặp. Nếu mã nguồn rỗng hoặc chỉ có 1 câu lệnh print đơn giản, chấm 3.0 điểm.
 `}
 
 QUY TẮC CHIẾT ĐIỂM (BẮT BUỘC):
