@@ -161,7 +161,27 @@ export const StudentInfoModal: React.FC<StudentInfoModalProps> = ({
     }
   }, [isOpen, selectedGrade, className, machineNumber, studentLeader, groupMembers, allRosterClassesWithCount]);
 
-  if (!isOpen) return null;
+  // Bản đồ các máy tính đã có học sinh nộp bài / đăng ký trong lớp hiện tại (Hook phải gọi vô điều kiện)
+  const occupiedMachineMap = useMemo(() => {
+    const map = new Map<string, string>();
+    const normClass = normalizeClassName(tempClass);
+    if (Array.isArray(existingSubmissions)) {
+      existingSubmissions.forEach((sub: any) => {
+        if (normalizeClassName(sub.className) === normClass && sub.machineNumber && sub.studentLeader) {
+          map.set(sub.machineNumber.trim().toLowerCase(), sub.studentLeader);
+        }
+      });
+    }
+    return map;
+  }, [existingSubmissions, tempClass]);
+
+  const cleanCurrentMachine = (tempMachine || '').trim().toLowerCase();
+  const machineOccupant = occupiedMachineMap.get(cleanCurrentMachine);
+  const isDuplicateMachineOccupied = Boolean(
+    machineOccupant &&
+    tempLeader &&
+    machineOccupant.trim().toLowerCase() !== tempLeader.trim().toLowerCase()
+  );
 
   // Lọc danh sách lớp học sinh phù hợp với khối đã chọn
   const gradeDigit = extractGradeDigit(tempGrade);
@@ -172,26 +192,29 @@ export const StudentInfoModal: React.FC<StudentInfoModalProps> = ({
     .filter((c) => !gradeDigit || !c.gradeDigit || c.gradeDigit === gradeDigit)
     .map((c) => c.rawClass);
 
-  // Gộp danh sách: lớp có học sinh được đưa lên trước
-  const combinedClasses = Array.from(
-    new Set([...matchedRosterClasses, ...defaultClasses])
-  ).sort((a, b) => {
-    const normA = normalizeClassName(a);
-    const normB = normalizeClassName(b);
-    const countA = roster.filter((s) => normalizeClassName(s.className) === normA).length;
-    const countB = roster.filter((s) => normalizeClassName(s.className) === normB).length;
-    if (countA > 0 && countB === 0) return -1;
-    if (countB > 0 && countA === 0) return 1;
-    return a.localeCompare(b, 'vi', { numeric: true });
-  });
+  // QUY TẮC CƠ SỞ DỮ LIỆU:
+  // Nếu Thầy/Cô đã tải lên danh sách học sinh (allRosterClassesWithCount.length > 0):
+  // CSDL TÊN LỚP CHỈ CHỨA ĐÚNG CÁC LỚP TRONG DANH SÁCH, TẤT CẢ CÁC LỚP KHÁC BỊ LOẠI BỎ HOÀN TOÀN!
+  const combinedClasses = useMemo(() => {
+    if (allRosterClassesWithCount.length > 0) {
+      if (matchedRosterClasses.length > 0) {
+        return matchedRosterClasses;
+      }
+      return allRosterClassesWithCount.map((c) => c.rawClass);
+    }
+    // Chỉ hiển thị lớp mặc định khi hệ thống hoàn toàn chưa có học sinh nào được tải lên
+    return defaultClasses;
+  }, [allRosterClassesWithCount, matchedRosterClasses, defaultClasses]);
 
-  // Đổi khối thì tự động chọn lớp có sẵn học sinh của khối đó hoặc lớp đầu tiên
+  // Đổi khối thì tự động chọn lớp có sẵn học sinh của khối đó hoặc lớp đầu tiên trong CSDL
   const handleGradeChange = (newGrade: string) => {
     setTempGrade(newGrade);
     const newDigit = extractGradeDigit(newGrade);
     const rosterInNewGrade = allRosterClassesWithCount.find((c) => c.gradeDigit === newDigit);
     if (rosterInNewGrade) {
       setTempClass(rosterInNewGrade.rawClass);
+    } else if (allRosterClassesWithCount.length > 0) {
+      setTempClass(allRosterClassesWithCount[0].rawClass);
     } else {
       const classesForNewGrade = getClassesByGrade(newGrade);
       setTempClass(classesForNewGrade[0] || (newDigit ? `${newDigit}A1` : '6A1'));
@@ -223,28 +246,6 @@ export const StudentInfoModal: React.FC<StudentInfoModalProps> = ({
     return s.fullName.toLowerCase().includes(q) || String(s.stt) === q;
   });
 
-  // Bản đồ các máy tính đã có học sinh nộp bài / đăng ký trong lớp hiện tại
-  const occupiedMachineMap = useMemo(() => {
-    const map = new Map<string, string>();
-    const normClass = normalizeClassName(tempClass);
-    if (Array.isArray(existingSubmissions)) {
-      existingSubmissions.forEach((sub: any) => {
-        if (normalizeClassName(sub.className) === normClass && sub.machineNumber && sub.studentLeader) {
-          map.set(sub.machineNumber.trim().toLowerCase(), sub.studentLeader);
-        }
-      });
-    }
-    return map;
-  }, [existingSubmissions, tempClass]);
-
-  const cleanCurrentMachine = (tempMachine || '').trim().toLowerCase();
-  const machineOccupant = occupiedMachineMap.get(cleanCurrentMachine);
-  const isDuplicateMachineOccupied = Boolean(
-    machineOccupant &&
-    tempLeader &&
-    machineOccupant.trim().toLowerCase() !== tempLeader.trim().toLowerCase()
-  );
-
   // Tải lên tệp Excel danh sách học sinh trực tiếp tại modal (CHỈ GIÁO VIÊN)
   const handleUploadExcelDirect = async (e: React.ChangeEvent<HTMLInputElement>) => {
     if (!isTeacher) return;
@@ -257,33 +258,28 @@ export const StudentInfoModal: React.FC<StudentInfoModalProps> = ({
 
     try {
       const buffer = await file.arrayBuffer();
-      const parsed = parseStudentExcel(buffer);
-
-      if (parsed.students.length === 0) {
-        throw new Error('Không đọc được học sinh nào từ tệp. Vui lòng kiểm tra định dạng 3 cột TT, Họ và tên, Lớp.');
-      }
-
-      // Lưu ngay vào CSDL hệ thống
-      const saveRes = await onSaveRoster(parsed.students, 'accumulate');
+      const result = parseStudentExcel(buffer);
+      // Mode 'replace': Thay thế đúng các lớp trong danh sách, xóa các lớp cũ khác
+      const saveRes = await onSaveRoster(result.students, 'replace');
       if (saveRes.success) {
-        setUploadNotice(
-          `Đã tải lên và lưu thành công ${parsed.students.length} học sinh thuộc các lớp: ${saveRes.classes.join(', ')} vào CSDL!`
-        );
-        if (saveRes.classes.includes(tempClass)) {
-          // Lớp hiện tại đã có học sinh
-        } else if (saveRes.classes.length > 0) {
-          setTempClass(saveRes.classes[0]);
+        setUploadNotice(`Đã nạp thành công ${result.students.length} học sinh (${saveRes.classes.join(', ')}) vào CSDL! Các lớp khác đã được dọn sạch.`);
+        if (saveRes.classes.length > 0) {
+          const firstCls = saveRes.classes[0];
+          setTempClass(firstCls);
+          const firstDigit = extractGradeDigit(firstCls);
+          if (firstDigit) setTempGrade(`Lớp ${firstDigit}`);
         }
-      } else {
-        setErrorMsg('Không thể lưu vào CSDL máy chủ. Vui lòng kiểm tra lại kết nối.');
       }
     } catch (err: any) {
-      setErrorMsg(err.message || 'Lỗi khi đọc tệp Excel. Vui lòng kiểm tra lại 3 cột TT, Họ và tên, Lớp.');
+      setErrorMsg(err.message || 'Lỗi khi xử lý tệp Excel');
     } finally {
       setIsUploading(false);
       if (fileInputRef.current) fileInputRef.current.value = '';
     }
   };
+
+  // CHỈ RETURN NULL SAU KHI TẤT CẢ CÁC HOOK ĐÃ ĐƯỢC GỌI VÔ ĐIỀU KIỆN
+  if (!isOpen) return null;
 
   // Nạp danh sách học sinh mẫu chuẩn để dùng ngay (CHỈ GIÁO VIÊN)
   const handleLoadDemoRoster = async () => {
@@ -306,7 +302,7 @@ export const StudentInfoModal: React.FC<StudentInfoModalProps> = ({
         { stt: 2, fullName: 'Đỗ Phương Linh', className: '9A1' },
         { stt: 3, fullName: 'Bùi Quốc Tuấn', className: '9A1' },
       ];
-      await onSaveRoster(demoData, 'accumulate');
+      await onSaveRoster(demoData, 'replace');
       setUploadNotice('Đã nạp 13 học sinh mẫu (8A1, 8A2, 9A1) vào CSDL hệ thống thành công!');
     } catch (err: any) {
       setErrorMsg(err.message || 'Lỗi nạp danh sách mẫu.');

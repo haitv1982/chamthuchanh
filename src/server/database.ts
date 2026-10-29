@@ -517,7 +517,7 @@ export function getAllStudents(): StudentRecord[] {
 // Lưu danh sách học sinh từ Excel (Tích lũy tự động: thêm dần từ lớp này sang lớp khác, không bị đè mất lớp cũ)
 export function saveStudentRoster(
   records: StudentRecord[],
-  mode: 'accumulate' | 'upsert' | 'replace' = 'accumulate'
+  mode: 'accumulate' | 'upsert' | 'replace' = 'replace'
 ): { success: boolean; total: number; classes: string[]; students: StudentRecord[] } {
   if (!Array.isArray(records)) {
     return { success: false, total: studentRosterState.length, classes: [], students: studentRosterState };
@@ -532,23 +532,38 @@ export function saveStudentRoster(
       className: r.className.trim().toUpperCase(),
     }));
 
-  // Cơ chế TÍCH LŨY TỰ ĐỘNG (Accumulate / Upsert):
-  // Giữ nguyên toàn bộ danh sách các lớp đã tải lên trước đó, tự động thêm tiếp các lớp mới vào CSDL.
-  const map = new Map<string, StudentRecord>();
+  if (mode === 'replace') {
+    // Yêu cầu: CSDL tên lớp phải được thay đúng với các lớp có trong danh sách, các lớp khác xóa nó!
+    studentRosterState = cleaned;
 
-  // 1. Giữ nguyên tất cả học sinh của các lớp đã có trong hệ thống
-  studentRosterState.forEach((s) => {
-    const key = `${s.className.toUpperCase()}___${s.fullName.trim().toLowerCase()}`;
-    map.set(key, s);
-  });
-
-  // 2. Thêm hoặc cập nhật học sinh từ tệp mới tải lên
-  cleaned.forEach((s) => {
-    const key = `${s.className.toUpperCase()}___${s.fullName.trim().toLowerCase()}`;
-    map.set(key, s);
-  });
-
-  studentRosterState = Array.from(map.values());
+    // Dọn dẹp sạch sẽ các tệp roster_*.json cũ của các lớp không còn tồn tại
+    try {
+      if (fs.existsSync(ROSTERS_DIR)) {
+        const newClasses = new Set(cleaned.map((s) => s.className.toUpperCase()));
+        const files = fs.readdirSync(ROSTERS_DIR);
+        files.forEach((f) => {
+          const match = f.match(/^roster_(.+)\.json$/);
+          if (match && !newClasses.has(match[1].toUpperCase())) {
+            try {
+              fs.unlinkSync(path.join(ROSTERS_DIR, f));
+            } catch {}
+          }
+        });
+      }
+    } catch {}
+  } else {
+    // Mode accumulate
+    const map = new Map<string, StudentRecord>();
+    studentRosterState.forEach((s) => {
+      const key = `${s.className.toUpperCase()}___${s.fullName.trim().toLowerCase()}`;
+      map.set(key, s);
+    });
+    cleaned.forEach((s) => {
+      const key = `${s.className.toUpperCase()}___${s.fullName.trim().toLowerCase()}`;
+      map.set(key, s);
+    });
+    studentRosterState = Array.from(map.values());
+  }
 
   // Sắp xếp theo lớp rồi theo STT hoặc họ tên
   studentRosterState.sort((a, b) => {

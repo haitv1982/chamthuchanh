@@ -140,8 +140,8 @@ export const StudentRosterModal: React.FC<StudentRosterModalProps> = ({
     setIsSaving(true);
     setParseError(null);
     try {
-      const res = await onSaveRoster(demoData, 'accumulate');
-      setParseSuccessMsg(`Đã nạp ${res.total} học sinh mẫu (8A1, 8A2, 9A1) vào CSDL hệ thống thành công!`);
+      const res = await onSaveRoster(demoData, 'replace');
+      setParseSuccessMsg(`Đã nạp ${res.total} học sinh mẫu (${res.classes.join(', ')}) vào CSDL hệ thống! Các lớp khác đã được xóa sạch.`);
       setActiveTab('view');
     } catch (err: any) {
       setParseError(err.message || 'Lỗi khi nạp danh sách mẫu');
@@ -164,11 +164,11 @@ export const StudentRosterModal: React.FC<StudentRosterModalProps> = ({
       const result = parseStudentExcel(buffer);
       setParsedStudents(result.students);
 
-      // TỰ ĐỘNG LƯU TRỰC TIẾP VÀO CSDL NGAY KHI TẢI LÊN (TÍCH LŨY THÊM VÀO, KHÔNG ĐÈ MẤT LỚP CŨ)
-      const saveRes = await onSaveRoster(result.students, 'accumulate');
+      // TỰ ĐỘNG THAY THẾ CƠ SỞ DỮ LIỆU ĐÚNG VỚI CÁC LỚP TRONG TỆP (XÓA CÁC LỚP KHÁC)
+      const saveRes = await onSaveRoster(result.students, 'replace');
       if (saveRes.success) {
         setParseSuccessMsg(
-          `Đã tải lên & lưu thành công ${result.students.length} học sinh thuộc ${saveRes.classes.length} lớp (${saveRes.classes.join(', ')}) vào CSDL hệ thống!`
+          `Đã tải lên & thay thế thành công ${result.students.length} học sinh thuộc đúng ${saveRes.classes.length} lớp (${saveRes.classes.join(', ')}) trong CSDL! Các lớp khác đã được xóa sạch.`
         );
         setTimeout(() => {
           setActiveTab('view');

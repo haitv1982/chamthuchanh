@@ -2,36 +2,22 @@ import React, { useState, useEffect, useMemo } from 'react';
 import {
   X,
   Trophy,
-  Award,
-  Search,
   FileSpreadsheet,
-  Users,
   Sparkles,
-  AlertTriangle,
   Lock,
   Unlock,
   CheckCircle2,
   RefreshCw,
-  Eye,
-  Layers,
   Calendar,
   Database,
   Download,
   Trash2,
-  Table,
-  Calculator,
-  TrendingUp,
-  GraduationCap,
 } from 'lucide-react';
 import { Submission, Assignment, StudentRecord } from '../types';
 import {
-  formatMachineNumber,
-  getMachineSortNumber,
-  splitVietnameseName,
-  buildClassMultiProductData,
   exportClassMultiProductGradebook,
 } from '../utils/excelExport';
-import { formatPracticeDateVi, getTodayDateString } from '../utils/storageManager';
+import { formatPracticeDateVi } from '../utils/storageManager';
 import { SCHOOL_CLASSES } from '../data/classes';
 import { ClassMultiProductGradebook } from './ClassMultiProductGradebook';
 
@@ -39,7 +25,7 @@ interface ClassResultsModalProps {
   className: string;
   submissions: Submission[];
   onClose: () => void;
-  onExportExcel: (cls?: string, targetDate?: string | null, dateMode?: 'all' | 'latest' | 'custom') => void;
+  onExportExcel?: (cls?: string, targetDate?: string | null, dateMode?: 'all' | 'latest' | 'custom') => void;
   isTeacher?: boolean;
   onToggleSubmissionPermission?: (allow: boolean) => void;
   allowSubmission?: boolean;
@@ -63,7 +49,6 @@ export const ClassResultsModal: React.FC<ClassResultsModalProps> = ({
   className,
   submissions,
   onClose,
-  onExportExcel,
   isTeacher = false,
   onToggleSubmissionPermission,
   allowSubmission = true,
@@ -75,15 +60,34 @@ export const ClassResultsModal: React.FC<ClassResultsModalProps> = ({
   studentRoster = [],
   onExportMultiProductExcel,
 }) => {
-  const [activeTab, setActiveTab] = useState<'multi_product' | 'machines'>('multi_product');
-  const [search, setSearch] = useState('');
-  const [sortBy, setSortBy] = useState<'machine' | 'name' | 'score'>('machine');
-  const [showAttemptMode, setShowAttemptMode] = useState<'highest' | 'all'>('highest');
-  const [activeClass, setActiveClass] = useState<string>(className || 'Tất cả');
-  const [expandedSubId, setExpandedSubId] = useState<string | null>(null);
+  // Lấy danh sách lớp duy nhất từ danh sách học sinh đã tải lên (nếu có) để thay thế lớp mặc định
+  const rosterClasses = useMemo(() => {
+    const set = new Set<string>();
+    studentRoster.forEach((r) => {
+      if (r.className?.trim()) set.add(r.className.trim());
+    });
+    return Array.from(set).sort();
+  }, [studentRoster]);
 
-  // Quản lý lọc theo ngày thực hành (Yêu cầu 4: Xuất ngày bất kỳ hoặc ngày gần nhất)
-  const [dateFilterMode, setDateFilterMode] = useState<'all' | 'latest' | 'custom'>('all');
+  // Danh sách các lớp hiển thị: Nếu có danh sách tải lên thì CHỈ hiển thị đúng các lớp đó!
+  const displayedClasses: string[] = useMemo(() => {
+    if (rosterClasses.length > 0) {
+      return rosterClasses;
+    }
+    const subClasses = Array.from(new Set(submissions.map((s) => s.className).filter(Boolean)));
+    if (subClasses.length > 0) return subClasses.sort();
+    return [...SCHOOL_CLASSES];
+  }, [rosterClasses, submissions]);
+
+  // Lớp đang chọn: ưu tiên className nếu có trong danh sách, hoặc lớp đầu tiên
+  const [activeClass, setActiveClass] = useState<string>(() => {
+    if (className && className !== 'Tất cả') return className;
+    if (displayedClasses.length > 0) return displayedClasses[0];
+    return 'Tất cả';
+  });
+
+  // Quản lý lọc theo ngày thực hành: MẶC ĐỊNH HIỂN THỊ TIẾT GẦN NHẤT (latest)
+  const [dateFilterMode, setDateFilterMode] = useState<'all' | 'latest' | 'custom'>('latest');
   const [customDate, setCustomDate] = useState<string>('');
   const [isSyncing, setIsSyncing] = useState<boolean>(false);
   const [syncToast, setSyncToast] = useState<string | null>(null);
@@ -101,7 +105,14 @@ export const ClassResultsModal: React.FC<ClassResultsModalProps> = ({
     }
   }, [onRefresh]);
 
-  // Filter submissions by current class
+  // Cập nhật activeClass nếu lớp hiện tại không còn tồn tại trong danh sách lớp mới tải lên
+  useEffect(() => {
+    if (displayedClasses.length > 0 && activeClass !== 'Tất cả' && !displayedClasses.includes(activeClass)) {
+      setActiveClass(displayedClasses[0]);
+    }
+  }, [displayedClasses, activeClass]);
+
+  // Lọc bài nộp theo lớp đang chọn
   const classList = useMemo(() => {
     return activeClass === 'Tất cả'
       ? submissions
@@ -122,14 +133,14 @@ export const ClassResultsModal: React.FC<ClassResultsModalProps> = ({
 
   const latestDate = availableDates[0] || '';
 
-  // Xác định ngày thực hành đang áp dụng lọc
+  // Xác định ngày thực hành đang áp dụng lọc: Mặc định là ngày gần nhất
   const effectiveFilterDate = dateFilterMode === 'latest'
     ? latestDate
     : dateFilterMode === 'custom'
     ? customDate
     : null;
 
-  // Lọc theo ngày trước khi gom nhóm
+  // Lọc bài nộp theo ngày thực hành đã chọn
   const dateFilteredList = useMemo(() => {
     if (!effectiveFilterDate) return classList;
     return classList.filter((s) => {
@@ -138,86 +149,17 @@ export const ClassResultsModal: React.FC<ClassResultsModalProps> = ({
     });
   }, [classList, effectiveFilterDate]);
 
-  // Gom nhóm theo Máy + Học sinh và CHỈ LẤY LẦN NỘP CÓ KẾT QUẢ CAO NHẤT (hoặc hiển thị tất cả theo tùy chọn)
-  const bestMap = new Map<string, Submission>();
-  dateFilteredList.forEach((sub) => {
-    const key = `${sub.className}__${sub.machineNumber}__${sub.studentLeader.trim().toLowerCase()}`;
-    const existing = bestMap.get(key);
-    if (!existing || sub.highestScore > existing.highestScore) {
-      bestMap.set(key, sub);
-    } else if (sub.highestScore === existing.highestScore) {
-      const timeA = new Date(sub.latestSubmittedAt || 0).getTime();
-      const timeB = new Date(existing.latestSubmittedAt || 0).getTime();
-      if (timeA > timeB) bestMap.set(key, sub);
+  // Đổi lớp: Tự động hiển thị kết quả của tiết thực hành gần nhất của lớp đó
+  const handleSelectClass = (cls: string) => {
+    setActiveClass(cls);
+    setDateFilterMode('latest');
+    setCustomDate('');
+    if (onChangeClassName && cls !== 'Tất cả') {
+      onChangeClassName(cls);
     }
-  });
+  };
 
-  const uniqueClassList = Array.from(bestMap.values());
-
-  // Đếm các số máy bị trùng (có nhiều hơn 1 nhóm nộp bài)
-  const duplicateMachineCounts = new Map<string, number>();
-  uniqueClassList.forEach((s) => {
-    const m = s.machineNumber;
-    duplicateMachineCounts.set(m, (duplicateMachineCounts.get(m) || 0) + 1);
-  });
-
-  const filtered = uniqueClassList.filter((s) => {
-    const q = search.toLowerCase();
-    return (
-      s.studentLeader.toLowerCase().includes(q) ||
-      s.machineNumber.toLowerCase().includes(q) ||
-      s.groupMembers.some((m) => m.toLowerCase().includes(q))
-    );
-  });
-
-  const sorted = [...filtered].sort((a, b) => {
-    if (sortBy === 'machine') {
-      const numA = getMachineSortNumber(a.machineNumber);
-      const numB = getMachineSortNumber(b.machineNumber);
-      if (numA !== numB) return numA - numB;
-      return b.highestScore - a.highestScore;
-    }
-    if (sortBy === 'name') {
-      const nameA = splitVietnameseName(a.studentLeader);
-      const nameB = splitVietnameseName(b.studentLeader);
-      const cmp = nameA.ten.localeCompare(nameB.ten, 'vi', { sensitivity: 'base' });
-      if (cmp !== 0) return cmp;
-      return nameA.hoVaDem.localeCompare(nameB.hoVaDem, 'vi', { sensitivity: 'base' });
-    }
-    // Default score
-    return b.highestScore - a.highestScore;
-  });
-
-  const total = uniqueClassList.length;
-  const perfectCount = uniqueClassList.filter((s) => s.highestScore >= 10).length;
-  const avgScore = total > 0
-    ? (uniqueClassList.reduce((sum, s) => sum + s.highestScore, 0) / total).toFixed(1)
-    : '0';
-
-  // Tính dữ liệu bảng tổng hợp điểm các sản phẩm SP1, SP2... ĐTB (lấy kết quả cao nhất)
-  const multiProductData = useMemo(() => {
-    return buildClassMultiProductData({
-      className: activeClass,
-      assignments,
-      submissions,
-      roster: studentRoster,
-    });
-  }, [activeClass, assignments, submissions, studentRoster]);
-
-  // Tìm kiếm học sinh trong bảng tổng hợp
-  const filteredMultiProductStudents = useMemo(() => {
-    if (!search.trim()) return multiProductData.students;
-    const q = search.trim().toLowerCase();
-    return multiProductData.students.filter(
-      (s) =>
-        s.fullName.toLowerCase().includes(q) ||
-        s.hoVaDem.toLowerCase().includes(q) ||
-        s.ten.toLowerCase().includes(q) ||
-        String(s.stt).includes(q)
-    );
-  }, [multiProductData.students, search]);
-
-  // Xuất file Excel bảng điểm tổng hợp SP1, SP2... ĐTB
+  // Xuất file Excel bảng điểm tổng hợp SP1, SP2... ĐTB của tiết/ngày đang lọc
   const handleExportMultiProduct = async () => {
     if (onRefresh) await onRefresh();
     if (onExportMultiProductExcel) {
@@ -226,7 +168,7 @@ export const ClassResultsModal: React.FC<ClassResultsModalProps> = ({
       exportClassMultiProductGradebook({
         className: activeClass,
         assignments,
-        submissions,
+        submissions: dateFilteredList,
         roster: studentRoster,
       });
     }
@@ -234,18 +176,16 @@ export const ClassResultsModal: React.FC<ClassResultsModalProps> = ({
     setTimeout(() => setSyncToast(null), 3500);
   };
 
-  const handleSelectClass = (cls: string) => {
-    setActiveClass(cls);
-    if (onChangeClassName && cls !== 'Tất cả') {
-      onChangeClassName(cls);
-    }
-  };
+  // Các ngày trước đó (loại trừ ngày gần nhất)
+  const previousDates = useMemo(() => {
+    return availableDates.filter((d) => d !== latestDate);
+  }, [availableDates, latestDate]);
 
   return (
     <div className="fixed inset-0 z-50 bg-slate-950/70 backdrop-blur-xs flex items-center justify-center p-2 sm:p-4 overflow-y-auto">
       <div className="bg-white rounded-3xl max-w-6xl w-full max-h-[94vh] flex flex-col shadow-2xl border border-slate-200 overflow-hidden animate-in fade-in zoom-in-95 duration-200">
         {/* Header */}
-        <div className="p-4 sm:p-5 border-b border-slate-800 bg-slate-900 text-white flex flex-wrap items-center justify-between gap-3">
+        <div className="p-4 sm:p-5 border-b border-slate-800 bg-slate-900 text-white flex flex-wrap items-center justify-between gap-3 shrink-0">
           <div className="flex items-center gap-3">
             <div className="w-10 h-10 rounded-xl bg-blue-600 flex items-center justify-center text-cyan-300 shrink-0 shadow-inner">
               <Trophy className="w-5 h-5" />
@@ -255,14 +195,14 @@ export const ClassResultsModal: React.FC<ClassResultsModalProps> = ({
                 <h2 className="text-base sm:text-lg font-black tracking-tight text-white">
                   Bảng Kết Quả Thực Hành & Sổ Điểm Lớp
                 </h2>
-                {/* Bộ chọn Lớp trực tiếp ngay trong Modal với thống kê số bài nộp */}
+                {/* Bộ chọn Lớp: Chỉ hiển thị các lớp trong danh sách đã tải lên */}
                 <select
                   value={activeClass}
                   onChange={(e) => handleSelectClass(e.target.value)}
                   className="bg-blue-600 hover:bg-blue-500 text-cyan-100 border border-cyan-400/50 text-xs px-2.5 py-1 rounded-full font-bold focus:outline-none cursor-pointer"
                 >
                   <option value="Tất cả">Tất cả các lớp ({submissions.length} bài)</option>
-                  {SCHOOL_CLASSES.map((c) => {
+                  {displayedClasses.map((c) => {
                     const cCount = (submissions || []).filter((s) => s.className === c).length;
                     return (
                       <option key={c} value={c}>
@@ -272,7 +212,7 @@ export const ClassResultsModal: React.FC<ClassResultsModalProps> = ({
                   })}
                 </select>
 
-                {/* Badge trạng thái CSDL Lưu Trữ Thực */}
+                {/* Badge trạng thái CSDL Lưu Trực Tuyến */}
                 <div
                   className="flex items-center gap-1.5 px-2.5 py-0.5 bg-emerald-950/80 text-emerald-300 border border-emerald-500/50 rounded-full text-[11px] font-bold"
                   title="Dữ liệu bài nộp được tự động lưu trữ tức thời vào Cơ sở dữ liệu phòng máy trên máy chủ"
@@ -282,7 +222,7 @@ export const ClassResultsModal: React.FC<ClassResultsModalProps> = ({
                 </div>
               </div>
               <p className="text-xs text-slate-400 mt-0.5">
-                Cập nhật tức thời khi học sinh nộp bài • Lấy kết quả cao nhất • Bảng điểm tổng hợp SP1, SP2... ĐTB
+                Bảng tổng hợp chung của cả lớp • Lấy kết quả cao nhất • Hiển thị tiết thực hành gần nhất
               </p>
             </div>
           </div>
@@ -321,10 +261,9 @@ export const ClassResultsModal: React.FC<ClassResultsModalProps> = ({
               </button>
             )}
 
-            {/* Quyền Xuất File Excel: Chỉ Giáo Viên mới được xuất danh sách cả lớp */}
+            {/* Nút Xuất Bảng Tổng Hợp SP1, SP2... ĐTB */}
             {isTeacher ? (
               <div className="flex items-center gap-1.5">
-                {/* NÚT XUẤT BẢNG TỔNG HỢP SP1, SP2... ĐIỂM TRUNG BÌNH */}
                 <button
                   type="button"
                   onClick={handleExportMultiProduct}
@@ -333,19 +272,6 @@ export const ClassResultsModal: React.FC<ClassResultsModalProps> = ({
                 >
                   <FileSpreadsheet className="w-4 h-4 text-emerald-100" />
                   <span>Xuất Bảng Tổng Hợp (SP1, SP2... ĐTB)</span>
-                </button>
-
-                {/* Nút Xuất Excel Theo Buổi / Máy */}
-                <button
-                  onClick={async () => {
-                    if (onRefresh) await onRefresh();
-                    onExportExcel(activeClass, effectiveFilterDate, dateFilterMode);
-                  }}
-                  className="px-3 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition-all active:scale-95 cursor-pointer"
-                  title="Giáo viên xuất file Excel chi tiết tất cả học sinh theo thứ tự Máy và cột Tên riêng"
-                >
-                  <Download className="w-3.5 h-3.5 text-slate-300" />
-                  <span className="hidden md:inline">Theo Máy</span>
                 </button>
 
                 <button
@@ -395,100 +321,51 @@ export const ClassResultsModal: React.FC<ClassResultsModalProps> = ({
           </div>
         )}
 
-        {/* Thanh Điều Hướng 2 Chế Độ: Bảng Tổng Hợp (SP1, SP2... ĐTB) vs Chi Tiết Theo Máy */}
-        <div className="bg-slate-900 px-4 sm:px-6 pt-2 border-b border-slate-700 flex items-center justify-between gap-3 flex-wrap shrink-0">
-          <div className="flex items-center gap-2">
-            <button
-              type="button"
-              onClick={() => setActiveTab('multi_product')}
-              className={`px-4 py-2.5 rounded-t-xl text-xs sm:text-sm font-bold flex items-center gap-2 transition-all cursor-pointer border-t border-x ${
-                activeTab === 'multi_product'
-                  ? 'bg-slate-50 text-blue-900 border-slate-200 shadow-sm font-black'
-                  : 'text-slate-300 hover:text-white border-transparent hover:bg-slate-800/80'
-              }`}
-            >
-              <FileSpreadsheet className={`w-4 h-4 ${activeTab === 'multi_product' ? 'text-emerald-600' : 'text-slate-400'}`} />
-              <span>Bảng Tổng Hợp SP1, SP2... (Sổ Điểm Lớp)</span>
-              <span className="px-1.5 py-0.5 rounded-full text-[10px] font-extrabold bg-emerald-500 text-white">
-                Mới
+        {/* Quản lý Khóa / Mở Nhận Bài Nộp (Giáo viên) */}
+        {isTeacher && onToggleSubmissionPermission && (
+          <div className="p-2.5 sm:px-6 bg-gradient-to-r from-blue-950 via-slate-900 to-blue-950 border-b border-blue-900/60 text-white flex flex-wrap items-center justify-between gap-2 text-xs shrink-0">
+            <div className="flex items-center gap-2">
+              <span className={`w-2.5 h-2.5 rounded-full ${allowSubmission ? 'bg-emerald-400 animate-pulse' : 'bg-rose-500'}`} />
+              <span className="font-bold">Quyền nộp bài của học sinh:</span>
+              <span className="text-slate-300 font-medium hidden sm:inline">
+                {allowSubmission
+                  ? 'Đang mở cho phép học sinh nộp bài thực hành trên phòng máy.'
+                  : 'Đang khóa nộp bài (tránh học sinh làm bài ở nhà nộp trước khi ổn định lớp).'}
               </span>
-            </button>
-
+            </div>
             <button
               type="button"
-              onClick={() => setActiveTab('machines')}
-              className={`px-4 py-2.5 rounded-t-xl text-xs sm:text-sm font-bold flex items-center gap-2 transition-all cursor-pointer border-t border-x ${
-                activeTab === 'machines'
-                  ? 'bg-slate-50 text-blue-900 border-slate-200 shadow-sm font-black'
-                  : 'text-slate-300 hover:text-white border-transparent hover:bg-slate-800/80'
+              onClick={() => onToggleSubmissionPermission(!allowSubmission)}
+              className={`px-3 py-1 rounded-xl font-black text-xs flex items-center gap-1.5 transition-all shadow-xs cursor-pointer ${
+                allowSubmission
+                  ? 'bg-rose-600 hover:bg-rose-700 text-white'
+                  : 'bg-emerald-500 hover:bg-emerald-600 text-slate-950 font-black'
               }`}
             >
-              <Layers className={`w-4 h-4 ${activeTab === 'machines' ? 'text-blue-600' : 'text-slate-400'}`} />
-              <span>Chi Tiết Theo Máy & Lần Nộp ({uniqueClassList.length} nhóm)</span>
+              {allowSubmission ? (
+                <>
+                  <Lock className="w-3.5 h-3.5" />
+                  <span>Khóa Nộp Bài</span>
+                </>
+              ) : (
+                <>
+                  <Unlock className="w-3.5 h-3.5" />
+                  <span>Bật Cho Phép Nộp</span>
+                </>
+              )}
             </button>
           </div>
+        )}
 
-          <div className="hidden sm:flex items-center gap-2 text-xs text-slate-300 pb-1">
-            <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-            <span>Thời điểm: <strong className="text-white font-mono">{multiProductData.exportTimestamp}</strong></span>
-          </div>
-        </div>
-
-        {activeTab === 'multi_product' ? (
-          <ClassMultiProductGradebook
-            className={activeClass}
-            assignments={assignments}
-            submissions={submissions}
-            roster={studentRoster}
-            isTeacher={isTeacher}
-            onRefresh={onRefresh}
-            onExportExcel={handleExportMultiProduct}
-          />
-        ) : (
-          <div className="flex-1 flex flex-col min-h-0 overflow-hidden">
-            {/* Thanh Chọn Ngày Thực Hành (Yêu cầu 4: Xuất ngày bất kỳ hoặc ngày gần nhất của 1 lớp) */}
-            <div className="p-3 sm:px-6 bg-gradient-to-r from-slate-900 via-blue-950 to-slate-900 border-b border-blue-900 text-white flex flex-wrap items-center justify-between gap-3 text-xs">
+        {/* Thanh Lọc Tiết Thực Hành: Tiết gần nhất (mặc định) & Chọn các ngày trước đó */}
+        <div className="p-3 sm:px-6 bg-gradient-to-r from-slate-900 via-indigo-950 to-slate-900 border-b border-indigo-900/80 text-white flex flex-wrap items-center justify-between gap-3 text-xs shrink-0">
           <div className="flex items-center gap-2 flex-wrap">
-            <span className="font-black flex items-center gap-1.5 text-cyan-300">
+            <span className="font-bold flex items-center gap-1.5 text-cyan-300">
               <Calendar className="w-4 h-4" />
-              <span>Ngày thực hành:</span>
+              <span>Buổi / Tiết thực hành:</span>
             </span>
 
-            {/* Nút: Tất cả các ngày */}
-            <button
-              type="button"
-              onClick={() => {
-                setDateFilterMode('all');
-                setCustomDate('');
-              }}
-              className={`px-3 py-1 rounded-xl font-bold transition-all cursor-pointer ${
-                dateFilterMode === 'all'
-                  ? 'bg-cyan-400 text-slate-950 shadow-xs'
-                  : 'bg-white/10 hover:bg-white/20 text-blue-100'
-              }`}
-            >
-              Tất cả các ngày
-            </button>
-
-            {/* Nút: Hôm nay */}
-            <button
-              type="button"
-              onClick={() => {
-                setDateFilterMode('custom');
-                setCustomDate(getTodayDateString());
-              }}
-              className={`px-3 py-1 rounded-xl font-bold transition-all flex items-center gap-1 cursor-pointer ${
-                dateFilterMode === 'custom' && customDate === getTodayDateString()
-                  ? 'bg-emerald-400 text-slate-950 shadow-xs'
-                  : 'bg-emerald-950/70 hover:bg-emerald-900/80 text-emerald-300 border border-emerald-500/40'
-              }`}
-              title="Lọc bài nộp trong ngày thực hành hôm nay"
-            >
-              <Calendar className="w-3.5 h-3.5" />
-              <span>Hôm nay ({formatPracticeDateVi(getTodayDateString())})</span>
-            </button>
-
-            {/* Nút: Ngày gần nhất của lớp */}
+            {/* Nút: Tiết gần nhất (Mặc định khi chọn lớp) */}
             <button
               type="button"
               onClick={() => {
@@ -496,385 +373,94 @@ export const ClassResultsModal: React.FC<ClassResultsModalProps> = ({
                 setCustomDate('');
               }}
               disabled={!latestDate}
-              className={`px-3 py-1 rounded-xl font-bold transition-all flex items-center gap-1.5 cursor-pointer ${
+              className={`px-3 py-1.5 rounded-xl font-bold transition-all flex items-center gap-1.5 cursor-pointer ${
                 dateFilterMode === 'latest'
-                  ? 'bg-amber-400 text-slate-950 shadow-xs'
+                  ? 'bg-amber-400 text-slate-950 shadow-sm font-black'
                   : 'bg-white/10 hover:bg-white/20 text-blue-100 disabled:opacity-40'
               }`}
-              title={latestDate ? `Ngày gần nhất: ${formatPracticeDateVi(latestDate)}` : 'Chưa có dữ liệu'}
+              title={latestDate ? `Xem kết quả tiết thực hành gần nhất: ${formatPracticeDateVi(latestDate)}` : 'Chưa có buổi thực hành nào'}
             >
-              <Sparkles className="w-3.5 h-3.5 text-amber-700" />
+              <Sparkles className="w-3.5 h-3.5 text-amber-800" />
               <span>
-                Ngày gần nhất {latestDate ? `(${formatPracticeDateVi(latestDate)})` : ''}
+                Tiết gần nhất {latestDate ? `(${formatPracticeDateVi(latestDate)})` : ''}
               </span>
             </button>
 
-            {/* Dropdown danh sách các ngày thực hành trong lịch sử */}
-            {availableDates.length > 0 && (
-              <select
-                value={dateFilterMode === 'custom' && availableDates.includes(customDate) ? customDate : ''}
-                onChange={(e) => {
-                  if (e.target.value) {
-                    setCustomDate(e.target.value);
-                    setDateFilterMode('custom');
-                  }
-                }}
-                className="bg-slate-800 text-cyan-200 border border-blue-500/40 text-xs px-2.5 py-1 rounded-xl font-semibold focus:outline-none cursor-pointer"
-              >
-                <option value="">-- Chọn ngày trong lịch sử --</option>
-                {availableDates.map((d) => (
-                  <option key={d} value={d}>
-                    Ngày {formatPracticeDateVi(d)} {d === latestDate ? '(Gần nhất)' : ''}
-                  </option>
-                ))}
-              </select>
+            {/* Dropdown: Các ngày thực hành trước đó (chỉ hiển thị các ngày trước đó) */}
+            {previousDates.length > 0 && (
+              <div className="flex items-center gap-1.5 bg-slate-800/80 px-2.5 py-1 rounded-xl border border-indigo-500/40">
+                <span className="text-[11px] text-slate-300 font-medium">Các ngày trước đó:</span>
+                <select
+                  value={dateFilterMode === 'custom' && previousDates.includes(customDate) ? customDate : ''}
+                  onChange={(e) => {
+                    if (e.target.value) {
+                      setCustomDate(e.target.value);
+                      setDateFilterMode('custom');
+                    }
+                  }}
+                  className="bg-slate-900 text-cyan-200 text-xs px-2 py-0.5 rounded-lg font-semibold focus:outline-none cursor-pointer border border-slate-700"
+                >
+                  <option value="">-- Chọn ngày trước đó --</option>
+                  {previousDates.map((d) => (
+                    <option key={d} value={d}>
+                      Ngày {formatPracticeDateVi(d)}
+                    </option>
+                  ))}
+                </select>
+              </div>
             )}
 
-            {/* Ô Chọn Ngày Bất Kỳ (HTML5 Date Input) */}
-            <div className="flex items-center gap-1.5 bg-white/10 hover:bg-white/15 px-2.5 py-1 rounded-xl border border-white/20 transition-colors">
-              <span className="text-[11px] text-blue-200 font-medium">Chọn ngày bất kỳ:</span>
-              <input
-                type="date"
-                value={customDate}
-                onChange={(e) => {
-                  setCustomDate(e.target.value);
-                  if (e.target.value) {
-                    setDateFilterMode('custom');
-                  }
-                }}
-                className="bg-transparent text-white text-xs font-bold focus:outline-none cursor-pointer"
-              />
-            </div>
+            {/* Nút: Xem tất cả các ngày */}
+            <button
+              type="button"
+              onClick={() => {
+                setDateFilterMode('all');
+                setCustomDate('');
+              }}
+              className={`px-3 py-1.5 rounded-xl font-bold transition-all cursor-pointer ${
+                dateFilterMode === 'all'
+                  ? 'bg-cyan-400 text-slate-950 shadow-sm font-black'
+                  : 'bg-white/10 hover:bg-white/20 text-blue-100'
+              }`}
+              title="Xem tổng hợp kết quả của toàn bộ các buổi thực hành từ trước tới nay"
+            >
+              Tất cả các ngày
+            </button>
           </div>
 
-          <div className="text-[11px] text-cyan-200 font-medium">
+          <div className="text-[11px] text-cyan-200 font-medium flex items-center gap-1.5">
             {effectiveFilterDate ? (
               <span>
-                Đang xem ngày: <strong className="text-white font-bold">{formatPracticeDateVi(effectiveFilterDate)}</strong> (
-                {uniqueClassList.length} nhóm)
+                Đang hiển thị kết quả: <strong className="text-white font-bold">{formatPracticeDateVi(effectiveFilterDate)}</strong>
+                {dateFilterMode === 'latest' && <span className="ml-1 text-amber-300 font-semibold">(Tiết gần nhất)</span>}
+                <span className="text-slate-400 ml-1">({dateFilteredList.length} bài nộp)</span>
               </span>
             ) : (
-              <span>Toàn bộ các ngày ({uniqueClassList.length} nhóm)</span>
+              <span>
+                Đang hiển thị: <strong className="text-white font-bold">Toàn bộ các ngày thực hành</strong>
+                <span className="text-slate-400 ml-1">({dateFilteredList.length} bài nộp)</span>
+              </span>
             )}
           </div>
         </div>
 
-        {/* Nút Quản Lý Cho Phép Nộp Bài (Dành Cho Giáo Viên Trước Khi Ổn Định Lớp) */}
-        {isTeacher && onToggleSubmissionPermission && (
-          <div className="p-3 sm:px-6 bg-gradient-to-r from-blue-900 via-indigo-900 to-slate-900 border-b border-indigo-700 text-white flex flex-wrap items-center justify-between gap-3 text-xs">
-            <div className="flex items-center gap-2">
-              <span className={`w-3 h-3 rounded-full ${allowSubmission ? 'bg-emerald-400 animate-pulse' : 'bg-rose-500'}`} />
-              <span className="font-bold">
-                Quyền quản lý nộp bài của Giáo viên:
-              </span>
-              <span className="text-slate-300 font-medium hidden sm:inline">
-                {allowSubmission
-                  ? 'Học sinh đang được phép nộp bài thực hành trên phòng máy.'
-                  : 'Đang khóa nộp bài (tránh học sinh làm bài ở nhà nộp trước khi ổn định lớp thực hành).'}
-              </span>
-            </div>
-
-            <div className="flex items-center gap-2">
-              <button
-                type="button"
-                onClick={() => onToggleSubmissionPermission(!allowSubmission)}
-                className={`px-3.5 py-1.5 rounded-xl font-black text-xs flex items-center gap-1.5 transition-all shadow-xs cursor-pointer ${
-                  allowSubmission
-                    ? 'bg-rose-600 hover:bg-rose-700 text-white'
-                    : 'bg-emerald-500 hover:bg-emerald-600 text-slate-950 font-black'
-                }`}
-              >
-                {allowSubmission ? (
-                  <>
-                    <Lock className="w-3.5 h-3.5" />
-                    <span>Khóa Nộp Bài</span>
-                  </>
-                ) : (
-                  <>
-                    <Unlock className="w-3.5 h-3.5" />
-                    <span>Bật Cho Phép Nộp Bài</span>
-                  </>
-                )}
-              </button>
-            </div>
-          </div>
-        )}
-
-        {/* Stats & Filter Bar */}
-        <div className="p-3.5 sm:p-4 bg-slate-50 border-b border-slate-200 flex flex-wrap items-center justify-between gap-3 text-xs">
-          <div className="flex flex-wrap items-center gap-3 sm:gap-4">
-            <span className="text-slate-600">
-              Tổng số nhóm đã nộp: <strong className="text-slate-900 font-bold">{total}</strong>
-            </span>
-            <span className="w-1 h-1 bg-slate-400 rounded-full" />
-            <span className="text-slate-600">
-              Đạt 10/10: <strong className="text-amber-600 font-bold">{perfectCount}</strong> nhóm
-            </span>
-            <span className="w-1 h-1 bg-slate-400 rounded-full" />
-            <span className="text-slate-600">
-              Điểm TB: <strong className="text-blue-600 font-bold">{avgScore}đ</strong>
-            </span>
-          </div>
-
-          <div className="flex flex-wrap items-center gap-2">
-            {/* Chế độ xem: Lần cao nhất / Xem chi tiết các lần */}
-            <div className="flex items-center bg-white border border-slate-200 rounded-lg p-0.5 text-xs font-medium">
-              <button
-                type="button"
-                onClick={() => setShowAttemptMode('highest')}
-                className={`px-2.5 py-1 rounded-md transition-all ${
-                  showAttemptMode === 'highest'
-                    ? 'bg-blue-600 text-white font-bold shadow-2xs'
-                    : 'text-slate-600 hover:text-slate-900'
-                }`}
-                title="Bảng kết quả chỉ hiển thị lần nộp có điểm cao nhất của từng nhóm"
-              >
-                Điểm cao nhất
-              </button>
-              <button
-                type="button"
-                onClick={() => setShowAttemptMode('all')}
-                className={`px-2.5 py-1 rounded-md transition-all ${
-                  showAttemptMode === 'all'
-                    ? 'bg-blue-600 text-white font-bold shadow-2xs'
-                    : 'text-slate-600 hover:text-slate-900'
-                }`}
-                title="Xem chi tiết lịch sử từng lần nộp của nhóm"
-              >
-                Mở rộng các lần
-              </button>
-            </div>
-
-            {/* Sort Toggles */}
-            <div className="flex items-center bg-white border border-slate-200 rounded-lg p-0.5 text-xs font-medium">
-              <button
-                type="button"
-                onClick={() => setSortBy('machine')}
-                className={`px-2.5 py-1 rounded-md transition-all ${
-                  sortBy === 'machine'
-                    ? 'bg-blue-600 text-white font-bold shadow-2xs'
-                    : 'text-slate-600 hover:text-slate-900'
-                }`}
-              >
-                Máy 01, 02...
-              </button>
-              <button
-                type="button"
-                onClick={() => setSortBy('name')}
-                className={`px-2.5 py-1 rounded-md transition-all ${
-                  sortBy === 'name'
-                    ? 'bg-blue-600 text-white font-bold shadow-2xs'
-                    : 'text-slate-600 hover:text-slate-900'
-                }`}
-              >
-                Tên A-Z
-              </button>
-              <button
-                type="button"
-                onClick={() => setSortBy('score')}
-                className={`px-2.5 py-1 rounded-md transition-all ${
-                  sortBy === 'score'
-                    ? 'bg-blue-600 text-white font-bold shadow-2xs'
-                    : 'text-slate-600 hover:text-slate-900'
-                }`}
-              >
-                Điểm cao
-              </button>
-            </div>
-
-            <div className="relative min-w-[180px]">
-              <Search className="w-3.5 h-3.5 absolute left-3 top-1/2 transform -translate-y-1/2 text-slate-400" />
-              <input
-                type="text"
-                placeholder="Tìm bạn hoặc số máy..."
-                value={search}
-                onChange={(e) => setSearch(e.target.value)}
-                className="w-full bg-white border border-slate-300 rounded-lg pl-8 pr-3 py-1.5 text-xs text-slate-800 focus:ring-2 focus:ring-blue-500"
-              />
-            </div>
-          </div>
-        </div>
-
-        {/* Results List */}
-        <div className="flex-1 overflow-y-auto p-4 sm:p-6 space-y-3">
-          {sorted.length === 0 ? (
-            <div className="text-center py-12 text-slate-500 space-y-3 bg-slate-50/70 rounded-2xl border border-slate-200 p-6 mx-2">
-              <Users className="w-12 h-12 mx-auto text-blue-500" />
-              <p className="font-bold text-base text-slate-800">
-                Chưa có dữ liệu bài nộp nào của {activeClass === 'Tất cả' ? 'toàn trường' : `Lớp ${activeClass}`}
-                {effectiveFilterDate ? ` vào ngày ${formatPracticeDateVi(effectiveFilterDate)}` : ''}
-              </p>
-              <p className="text-xs text-slate-500 max-w-md mx-auto">
-                {effectiveFilterDate
-                  ? `Lớp ${activeClass} có thể đã thực hành vào một ngày khác trong tuần.`
-                  : 'Hệ thống CSDL tự động ghi nhận ngay khi học sinh bấm "Nộp bài & Chấm điểm AI".'}
-              </p>
-              <div className="flex items-center justify-center gap-2 pt-2 flex-wrap">
-                {effectiveFilterDate && (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setDateFilterMode('all');
-                      setCustomDate('');
-                    }}
-                    className="px-3.5 py-1.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-xs font-bold transition-all cursor-pointer shadow-xs"
-                  >
-                    Xem tất cả các ngày của lớp {activeClass}
-                  </button>
-                )}
-                {onRefresh && (
-                  <button
-                    type="button"
-                    onClick={onRefresh}
-                    className="px-3.5 py-1.5 bg-slate-200 hover:bg-slate-300 text-slate-800 rounded-xl text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5"
-                  >
-                    <RefreshCw className="w-3.5 h-3.5" />
-                    <span>Làm mới CSDL ngay</span>
-                  </button>
-                )}
-              </div>
-            </div>
-          ) : (
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-              {sorted.map((sub, index) => {
-                const isTen = sub.highestScore >= 10;
-                const isGood = sub.highestScore >= 8;
-                const formattedMachine = formatMachineNumber(sub.machineNumber);
-                const leaderParsed = splitVietnameseName(sub.studentLeader);
-                const isExpanded = expandedSubId === sub.id || showAttemptMode === 'all';
-
-                // Lần nộp cao nhất
-                const bestAttempt = sub.attempts.length > 0
-                  ? sub.attempts.reduce((b, curr) => (curr.score > (b?.score ?? -1) ? curr : b), sub.attempts[0])
-                  : null;
-
-                return (
-                  <div
-                    key={sub.id}
-                    className={`p-4 rounded-2xl border transition-all ${
-                      isTen
-                        ? 'bg-amber-50/60 border-amber-300 shadow-xs'
-                        : isGood
-                        ? 'bg-blue-50/50 border-blue-200'
-                        : 'bg-white border-slate-200'
-                    }`}
-                  >
-                    <div className="flex items-start justify-between gap-3">
-                      <div className="space-y-1.5 flex-1">
-                        <div className="flex items-center gap-2 flex-wrap">
-                          <span className="font-extrabold text-xs px-2.5 py-0.5 rounded-md bg-blue-100 text-blue-800 border border-blue-200">
-                            {formattedMachine}
-                          </span>
-                          {(duplicateMachineCounts.get(sub.machineNumber) || 0) > 1 && (
-                            <span
-                              className="text-[10px] font-bold px-2 py-0.5 rounded-md bg-amber-100 text-amber-900 border border-amber-300 flex items-center gap-1"
-                              title="Có 2 nhóm học sinh cùng chọn số máy này"
-                            >
-                              <AlertTriangle className="w-3 h-3 text-amber-600 shrink-0" />
-                              <span>Trùng số máy</span>
-                            </span>
-                          )}
-                          <span className="font-bold text-sm text-slate-900">
-                            {sub.studentLeader}
-                          </span>
-                          <span className="text-[11px] text-slate-400 font-normal">
-                            (Tên: <strong className="text-slate-700">{leaderParsed.ten}</strong>)
-                          </span>
-                          {sortBy === 'score' && index < 3 && isTen && (
-                            <span className="text-amber-500 font-bold text-xs flex items-center gap-0.5">
-                              <Award className="w-3.5 h-3.5" /> Top {index + 1}
-                            </span>
-                          )}
-                        </div>
-
-                        {sub.groupMembers.length > 0 ? (
-                          <div className="text-xs text-slate-600 bg-white/70 rounded-lg p-2 border border-slate-100">
-                            <span className="text-slate-500 font-medium">Các bạn cùng nhóm ({sub.groupMembers.length} bạn): </span>
-                            <span className="font-semibold text-slate-800">
-                              {sub.groupMembers.join(', ')}
-                            </span>
-                          </div>
-                        ) : (
-                          <p className="text-xs text-slate-400 italic">Thực hành cá nhân</p>
-                        )}
-
-                        <div className="flex items-center gap-2 text-[11px] text-slate-500 pt-0.5 flex-wrap">
-                          <span className="font-bold text-emerald-700">
-                            Lần cao nhất: {bestAttempt ? `Lần ${bestAttempt.attemptNumber} (${bestAttempt.score}đ)` : `${sub.highestScore}đ`}
-                          </span>
-                          <span>•</span>
-                          <span>Tổng đã nộp: {sub.attempts.length} lần</span>
-                          <span>•</span>
-                          <span>
-                            {new Date(sub.latestSubmittedAt).toLocaleTimeString('vi-VN', {
-                              hour: '2-digit',
-                              minute: '2-digit',
-                            })}
-                          </span>
-                          {sub.attempts.length > 1 && showAttemptMode !== 'all' && (
-                            <button
-                              type="button"
-                              onClick={() => setExpandedSubId(expandedSubId === sub.id ? null : sub.id)}
-                              className="text-blue-600 hover:text-blue-800 underline font-semibold cursor-pointer ml-1"
-                            >
-                              {expandedSubId === sub.id ? 'Thu gọn' : 'Xem các lần nộp'}
-                            </button>
-                          )}
-                        </div>
-
-                        {/* Chi tiết các lần nộp khi mở rộng */}
-                        {isExpanded && sub.attempts.length > 1 && (
-                          <div className="mt-2 pt-2 border-t border-slate-200/80 space-y-1 bg-white/80 p-2.5 rounded-xl text-xs">
-                            <span className="font-bold text-slate-700 block text-[11px]">
-                              Chi tiết lịch sử các lần chấm:
-                            </span>
-                            <div className="flex flex-wrap gap-1.5">
-                              {sub.attempts.map((att) => (
-                                <span
-                                  key={att.attemptNumber}
-                                  className={`px-2 py-0.5 rounded-md font-semibold text-[11px] border ${
-                                    att.score === sub.highestScore
-                                      ? 'bg-amber-100 border-amber-300 text-amber-900 font-black'
-                                      : 'bg-slate-100 border-slate-200 text-slate-700'
-                                  }`}
-                                >
-                                  Lần {att.attemptNumber}: {att.score}đ {att.score === sub.highestScore ? '★' : ''}
-                                </span>
-                              ))}
-                            </div>
-                          </div>
-                        )}
-                      </div>
-
-                      {/* Score badge */}
-                      <div
-                        className={`px-3 py-1.5 rounded-xl border text-center shrink-0 ${
-                          isTen
-                            ? 'bg-amber-100 border-amber-300 text-amber-900 font-black'
-                            : isGood
-                            ? 'bg-blue-100 border-blue-300 text-blue-900 font-extrabold'
-                            : 'bg-slate-100 border-slate-300 text-slate-800 font-bold'
-                        }`}
-                      >
-                        <div className="text-lg leading-none">{sub.highestScore}</div>
-                        <div className="text-[10px] font-semibold text-slate-500 mt-0.5">/ 10đ</div>
-                      </div>
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          )}
-        </div>
-      </div>
-    )}
+        {/* 1 BẢNG TỔNG HỢP CHUNG CỦA CẢ LỚP (SP1, SP2... ĐTB) */}
+        <ClassMultiProductGradebook
+          className={activeClass}
+          assignments={assignments}
+          submissions={dateFilteredList}
+          roster={studentRoster}
+          isTeacher={isTeacher}
+          onRefresh={onRefresh}
+          onExportExcel={handleExportMultiProduct}
+        />
 
         {/* Footer */}
-        <div className="p-3.5 border-t border-slate-200 bg-slate-50 flex flex-wrap items-center justify-between gap-3 text-xs text-slate-500 px-6">
+        <div className="p-3.5 border-t border-slate-200 bg-slate-50 flex flex-wrap items-center justify-between gap-3 text-xs text-slate-500 px-6 shrink-0">
           <div className="flex items-center gap-2 text-emerald-700">
             <Sparkles className="w-4 h-4 shrink-0" />
             <span>
-              Bảng điểm tự động cập nhật • Xuất Excel đầy đủ tất cả học sinh (Trưởng nhóm + Thành viên) theo thứ tự <strong>Máy 01, Máy 02...</strong> và <strong>cột Tên riêng</strong> ABC!
+              Bảng điểm tổng hợp tự động cập nhật • Lấy điểm cao nhất của từng sản phẩm thực hành (SP01, SP02...)
             </span>
           </div>
           <button
