@@ -70,6 +70,7 @@ export interface SubmissionAttempt {
   fileSize: number;
   fileLastModified?: number; // Thời gian khởi tạo/lưu tệp trên máy tính (millisecond)
   fileContent?: string;
+  fileDataUrl?: string; // Dữ liệu tệp nhị phân gốc (Data URL Base64) bảo toàn nguyên vẹn 100% để tải về không bị lỗi
   imageBase64?: string; // Dữ liệu ảnh sản phẩm để AI chấm trực quan (Vision)
   score: number;
   aiComparisonDetails?: string; // Chi tiết đối chiếu với sản phẩm mẫu & chuẩn tri thức

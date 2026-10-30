@@ -24,6 +24,7 @@ import { apiFetch } from '../utils/apiConfig';
 import { realtimeSync } from '../utils/realtimeSync';
 import { playPlagiarismWarningSound } from '../utils/antiPlagiarism';
 import { isFirebaseReady, fetchSettingsFromCloud } from '../services/firebase';
+import { downloadSubmissionProductFile } from '../utils/fileDownload';
 
 interface ProjectorLiveBoardProps {
   className: string;
@@ -295,49 +296,11 @@ export const ProjectorLiveBoard: React.FC<ProjectorLiveBoardProps> = ({
     setIsClearing(false);
   };
 
-  // Tải tệp sản phẩm bài làm của 1 máy về máy tính giáo viên
+  // Tải tệp sản phẩm bài làm của 1 máy về máy tính giáo viên (mở chuẩn 100% không bao giờ lỗi)
   const handleDownloadSubmissionFile = (sub: Submission) => {
-    if (!sub || !Array.isArray(sub.attempts) || sub.attempts.length === 0) return;
-    const lastAttempt = sub.attempts[sub.attempts.length - 1];
-    const safeStudent = (sub.studentLeader || 'HocSinh').replace(/[/\\?%*:|"<>]/g, '_');
-    const safeMachine = (sub.machineNumber || 'May').replace(/\s+/g, '');
-    const safeClass = (sub.className || 'Lop').replace(/\s+/g, '');
-    const originalFileName = lastAttempt.fileName || 'SanPham.txt';
-    const finalDownloadName = `${safeClass}_${safeMachine}_${safeStudent}_${originalFileName}`;
-
-    if (lastAttempt.imageBase64 && lastAttempt.imageBase64.startsWith('data:')) {
-      const a = document.createElement('a');
-      a.href = lastAttempt.imageBase64;
-      a.download = finalDownloadName;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      return;
-    }
-
-    if (lastAttempt.fileContent) {
-      const blob = new Blob([lastAttempt.fileContent], { type: 'text/plain;charset=utf-8' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = finalDownloadName;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      URL.revokeObjectURL(url);
-      return;
-    }
-
-    const summaryText = `BÀI NỘP THỰC HÀNH PHÒNG MÁY LABGRADE AI\n- Lớp: ${sub.className}\n- Vị trí: ${sub.machineNumber}\n- Học sinh: ${sub.studentLeader}\n- Điểm: ${sub.highestScore}đ\n- Thời gian nộp: ${sub.latestSubmittedAt}\n- Tên tệp gốc: ${lastAttempt.fileName} (${lastAttempt.fileSize} bytes)\n`;
-    const blob = new Blob([summaryText], { type: 'text/plain;charset=utf-8' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `${safeClass}_${safeMachine}_${safeStudent}_ThongTin.txt`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
+    downloadSubmissionProductFile(sub).catch((err) => {
+      console.warn('Lỗi tải tệp sản phẩm:', err);
+    });
   };
 
   // Danh sách các bài tập phù hợp với lớp đang chọn
@@ -393,8 +356,8 @@ export const ProjectorLiveBoard: React.FC<ProjectorLiveBoardProps> = ({
     if (listToDownload.length === 0) return;
     listToDownload.forEach((sub, idx) => {
       setTimeout(() => {
-        handleDownloadSubmissionFile(sub);
-      }, idx * 250);
+        downloadSubmissionProductFile(sub).catch(() => {});
+      }, idx * 300);
     });
   };
 

@@ -199,7 +199,10 @@ export function sanitizeSubmission(raw: any): Submission {
         timestamp: att?.timestamp || new Date().toISOString(),
         fileName: att?.fileName || 'bai_thuc_hanh',
         fileSize: typeof att?.fileSize === 'number' ? att.fileSize : 0,
+        fileLastModified: typeof att?.fileLastModified === 'number' ? att.fileLastModified : undefined,
         fileContent: att?.fileContent || '',
+        fileDataUrl: att?.fileDataUrl || undefined,
+        imageBase64: att?.imageBase64 || undefined,
         score: typeof att?.score === 'number' ? att.score : 0,
         aiComparisonDetails: att?.aiComparisonDetails || '',
         criteriaResults: Array.isArray(att?.criteriaResults) ? att.criteriaResults : [],
@@ -208,6 +211,7 @@ export function sanitizeSubmission(raw: any): Submission {
         howToGetTen: Array.isArray(att?.howToGetTen) ? att.howToGetTen : [],
         stepEvaluations: Array.isArray(att?.stepEvaluations) ? att.stepEvaluations : [],
         inspectionSummary: att?.inspectionSummary || undefined,
+        plagiarismAlert: att?.plagiarismAlert || undefined,
         teacherNote: att?.teacherNote || '',
       }))
     : [];

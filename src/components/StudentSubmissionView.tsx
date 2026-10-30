@@ -67,6 +67,7 @@ interface StudentSubmissionViewProps {
     fileSize: number;
     fileLastModified?: number;
     fileContent: string;
+    fileDataUrl?: string;
     imageBase64?: string;
   }) => Promise<SubmissionAttempt | null>;
   onOpenStudentInfoModal: () => void;
@@ -102,6 +103,7 @@ export const StudentSubmissionView: React.FC<StudentSubmissionViewProps> = ({
   // File Upload State
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [fileContent, setFileContent] = useState<string>('');
+  const [fileDataUrl, setFileDataUrl] = useState<string | null>(null);
   const [imagePreviewUrl, setImagePreviewUrl] = useState<string | null>(null);
   const [isGrading, setIsGrading] = useState<boolean>(false);
   const [gradingStep, setGradingStep] = useState<string>('');
@@ -197,6 +199,24 @@ export const StudentSubmissionView: React.FC<StudentSubmissionViewProps> = ({
   const processUploadedFile = async (file: File) => {
     setSelectedFile(file);
     setErrorMsg(null);
+    setImagePreviewUrl(null);
+    setFileDataUrl(null);
+
+    // Lưu toàn vẹn dữ liệu nhị phân gốc (Data URL) để giáo viên tải về không bao giờ bị lỗi
+    let currentDataUrl = '';
+    try {
+      currentDataUrl = await new Promise<string>((resolve) => {
+        const r = new FileReader();
+        r.onload = () => resolve((r.result as string) || '');
+        r.onerror = () => resolve('');
+        r.readAsDataURL(file);
+      });
+      if (currentDataUrl) {
+        setFileDataUrl(currentDataUrl);
+      }
+    } catch (readErr) {
+      console.warn('Lỗi đọc Data URL tệp nộp:', readErr);
+    }
 
     const ext = file.name.split('.').pop()?.toLowerCase() || '';
 
@@ -216,7 +236,7 @@ export const StudentSubmissionView: React.FC<StudentSubmissionViewProps> = ({
         setFileContent(`[Tệp Word: ${file.name}, dung lượng ${file.size} bytes]`);
       }
     }
-    // 2. File PowerPoint (.pptx) - Trích xuất nội dung các trang slide bằng JSZip
+    // 2. File PowerPoint (.pptx, .ppt) - Trích xuất nội dung các trang slide bằng JSZip & ảnh minh họa
     else if (ext === 'pptx') {
       try {
         const zip = await JSZip.loadAsync(file);
@@ -237,6 +257,20 @@ export const StudentSubmissionView: React.FC<StudentSubmissionViewProps> = ({
           pptxText += `\n--- Slide ${i + 1} ---\n${slideContent}\n`;
         }
         setFileContent(pptxText);
+
+        // Trích xuất hình ảnh đầu tiên trong PowerPoint (ppt/media/*) để AI thị giác chấm và xem trước
+        const mediaFiles = Object.keys(zip.files).filter((n) =>
+          n.startsWith('ppt/media/') && /\.(png|jpe?g|webp|gif|bmp)$/i.test(n)
+        );
+        if (mediaFiles.length > 0) {
+          try {
+            const firstMedia = mediaFiles[0];
+            const mediaBase64 = await zip.files[firstMedia].async('base64');
+            const mediaExt = firstMedia.split('.').pop()?.toLowerCase() || 'png';
+            const mime = mediaExt === 'jpg' || mediaExt === 'jpeg' ? 'image/jpeg' : `image/${mediaExt}`;
+            setImagePreviewUrl(`data:${mime};base64,${mediaBase64}`);
+          } catch {}
+        }
       } catch (err) {
         console.warn('Lỗi đọc PowerPoint bằng JSZip:', err);
         setFileContent(`[Tệp PowerPoint: ${file.name}, dung lượng ${file.size} bytes]`);
@@ -300,15 +334,19 @@ export const StudentSubmissionView: React.FC<StudentSubmissionViewProps> = ({
       };
       reader.readAsArrayBuffer(file);
     }
-    // 5. File Hình ảnh sơ đồ / đồ họa (.png, .jpg, .jpeg, .webp, .bmp)
-    else if (['png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp'].includes(ext)) {
-      const reader = new FileReader();
-      reader.onload = (e) => {
-        const base64 = e.target?.result as string;
-        setImagePreviewUrl(base64);
-        setFileContent(`[Tệp Hình Ảnh Đồ Họa: ${file.name}, dung lượng ${file.size} bytes]`);
-      };
-      reader.readAsDataURL(file);
+    // 5. File Hình ảnh sơ đồ / đồ họa (.png, .jpg, .jpeg, .webp, .svg, .bmp, .gif, .ico, .jfif)
+    else if (['png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp', 'svg', 'ico', 'jfif'].includes(ext)) {
+      if (currentDataUrl) {
+        setImagePreviewUrl(currentDataUrl);
+      } else {
+        const reader = new FileReader();
+        reader.onload = (e) => {
+          const base64 = e.target?.result as string;
+          setImagePreviewUrl(base64);
+        };
+        reader.readAsDataURL(file);
+      }
+      setFileContent(`[Tệp Hình Ảnh Đồ Họa: ${file.name}, dung lượng ${file.size} bytes]`);
     }
     // 6. File Văn bản, Code Python (.py), C++ (.cpp), HTML (.html), Text (.txt)
     else {
@@ -378,6 +416,7 @@ export const StudentSubmissionView: React.FC<StudentSubmissionViewProps> = ({
         fileSize: selectedFile.size,
         fileLastModified: selectedFile.lastModified,
         fileContent: fileContent,
+        fileDataUrl: fileDataUrl || imagePreviewUrl || undefined,
         imageBase64: imagePreviewUrl || undefined,
       });
 
@@ -756,6 +795,8 @@ export const StudentSubmissionView: React.FC<StudentSubmissionViewProps> = ({
                     onClick={() => {
                       setSelectedFile(null);
                       setFileContent('');
+                      setFileDataUrl(null);
+                      setImagePreviewUrl(null);
                       if (fileInputRef.current) fileInputRef.current.value = '';
                     }}
                     className="w-7 h-7 sm:w-8 sm:h-8 rounded-xl bg-white hover:bg-rose-50 border border-slate-200 hover:border-rose-300 text-slate-400 hover:text-rose-600 flex items-center justify-center transition cursor-pointer shadow-2xs"

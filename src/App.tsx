@@ -866,6 +866,7 @@ export default function App() {
     fileSize: number;
     fileLastModified?: number;
     fileContent: string;
+    fileDataUrl?: string;
     imageBase64?: string;
   }): Promise<SubmissionAttempt | null> => {
     const todayStr = getTodayDateString();
@@ -1046,6 +1047,7 @@ export default function App() {
       fileSize: data.fileSize,
       fileLastModified: data.fileLastModified,
       fileContent: data.fileContent,
+      fileDataUrl: data.fileDataUrl || (data.imageBase64?.startsWith('data:') ? data.imageBase64 : undefined),
       imageBase64: data.imageBase64,
       score: gradeData.score,
       aiComparisonDetails: gradeData.aiComparisonDetails || 'Sản phẩm đã được hệ thống AI đối chiếu tự động với sản phẩm mẫu & chuẩn tri thức môn Tin học.',

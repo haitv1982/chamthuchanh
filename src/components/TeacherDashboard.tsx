@@ -24,6 +24,7 @@ import {
 import { Assignment, Submission, SubmissionAttempt } from '../types';
 import { SCHOOL_CLASSES } from '../data/classes';
 import { exportSubmissionsToExcel } from '../utils/excelExport';
+import { downloadSubmissionProductFile } from '../utils/fileDownload';
 
 interface TeacherDashboardProps {
   assignments: Assignment[];
@@ -595,15 +596,26 @@ export const TeacherDashboard: React.FC<TeacherDashboardProps> = ({
                             {att.fileName} ({att.fileSize} B)
                           </span>
                         </div>
-                        <span
-                          className={`font-black text-sm px-2.5 py-0.5 rounded-full ${
-                            att.score >= 10
-                              ? 'bg-amber-100 text-amber-800'
-                              : 'bg-blue-100 text-blue-800'
-                          }`}
-                        >
-                          {att.score} / 10đ
-                        </span>
+                        <div className="flex items-center gap-2">
+                          <button
+                            type="button"
+                            onClick={() => downloadSubmissionProductFile(viewingSubmission, att)}
+                            className="p-1 px-2.5 text-xs font-bold bg-blue-50 text-blue-700 hover:bg-blue-600 hover:text-white rounded-lg flex items-center gap-1 border border-blue-200 transition cursor-pointer shadow-2xs"
+                            title="Tải tệp sản phẩm của lần nộp này về máy tính"
+                          >
+                            <Download className="w-3.5 h-3.5" />
+                            <span>Lưu tệp</span>
+                          </button>
+                          <span
+                            className={`font-black text-sm px-2.5 py-0.5 rounded-full ${
+                              att.score >= 10
+                                ? 'bg-amber-100 text-amber-800'
+                                : 'bg-blue-100 text-blue-800'
+                            }`}
+                          >
+                            {att.score} / 10đ
+                          </span>
+                        </div>
                       </div>
 
                       {/* AI comparison report if present */}
