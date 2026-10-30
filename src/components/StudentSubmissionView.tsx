@@ -73,7 +73,7 @@ interface StudentSubmissionViewProps {
   onOpenStudentInfoModal: () => void;
   allowSubmission?: boolean;
   isTeacher?: boolean;
-  onToggleSubmissionPermission?: (allow: boolean) => void;
+  onToggleSubmissionPermission?: (allow: boolean, targetClass?: string) => void;
 }
 
 export const StudentSubmissionView: React.FC<StudentSubmissionViewProps> = ({
@@ -821,15 +821,15 @@ export const StudentSubmissionView: React.FC<StudentSubmissionViewProps> = ({
               <div className="p-2.5 bg-rose-50 border border-rose-300 rounded-xl text-rose-950 flex items-center justify-between gap-2 text-xs font-bold">
                 <div className="flex items-center gap-2">
                   <Lock className="w-4 h-4 text-rose-600 shrink-0" />
-                  <span>GIÁO VIÊN ĐANG KHÓA NHẬN BÀI NỘP PHÒNG MÁY</span>
+                  <span>GIÁO VIÊN ĐANG KHÓA NHẬN BÀI LỚP {userClassName?.toUpperCase()}</span>
                 </div>
                 {isTeacher && onToggleSubmissionPermission && (
                   <button
                     type="button"
-                    onClick={() => onToggleSubmissionPermission(true)}
+                    onClick={() => onToggleSubmissionPermission(true, userClassName)}
                     className="px-2.5 py-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-bold shrink-0 cursor-pointer"
                   >
-                    Mở nộp bài
+                    Mở nộp bài lớp {userClassName}
                   </button>
                 )}
               </div>

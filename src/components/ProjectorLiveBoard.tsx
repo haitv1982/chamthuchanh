@@ -17,6 +17,7 @@ import {
   Download,
   FolderDown,
   Lock,
+  Unlock,
 } from 'lucide-react';
 import { Submission, Assignment, StudentRecord } from '../types';
 import { SCHOOL_CLASSES } from '../data/classes';
@@ -37,6 +38,8 @@ interface ProjectorLiveBoardProps {
   onClearSubmissions?: (targetClass?: string) => Promise<boolean>;
   isTeacher?: boolean;
   allowSubmission?: boolean;
+  allowedClasses?: string[];
+  onToggleSubmissionPermission?: (allow: boolean, targetClass?: string) => void;
 }
 
 export const ProjectorLiveBoard: React.FC<ProjectorLiveBoardProps> = ({
@@ -50,6 +53,8 @@ export const ProjectorLiveBoard: React.FC<ProjectorLiveBoardProps> = ({
   onClearSubmissions,
   isTeacher = false,
   allowSubmission = true,
+  allowedClasses = [],
+  onToggleSubmissionPermission,
 }) => {
   // Lấy danh sách lớp duy nhất từ danh sách học sinh đã tải lên (nếu có)
   const rosterClasses = useMemo(() => {
@@ -361,7 +366,17 @@ export const ProjectorLiveBoard: React.FC<ProjectorLiveBoardProps> = ({
     });
   };
 
-  const totalSubmitted = allowSubmission ? submissionByMachine.size : 0;
+  const isClassAllowed = useMemo(() => {
+    if (!allowSubmission) return false;
+    if (activeClassFilter === 'Tất cả') return allowSubmission;
+    if (Array.isArray(allowedClasses) && allowedClasses.length > 0) {
+      const norm = activeClassFilter.trim().toUpperCase().replace(/^LỚP\s*|^LOP\s*/i, '');
+      return allowedClasses.some((c) => c.trim().toUpperCase().replace(/^LỚP\s*|^LOP\s*/i, '') === norm);
+    }
+    return allowSubmission;
+  }, [allowSubmission, activeClassFilter, allowedClasses]);
+
+  const totalSubmitted = isClassAllowed ? submissionByMachine.size : 0;
   const avgScore = totalSubmitted > 0
     ? (Array.from(submissionByMachine.values()).reduce((sum, s) => sum + s.highestScore, 0) / totalSubmitted).toFixed(1)
     : '0';
@@ -372,14 +387,14 @@ export const ProjectorLiveBoard: React.FC<ProjectorLiveBoardProps> = ({
     const machineId = `Máy ${String(i + 1).padStart(2, '0')}`;
     const sub = submissionByMachine.get(machineId);
     const allSubs = duplicateMachineMap.get(machineId) || [];
-    // YÊU CẦU: Khi giáo viên khóa nộp bài (allowSubmission === false), reset toàn bộ màn hình máy chiếu về trạng thái đang thực hành
-    const isShowingSubmission = allowSubmission && Boolean(sub);
+    // YÊU CẦU: Khi giáo viên khóa nộp bài của lớp đó, reset toàn bộ màn hình máy chiếu về trạng thái đang thực hành
+    const isShowingSubmission = isClassAllowed && Boolean(sub);
 
     return {
       machineId,
       submission: isShowingSubmission ? sub : null,
       hasMultipleGroups: allSubs.length > 1,
-      isPracticingState: !allowSubmission,
+      isPracticingState: !isClassAllowed,
     };
   });
 
@@ -438,13 +453,29 @@ export const ProjectorLiveBoard: React.FC<ProjectorLiveBoardProps> = ({
               </div>
 
               {/* Badge trạng thái nộp bài */}
-              <span className={`text-[11px] font-bold px-2.5 py-0.5 rounded-full border ${
-                allowSubmission
-                  ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40'
-                  : 'bg-rose-500/20 text-rose-300 border-rose-500/40'
-              }`}>
-                {allowSubmission ? '● Đang mở nộp bài' : '🔒 Đang khóa nộp bài'}
-              </span>
+              {isTeacher && onToggleSubmissionPermission ? (
+                <button
+                  type="button"
+                  onClick={() => onToggleSubmissionPermission(!isClassAllowed, activeClassFilter !== 'Tất cả' ? activeClassFilter : undefined)}
+                  className={`text-[11px] font-black px-2.5 py-0.5 rounded-full border transition cursor-pointer flex items-center gap-1 ${
+                    isClassAllowed
+                      ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40 hover:bg-emerald-500/30'
+                      : 'bg-rose-500/20 text-rose-300 border-rose-500/40 hover:bg-rose-500/30'
+                  }`}
+                  title={isClassAllowed ? 'Bấm vào để KHÓA nộp bài và kết thúc tiết thực hành của lớp' : 'Bấm vào để MỞ nộp bài cho lớp'}
+                >
+                  {isClassAllowed ? <Unlock className="w-3 h-3" /> : <Lock className="w-3 h-3" />}
+                  <span>{isClassAllowed ? `● Đang mở nộp bài ${activeClassFilter !== 'Tất cả' ? `Lớp ${activeClassFilter}` : ''}` : `🔒 Đang khóa nộp bài ${activeClassFilter !== 'Tất cả' ? `Lớp ${activeClassFilter}` : ''}`}</span>
+                </button>
+              ) : (
+                <span className={`text-[11px] font-bold px-2.5 py-0.5 rounded-full border ${
+                  isClassAllowed
+                    ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40'
+                    : 'bg-rose-500/20 text-rose-300 border-rose-500/40'
+                }`}>
+                  {isClassAllowed ? `● Đang mở nộp bài ${activeClassFilter !== 'Tất cả' ? `Lớp ${activeClassFilter}` : ''}` : `🔒 Đang khóa nộp bài ${activeClassFilter !== 'Tất cả' ? `Lớp ${activeClassFilter}` : ''}`}
+                </span>
+              )}
 
               <span className="text-[11px] font-bold px-2 py-0.5 rounded-full bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 hidden md:flex items-center gap-1">
                 <span className="w-2 h-2 rounded-full bg-cyan-400 animate-ping inline-block" />

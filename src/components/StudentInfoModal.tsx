@@ -102,6 +102,7 @@ export const StudentInfoModal: React.FC<StudentInfoModalProps> = ({
   const [renameInput, setRenameInput] = useState<string>('');
 
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const wasOpenRef = useRef<boolean>(false);
 
   // Toàn bộ các lớp thực tế có học sinh trong CSDL kèm số lượng học sinh
   const allRosterClassesWithCount = useMemo(() => {
@@ -127,94 +128,76 @@ export const StudentInfoModal: React.FC<StudentInfoModalProps> = ({
     return Array.from(map.values()).sort((a, b) => a.normalized.localeCompare(b.normalized, 'vi', { numeric: true }));
   }, [roster]);
 
+  // Chỉ khởi tạo state khi modal được BẬT MỞ (không ghi đè khi người dùng đang thao tác nháy chọn khối/lớp)
   useEffect(() => {
     if (isOpen) {
-      if (onRefreshRoster) onRefreshRoster();
-      
-      let initialGrade = selectedGrade || 'Lớp 6';
-      let initialClass = className || '6A1';
+      if (!wasOpenRef.current) {
+        wasOpenRef.current = true;
+        if (onRefreshRoster) onRefreshRoster();
+        
+        let initialGrade = selectedGrade || 'Lớp 6';
+        let initialClass = className || '6A1';
 
-      // Nếu máy học sinh chưa chọn tên (lần đầu vào) và lớp hiện tại (vd 6A2) không có học sinh,
-      // nhưng trong CSDL ĐÃ CÓ các lớp khác mà thầy cô vừa nạp (vd 8A1): TỰ ĐỘNG CHUYỂN SANG LỚP CÓ HỌC SINH!
-      const currentNorm = normalizeClassName(initialClass);
-      const currentClassHasStudents = roster.some((s) => normalizeClassName(s.className) === currentNorm);
-      if (!currentClassHasStudents && !studentLeader && allRosterClassesWithCount.length > 0) {
-        const firstAvailable = allRosterClassesWithCount[0];
-        initialClass = firstAvailable.rawClass;
-        if (firstAvailable.gradeDigit) {
-          initialGrade = `Lớp ${firstAvailable.gradeDigit}`;
+        const gradeDigit = extractGradeDigit(initialGrade);
+        const rosterInGrade = allRosterClassesWithCount.filter((c) => c.gradeDigit === gradeDigit);
+        if (rosterInGrade.length > 0 && !rosterInGrade.some((c) => normalizeClassName(c.rawClass) === normalizeClassName(initialClass))) {
+          initialClass = rosterInGrade[0].rawClass;
+        } else if (allRosterClassesWithCount.length > 0 && !studentLeader) {
+          const currentNorm = normalizeClassName(initialClass);
+          const found = allRosterClassesWithCount.find((c) => normalizeClassName(c.rawClass) === currentNorm);
+          if (!found) {
+            const firstAvailable = allRosterClassesWithCount[0];
+            initialClass = firstAvailable.rawClass;
+            if (firstAvailable.gradeDigit) {
+              initialGrade = `Lớp ${firstAvailable.gradeDigit}`;
+            }
+          }
         }
+
+        setTempGrade(initialGrade);
+        setTempClass(initialClass);
+        setTempMachine(machineNumber || 'Máy 01');
+        setTempLeader(studentLeader || '');
+        setTempMembers(groupMembers || []);
+        setSelectedGroupMemberOption('');
+        setErrorMsg(null);
+        setUploadNotice(null);
+        setIsConfirmDeleteClassOpen(false);
+        setIsRenameClassOpen(false);
+        setIsManualNameMode(false);
+        setSearchStudentQuery('');
       }
-
-      setTempGrade(initialGrade);
-      setTempClass(initialClass);
-      setTempMachine(machineNumber || 'Máy 01');
-      setTempLeader(studentLeader || '');
-      setTempMembers(groupMembers || []);
-      setSelectedGroupMemberOption('');
-      setErrorMsg(null);
-      setUploadNotice(null);
-      setIsConfirmDeleteClassOpen(false);
-      setIsRenameClassOpen(false);
-      setIsManualNameMode(false);
-      setSearchStudentQuery('');
+    } else {
+      wasOpenRef.current = false;
     }
-  }, [isOpen, selectedGrade, className, machineNumber, studentLeader, groupMembers, allRosterClassesWithCount]);
-
-  // Bản đồ các máy tính đã có học sinh nộp bài / đăng ký trong lớp hiện tại (Hook phải gọi vô điều kiện)
-  const occupiedMachineMap = useMemo(() => {
-    const map = new Map<string, string>();
-    const normClass = normalizeClassName(tempClass);
-    if (Array.isArray(existingSubmissions)) {
-      existingSubmissions.forEach((sub: any) => {
-        if (normalizeClassName(sub.className) === normClass && sub.machineNumber && sub.studentLeader) {
-          map.set(sub.machineNumber.trim().toLowerCase(), sub.studentLeader);
-        }
-      });
-    }
-    return map;
-  }, [existingSubmissions, tempClass]);
-
-  const cleanCurrentMachine = (tempMachine || '').trim().toLowerCase();
-  const machineOccupant = occupiedMachineMap.get(cleanCurrentMachine);
-  const isDuplicateMachineOccupied = Boolean(
-    machineOccupant &&
-    tempLeader &&
-    machineOccupant.trim().toLowerCase() !== tempLeader.trim().toLowerCase()
-  );
+  }, [isOpen]);
 
   // Lọc danh sách lớp học sinh phù hợp với khối đã chọn
   const gradeDigit = extractGradeDigit(tempGrade);
-  const defaultClasses = getClassesByGrade(tempGrade);
+  const defaultClasses = useMemo(() => getClassesByGrade(tempGrade), [tempGrade]);
 
-  // Lấy các lớp từ CSDL phù hợp với khối đã chọn (hoặc tất cả nếu không xác định)
-  const matchedRosterClasses = allRosterClassesWithCount
-    .filter((c) => !gradeDigit || !c.gradeDigit || c.gradeDigit === gradeDigit)
-    .map((c) => c.rawClass);
+  // Lấy các lớp từ CSDL phù hợp chính xác với khối đang chọn
+  const matchedRosterClasses = useMemo(() => {
+    return allRosterClassesWithCount
+      .filter((c) => !gradeDigit || !c.gradeDigit || c.gradeDigit === gradeDigit)
+      .map((c) => c.rawClass);
+  }, [allRosterClassesWithCount, gradeDigit]);
 
-  // QUY TẮC CƠ SỞ DỮ LIỆU:
-  // Nếu Thầy/Cô đã tải lên danh sách học sinh (allRosterClassesWithCount.length > 0):
-  // CSDL TÊN LỚP CHỈ CHỨA ĐÚNG CÁC LỚP TRONG DANH SÁCH, TẤT CẢ CÁC LỚP KHÁC BỊ LOẠI BỎ HOÀN TOÀN!
+  // Khi chọn khối nào, CHỈ hiển thị danh sách lớp thuộc khối đó
   const combinedClasses = useMemo(() => {
-    if (allRosterClassesWithCount.length > 0) {
-      if (matchedRosterClasses.length > 0) {
-        return matchedRosterClasses;
-      }
-      return allRosterClassesWithCount.map((c) => c.rawClass);
+    if (matchedRosterClasses.length > 0) {
+      return matchedRosterClasses;
     }
-    // Chỉ hiển thị lớp mặc định khi hệ thống hoàn toàn chưa có học sinh nào được tải lên
     return defaultClasses;
-  }, [allRosterClassesWithCount, matchedRosterClasses, defaultClasses]);
+  }, [matchedRosterClasses, defaultClasses]);
 
-  // Đổi khối thì tự động chọn lớp có sẵn học sinh của khối đó hoặc lớp đầu tiên trong CSDL
+  // Đổi khối lớp (K6, K7, K8, K9) mượt mà không bị kẹt hay quay về khối cũ
   const handleGradeChange = (newGrade: string) => {
     setTempGrade(newGrade);
     const newDigit = extractGradeDigit(newGrade);
-    const rosterInNewGrade = allRosterClassesWithCount.find((c) => c.gradeDigit === newDigit);
-    if (rosterInNewGrade) {
-      setTempClass(rosterInNewGrade.rawClass);
-    } else if (allRosterClassesWithCount.length > 0) {
-      setTempClass(allRosterClassesWithCount[0].rawClass);
+    const rosterInNewGrade = allRosterClassesWithCount.filter((c) => c.gradeDigit === newDigit);
+    if (rosterInNewGrade.length > 0) {
+      setTempClass(rosterInNewGrade[0].rawClass);
     } else {
       const classesForNewGrade = getClassesByGrade(newGrade);
       setTempClass(classesForNewGrade[0] || (newDigit ? `${newDigit}A1` : '6A1'));
@@ -226,8 +209,35 @@ export const StudentInfoModal: React.FC<StudentInfoModalProps> = ({
     setSearchStudentQuery('');
   };
 
+  // PHÁT HIỆN MÁY TRÙNG TRONG TIẾT THỰC HÀNH CỦA LỚP ĐÓ:
+  // Chỉ kiểm tra các bài nộp của lớp đang chọn (tempClass) trong phiên thực hành hôm nay
+  const todayStr = useMemo(() => new Date().toISOString().slice(0, 10), []);
+  const normalizedTempClass = useMemo(() => normalizeClassName(tempClass), [tempClass]);
+
+  const duplicateOccupant = useMemo(() => {
+    if (!Array.isArray(existingSubmissions) || !tempMachine) return null;
+    const cleanMachine = tempMachine.trim().toLowerCase();
+    const cleanLeader = (tempLeader || '').trim().toLowerCase();
+
+    for (const sub of existingSubmissions) {
+      if (!sub || !sub.machineNumber || !sub.studentLeader) continue;
+      if (normalizeClassName(sub.className) !== normalizedTempClass) continue;
+      
+      const subDate = sub.practiceDate || (sub.latestSubmittedAt ? sub.latestSubmittedAt.slice(0, 10) : '');
+      if (subDate && subDate !== todayStr) continue;
+
+      if (sub.machineNumber.trim().toLowerCase() === cleanMachine) {
+        const occ = sub.studentLeader.trim();
+        // Nếu khác tên học sinh đang chọn -> ĐÃ CÓ BẠN KHÁC NGỒI MÁY NÀY
+        if (occ.toLowerCase() !== cleanLeader) {
+          return occ;
+        }
+      }
+    }
+    return null;
+  }, [existingSubmissions, normalizedTempClass, tempMachine, tempLeader, todayStr]);
+
   // Danh sách học sinh của lớp đang chọn
-  const normalizedTempClass = normalizeClassName(tempClass);
   const classStudents = roster
     .filter((s) => {
       const sCls = normalizeClassName(s.className);
@@ -391,8 +401,8 @@ export const StudentInfoModal: React.FC<StudentInfoModalProps> = ({
       return;
     }
 
-    if (isDuplicateMachineOccupied) {
-      setErrorMsg(`⚠️ TRÙNG SỐ MÁY: ${tempMachine} đã có bạn "${machineOccupant}" đăng ký trong lớp ${tempClass}! Bạn không thể chọn trùng số máy để tránh ghi đè bài làm của bạn khác. Vui lòng chọn đúng số máy thực tế của em.`);
+    if (duplicateOccupant) {
+      setErrorMsg(`⚠️ CẢNH BÁO TRÙNG SỐ MÁY: ${tempMachine} đã có bạn "${duplicateOccupant}" đăng ký/nộp bài trong tiết thực hành Lớp ${tempClass}. Nếu em quên chọn số máy hoặc ngồi máy khác, vui lòng chọn lại đúng số máy của mình.`);
       return;
     }
 
@@ -553,27 +563,28 @@ export const StudentInfoModal: React.FC<StudentInfoModalProps> = ({
                   setErrorMsg(null);
                 }}
                 className={`w-full border-2 rounded-xl px-3.5 py-2.5 text-sm sm:text-base font-bold transition outline-none cursor-pointer ${
-                  isDuplicateMachineOccupied
-                    ? 'bg-rose-50 border-rose-400 text-rose-900 focus:ring-2 focus:ring-rose-400'
+                  duplicateOccupant
+                    ? 'bg-amber-50 border-amber-400 text-amber-950 focus:ring-2 focus:ring-amber-300'
                     : 'bg-slate-50 border-slate-200 focus:border-blue-500 focus:bg-white text-slate-900'
                 }`}
               >
                 {Array.from({ length: 45 }, (_, i) => {
                   const mStr = `Máy ${String(i + 1).padStart(2, '0')}`;
-                  const isOcc = occupiedMachineMap.has(mStr.toLowerCase());
-                  const occupant = occupiedMachineMap.get(mStr.toLowerCase());
                   return (
                     <option key={mStr} value={mStr}>
-                      {mStr} {isOcc ? `• [Đã có: ${occupant}]` : '• [Trống]'}
+                      {mStr}
                     </option>
                   );
                 })}
               </select>
-              {isDuplicateMachineOccupied && (
-                <p className="text-[11px] font-bold text-rose-600 flex items-center gap-1 mt-1">
-                  <AlertCircle className="w-3.5 h-3.5 shrink-0" />
-                  <span>Máy này đã có bạn "{machineOccupant}" nộp bài trong lớp {tempClass}.</span>
-                </p>
+              {duplicateOccupant && (
+                <div className="p-2.5 bg-amber-50 border border-amber-300 rounded-xl text-amber-950 text-xs font-semibold flex items-start gap-2 mt-1.5 animate-in fade-in">
+                  <AlertCircle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+                  <div>
+                    <span>⚠️ <strong>Máy này đã có bạn "{duplicateOccupant}" chọn/nộp bài</strong> trong tiết thực hành Lớp {tempClass}.</span>
+                    <p className="text-[11px] text-amber-800 font-normal mt-0.5">Nếu em ngồi máy khác hoặc quên chọn số máy, em hãy chọn lại đúng số máy của mình nhé!</p>
+                  </div>
+                </div>
               )}
             </div>
           </div>

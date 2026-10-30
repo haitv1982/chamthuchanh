@@ -18,6 +18,7 @@ export interface DatabaseState {
   version: string;
   lastUpdated: string;
   allowSubmission: boolean;
+  allowedClasses?: string[];
   teacherPin: string;
   submissions: Submission[];
 }
@@ -139,9 +140,50 @@ export function getAllowSubmission(): boolean {
   return dbState.allowSubmission;
 }
 
+export function getAllowedClasses(): string[] {
+  return Array.isArray(dbState.allowedClasses) ? dbState.allowedClasses : [];
+}
+
+export function isClassAllowedToSubmit(className?: string): boolean {
+  if (!dbState.allowSubmission) return false;
+  if (!className) return dbState.allowSubmission;
+  const list = getAllowedClasses();
+  if (list.length === 0) return dbState.allowSubmission;
+  const norm = className.trim().toUpperCase().replace(/^LỚP\s*|^LOP\s*/i, '');
+  return list.some((c) => c.trim().toUpperCase().replace(/^LỚP\s*|^LOP\s*/i, '') === norm);
+}
+
 export function setAllowSubmission(allow: boolean): void {
   dbState.allowSubmission = allow;
   flushDatabaseToDisk();
+}
+
+export function setClassSubmissionPermission(className: string, allow: boolean): { allowSubmission: boolean; allowedClasses: string[] } {
+  const norm = className.trim().toUpperCase().replace(/^LỚP\s*|^LOP\s*/i, '');
+  let current = getAllowedClasses().map((c) => c.trim().toUpperCase().replace(/^LỚP\s*|^LOP\s*/i, ''));
+  if (allow) {
+    if (!current.includes(norm)) {
+      current.push(norm);
+    }
+    dbState.allowSubmission = true;
+  } else {
+    current = current.filter((c) => c !== norm);
+    // Khi giáo viên khóa nộp bài của lớp đó: reset về trạng thái ban đầu coi như kết thúc tiết thực hành
+    // Xóa kết quả hôm nay của lớp đó khỏi CSDL phòng máy
+    const todayStr = new Date().toISOString().slice(0, 10);
+    dbState.submissions = dbState.submissions.filter((s) => {
+      if (!s) return false;
+      const sCls = (s.className || '').trim().toUpperCase().replace(/^LỚP\s*|^LOP\s*/i, '');
+      const sDate = s.practiceDate || (s.latestSubmittedAt ? s.latestSubmittedAt.slice(0, 10) : '');
+      if (sCls === norm && (!sDate || sDate === todayStr)) {
+        return false;
+      }
+      return true;
+    });
+  }
+  dbState.allowedClasses = current;
+  flushDatabaseToDisk();
+  return { allowSubmission: dbState.allowSubmission, allowedClasses: current };
 }
 
 // Mã PIN Giáo viên

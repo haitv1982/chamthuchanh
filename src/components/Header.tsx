@@ -65,7 +65,7 @@ interface HeaderProps {
   isTeacher?: boolean;
   onToggleRole?: () => void;
   allowSubmission?: boolean;
-  onToggleSubmissionPermission?: (allow: boolean) => void;
+  onToggleSubmissionPermission?: (allow: boolean, targetClass?: string) => void;
   dbStatus?: {
     status: string;
     isPersistent: boolean;
@@ -507,11 +507,11 @@ export const Header: React.FC<HeaderProps> = ({
 
           {/* Action Buttons: Cho Phép Nộp Bài, Kết Quả Lớp, Xuất Excel, Máy Chiếu & Quyền Giáo Viên */}
           <div className="flex items-center gap-2 sm:gap-3 flex-wrap justify-end">
-            {/* Quyền Quản Lý Nộp Bài: Bật/Tắt Cho Phép Nộp Bài (Chỉ Giáo Viên có quyền) */}
+            {/* Quyền Quản Lý Nộp Bài Theo Lớp: Bật/Tắt Cho Phép Nộp Bài (Chỉ Giáo Viên có quyền) */}
             {isTeacher && onToggleSubmissionPermission && (
               <button
                 type="button"
-                onClick={() => onToggleSubmissionPermission(!allowSubmission)}
+                onClick={() => onToggleSubmissionPermission(!allowSubmission, activeClassName)}
                 className={`flex items-center gap-1.5 px-3 py-1.5 sm:py-2 rounded-xl text-xs sm:text-sm font-black border transition-all shadow-xs cursor-pointer ${
                   allowSubmission
                     ? 'bg-emerald-500 hover:bg-emerald-600 text-white border-emerald-400'
@@ -519,19 +519,19 @@ export const Header: React.FC<HeaderProps> = ({
                 }`}
                 title={
                   allowSubmission
-                    ? 'Đang CHO PHÉP học sinh nộp bài. Bấm vào đây để KHÓA nộp bài khi chưa ổn định lớp.'
-                    : 'Đang KHÓA nộp bài (tránh học sinh nộp trước). Bấm vào đây để BẬT CHO PHÉP nộp bài khi lớp đã ổn định.'
+                    ? `Đang CHO PHÉP học sinh Lớp ${activeClassName || ''} nộp bài. Bấm vào đây để KHÓA và kết thúc tiết thực hành của lớp.`
+                    : `Đang KHÓA nộp bài Lớp ${activeClassName || ''}. Bấm vào đây để BẬT CHO PHÉP nộp bài khi lớp đã ổn định.`
                 }
               >
                 {allowSubmission ? (
                   <>
                     <Unlock className="w-4 h-4" />
-                    <span>Cho Phép Nộp: Đang Bật</span>
+                    <span>Lớp {activeClassName}: Đang Mở Nộp</span>
                   </>
                 ) : (
                   <>
                     <Lock className="w-4 h-4" />
-                    <span>Nộp Bài: Đang Khóa</span>
+                    <span>Lớp {activeClassName}: Đang Khóa</span>
                   </>
                 )}
               </button>

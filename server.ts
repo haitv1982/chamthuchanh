@@ -16,6 +16,9 @@ import {
   deleteSubmissions,
   getAllowSubmission,
   setAllowSubmission,
+  getAllowedClasses,
+  isClassAllowedToSubmit,
+  setClassSubmissionPermission,
   getTeacherPin,
   setTeacherPin,
   getDatabaseMetrics,
@@ -92,14 +95,6 @@ function fallbackHeuristicGrading(params: {
 // API: Chấm điểm bài thực hành (Gemini AI Vision + Heuristic Fallback)
 app.post('/api/grade', async (req, res) => {
   try {
-    // 0. BẢO VỆ CHẶT CHẼ: KIỂM TRA QUYỀN NỘP BÀI TỪ GIÁO VIÊN
-    if (!getAllowSubmission()) {
-      return res.status(403).json({
-        error: '🔒 Giáo viên hiện đang KHÓA nhận bài nộp phòng thực hành. Thầy/Cô chưa mở quyền nộp bài cho phiên này. Em hãy tiếp tục hoàn thiện trên máy tính của mình nhé!',
-        locked: true,
-      });
-    }
-
     const {
       assignment,
       fileName,
@@ -113,6 +108,14 @@ app.post('/api/grade', async (req, res) => {
       className,
       machineNumber,
     } = req.body;
+
+    // 0. BẢO VỆ CHẶT CHẼ: KIỂM TRA QUYỀN NỘP BÀI THEO LỚP TỪ GIÁO VIÊN
+    if (!isClassAllowedToSubmit(className)) {
+      return res.status(403).json({
+        error: `🔒 Giáo viên hiện đang KHÓA nhận bài nộp của Lớp ${className || ''}. Thầy/Cô chưa mở quyền nộp bài cho lớp này. Em hãy tiếp tục hoàn thiện trên máy tính của mình nhé!`,
+        locked: true,
+      });
+    }
 
     if (!assignment || !fileName) {
       return res.status(400).json({ error: 'Thiếu thông tin bài tập hoặc tệp nộp.' });
@@ -392,24 +395,49 @@ QUY TẮC CHIẾT ĐIỂM (BẮT BUỘC):
   }
 });
 
-// API: Trạng thái cho phép nộp bài & đồng bộ phòng máy (Bảo mật: không lộ mã PIN cho máy học sinh)
-app.get('/api/session-status', (_req, res) => {
+// API: Trạng thái cho phép nộp bài theo lớp & đồng bộ phòng máy
+app.get('/api/session-status', (req, res) => {
+  const className = typeof req.query.className === 'string' ? req.query.className : undefined;
   res.json({
-    allowSubmission: getAllowSubmission(),
+    allowSubmission: isClassAllowedToSubmit(className),
+    allowedClasses: getAllowedClasses(),
     hasPinConfigured: Boolean(getTeacherPin()),
   });
 });
 
 app.post('/api/session-status', (req, res) => {
-  const { allow } = req.body;
+  const { allow, className } = req.body;
   if (typeof allow === 'boolean') {
-    setAllowSubmission(allow);
-    broadcastRealtimeEvent({
-      type: 'SUBMISSION_PERMISSION_CHANGED',
-      allow: getAllowSubmission(),
-    });
+    if (className && typeof className === 'string') {
+      const result = setClassSubmissionPermission(className, allow);
+      broadcastRealtimeEvent({
+        type: 'SUBMISSION_PERMISSION_CHANGED',
+        allow: result.allowSubmission,
+        className,
+        allowedClasses: result.allowedClasses,
+        isClassLocked: !allow,
+      });
+      // Khi giáo viên khóa nộp bài của lớp đó: hệ thống reset về trạng thái ban đầu coi như kết thúc tiết thực hành
+      if (!allow) {
+        broadcastRealtimeEvent({
+          type: 'SUBMISSIONS_CLEARED',
+          targetClass: className,
+        });
+      }
+    } else {
+      setAllowSubmission(allow);
+      broadcastRealtimeEvent({
+        type: 'SUBMISSION_PERMISSION_CHANGED',
+        allow: getAllowSubmission(),
+        allowedClasses: getAllowedClasses(),
+      });
+    }
   }
-  res.json({ success: true, allowSubmission: getAllowSubmission() });
+  res.json({
+    success: true,
+    allowSubmission: getAllowSubmission(),
+    allowedClasses: getAllowedClasses(),
+  });
 });
 
 // API: Xác thực mã PIN Giáo viên (Bảo vệ phía máy chủ, không để học sinh thấy mã PIN)

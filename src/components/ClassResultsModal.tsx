@@ -27,7 +27,7 @@ interface ClassResultsModalProps {
   onClose: () => void;
   onExportExcel?: (cls?: string, targetDate?: string | null, dateMode?: 'all' | 'latest' | 'custom') => void;
   isTeacher?: boolean;
-  onToggleSubmissionPermission?: (allow: boolean) => void;
+  onToggleSubmissionPermission?: (allow: boolean, targetClass?: string) => void;
   allowSubmission?: boolean;
   onChangeClassName?: (cls: string) => void;
   onRefresh?: () => void;

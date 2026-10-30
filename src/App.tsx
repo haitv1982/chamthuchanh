@@ -256,7 +256,7 @@ export default function App() {
     return saved === 'teacher';
   });
 
-  // Submission Permission: Cho phép học sinh nộp bài hay đang khóa (đọc từ localStorage khi mở trang)
+  // Submission Permission: Cho phép học sinh nộp bài hay đang khóa
   const [allowSubmission, setAllowSubmission] = useState<boolean>(() => {
     try {
       const saved = localStorage.getItem('labgrade_allow_submission');
@@ -267,12 +267,36 @@ export default function App() {
     return true;
   });
 
+  // Allowed Classes (Quản lý mở khóa nộp bài theo từng lớp)
+  const [allowedClasses, setAllowedClasses] = useState<string[]>(() => {
+    try {
+      const saved = localStorage.getItem('labgrade_allowed_classes');
+      if (saved) return JSON.parse(saved);
+    } catch {}
+    return [];
+  });
+
   // Tự động lưu trạng thái quyền nộp bài vào localStorage
   useEffect(() => {
     try {
       localStorage.setItem('labgrade_allow_submission', String(allowSubmission));
     } catch {}
   }, [allowSubmission]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem('labgrade_allowed_classes', JSON.stringify(allowedClasses));
+    } catch {}
+  }, [allowedClasses]);
+
+  // Kiểm tra quyền nộp bài của một lớp cụ thể
+  const isClassSubmissionAllowed = (cls?: string): boolean => {
+    if (!cls) return allowSubmission;
+    if (!allowSubmission) return false;
+    if (!allowedClasses || allowedClasses.length === 0) return true;
+    const clean = normalizeClassName(cls);
+    return allowedClasses.some((c) => normalizeClassName(c) === clean);
+  };
 
   // Trạng thái kết nối kênh thời gian thực (Server-Sent Events) tới máy chủ CSDL
   const [isRealtimeConnected, setIsRealtimeConnected] = useState<boolean>(false);
@@ -315,9 +339,16 @@ export default function App() {
           setDbStatus(event.dbStatus);
         }
       } else if (event.type === 'SUBMISSIONS_CLEARED') {
-        if (event.className) {
+        const targetCls = event.targetClass || event.className;
+        if (targetCls) {
+          const normTarget = normalizeClassName(targetCls);
+          const todayStr = getTodayDateString();
           setSubmissions((prev) => {
-            const next = prev.filter((s) => s.className !== event.className);
+            const next = prev.filter((s) => {
+              const isSameClass = normalizeClassName(s.className) === normTarget;
+              const isToday = s.practiceDate === todayStr || isSubmittedToday(s.latestSubmittedAt, todayStr);
+              return !(isSameClass && isToday);
+            });
             saveSubmissionsSafely(next);
             return next;
           });
@@ -326,8 +357,16 @@ export default function App() {
           purgeAllLegacySubmissions();
           saveSubmissionsSafely([]);
         }
-      } else if (event.type === 'SUBMISSION_PERMISSION_CHANGED' && typeof event.allow === 'boolean') {
-        setAllowSubmission(event.allow);
+      } else if (event.type === 'SUBMISSION_PERMISSION_CHANGED') {
+        if (typeof event.allow === 'boolean') {
+          setAllowSubmission(event.allow);
+        }
+        if (Array.isArray(event.allowedClasses)) {
+          setAllowedClasses(event.allowedClasses);
+          try {
+            localStorage.setItem('labgrade_allowed_classes', JSON.stringify(event.allowedClasses));
+          } catch {}
+        }
       } else if (event.type === 'TEACHER_PIN_CHANGED') {
         console.log('[Bảo Mật] Mã PIN giáo viên đã được đổi trên máy chủ CSDL.');
         if (event.newPin) {
@@ -345,15 +384,35 @@ export default function App() {
       try {
         bc = new BroadcastChannel('labgrade_session_channel');
         bc.onmessage = (event) => {
-          if (event.data?.type === 'SUBMISSION_PERMISSION_CHANGED' && typeof event.data.allow === 'boolean') {
-            setAllowSubmission(event.data.allow);
+          if (event.data?.type === 'SUBMISSION_PERMISSION_CHANGED') {
+            if (typeof event.data.allow === 'boolean') {
+              setAllowSubmission(event.data.allow);
+            }
+            if (Array.isArray(event.data.allowedClasses)) {
+              setAllowedClasses(event.data.allowedClasses);
+            }
           }
           if (event.data?.type === 'ROSTER_UPDATED' && Array.isArray(event.data.students)) {
             setStudentRoster(event.data.students);
           }
           if (event.data?.type === 'SUBMISSIONS_CLEARED') {
-            setSubmissions([]);
-            saveSubmissionsSafely([]);
+            const targetCls = event.data.targetClass || event.data.className;
+            const todayStr = getTodayDateString();
+            if (targetCls) {
+              const normTarget = normalizeClassName(targetCls);
+              setSubmissions((prev) => {
+                const next = prev.filter((s) => {
+                  const isSameClass = normalizeClassName(s.className) === normTarget;
+                  const isToday = s.practiceDate === todayStr || isSubmittedToday(s.latestSubmittedAt, todayStr);
+                  return !(isSameClass && isToday);
+                });
+                saveSubmissionsSafely(next);
+                return next;
+              });
+            } else {
+              setSubmissions([]);
+              saveSubmissionsSafely([]);
+            }
           }
           if (event.data?.type === 'TEACHER_PIN_CHANGED' && event.data.newPin) {
             try {
@@ -501,6 +560,12 @@ export default function App() {
         if (typeof data.allowSubmission === 'boolean') {
           setAllowSubmission(data.allowSubmission);
         }
+        if (Array.isArray(data.allowedClasses)) {
+          setAllowedClasses(data.allowedClasses);
+          try {
+            localStorage.setItem('labgrade_allowed_classes', JSON.stringify(data.allowedClasses));
+          } catch {}
+        }
         if (data.dbStatus) {
           setDbStatus(data.dbStatus);
         }
@@ -638,17 +703,56 @@ export default function App() {
     return true;
   };
 
-  // Toggle submission lock handler
-  const handleToggleSubmissionPermission = async (allow: boolean) => {
-    setAllowSubmission(allow);
-    if (isFirebaseReady) {
-      saveSettingsToCloud({ allowSubmission: allow }).catch(() => {});
+  // Toggle submission lock handler theo từng lớp (khi khóa lớp thì reset phiên thực hành lớp đó về ban đầu)
+  const handleToggleSubmissionPermission = async (allow: boolean, targetClass?: string) => {
+    const normTarget = targetClass ? normalizeClassName(targetClass) : normalizeClassName(userClassName);
+    let nextAllowed = [...allowedClasses];
+
+    if (allow) {
+      if (!nextAllowed.some((c) => normalizeClassName(c) === normTarget)) {
+        nextAllowed.push(targetClass || userClassName);
+      }
+      setAllowSubmission(true);
+    } else {
+      // Khi giáo viên nháy nút khóa nộp bài của lớp đó:
+      // Hệ thống reset về trạng thái ban đầu coi như kết thúc tiết thực hành của lớp đó!
+      nextAllowed = nextAllowed.filter((c) => normalizeClassName(c) !== normTarget);
+
+      const todayStr = getTodayDateString();
+      setSubmissions((prev) => {
+        const next = prev.filter((s) => {
+          const isSameClass = normalizeClassName(s.className) === normTarget;
+          const isToday = s.practiceDate === todayStr || isSubmittedToday(s.latestSubmittedAt, todayStr);
+          return !(isSameClass && isToday);
+        });
+        saveSubmissionsSafely(next);
+        return next;
+      });
+
+      if (isFirebaseReady) {
+        deleteSubmissionsFromCloud(normTarget).catch(() => {});
+      }
     }
+
+    setAllowedClasses(nextAllowed);
     try {
+      localStorage.setItem('labgrade_allowed_classes', JSON.stringify(nextAllowed));
       localStorage.setItem('labgrade_allow_submission', String(allow));
       if (typeof BroadcastChannel !== 'undefined') {
         const bc = new BroadcastChannel('labgrade_session_channel');
-        bc.postMessage({ type: 'SUBMISSION_PERMISSION_CHANGED', allow });
+        bc.postMessage({
+          type: 'SUBMISSION_PERMISSION_CHANGED',
+          allow,
+          targetClass: normTarget,
+          allowedClasses: nextAllowed,
+        });
+        if (!allow) {
+          bc.postMessage({
+            type: 'SUBMISSIONS_CLEARED',
+            targetClass: normTarget,
+            className: normTarget,
+          });
+        }
         bc.close();
       }
     } catch {}
@@ -657,14 +761,16 @@ export default function App() {
       const res = await apiFetch('/api/session-status', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ allow }),
+        body: JSON.stringify({ allow, className: normTarget }),
       }, 4000);
       if (res.ok) {
-        console.log(`[Quyền Nộp Bài] Đã cập nhật lên máy chủ trung tâm: ${allow ? 'MỞ CHO PHÉP' : 'ĐÃ KHÓA'}`);
+        console.log(`[Quyền Nộp Bài] Lớp ${normTarget}: ${allow ? 'MỞ CHO PHÉP NỘP' : 'ĐÃ KHÓA & RESET TIẾT THỰC HÀNH'}`);
       }
     } catch (err) {
       console.warn('Lỗi gửi trạng thái khóa nộp bài tới máy chủ:', err);
     }
+
+    await refreshSubmissionsAndStatus();
   };
 
   // Lưu danh sách học sinh từ Excel lên máy chủ và cập nhật state (Tích lũy từ lớp này sang lớp khác)
@@ -873,24 +979,18 @@ export default function App() {
     const currentAssignment =
       assignments.find((a) => a.id === data.assignmentId) || activeAssignment;
 
-    // 0. BẢO VỆ CHẶT CHẼ: KIỂM TRA QUYỀN NỘP BÀI TỪ GIÁO VIÊN (Yêu cầu khóa nộp bài)
-    if (!allowSubmission) {
-      throw new Error('🔒 Giáo viên đang KHÓA nhận bài nộp phòng thực hành. Thầy/Cô chưa mở quyền nộp bài cho phiên này. Em hãy chờ thầy/cô thông báo nhé!');
+    // 0. BẢO VỆ CHẶT CHẼ: KIỂM TRA QUYỀN NỘP BÀI TỪ GIÁO VIÊN THEO TỪNG LỚP
+    if (!isClassSubmissionAllowed(data.className)) {
+      throw new Error(`🔒 Tiết thực hành lớp ${data.className.toUpperCase()} chưa được giáo viên mở khóa nộp bài (hoặc tiết thực hành đã kết thúc). Em hãy chờ thầy/cô thông báo nhé!`);
     }
 
-    // Kiểm tra trực tiếp thời gian thực với máy chủ xem giáo viên có vừa bấm khóa không
+    // Kiểm tra trực tiếp thời gian thực với máy chủ xem lớp này có đang mở nộp bài không
     try {
-      const checkRes = await apiFetch('/api/session-status', { method: 'GET' }, 2000);
+      const checkRes = await apiFetch(`/api/session-status?className=${encodeURIComponent(data.className)}`, { method: 'GET' }, 2000);
       if (checkRes.ok) {
         const checkData = await checkRes.json();
-        if (typeof checkData.allowSubmission === 'boolean') {
-          setAllowSubmission(checkData.allowSubmission);
-          try {
-            localStorage.setItem('labgrade_allow_submission', String(checkData.allowSubmission));
-          } catch {}
-          if (!checkData.allowSubmission) {
-            throw new Error('🔒 Giáo viên vừa KHÓA nhận bài nộp phòng thực hành. Thầy/Cô chưa cho phép nộp bài lúc này!');
-          }
+        if (typeof checkData.allowSubmission === 'boolean' && !checkData.allowSubmission) {
+          throw new Error(`🔒 Giáo viên hiện đang KHÓA nhận bài nộp của lớp ${data.className.toUpperCase()}.`);
         }
       }
     } catch (checkErr: any) {
@@ -1263,7 +1363,7 @@ export default function App() {
         perfectSubmissions={perfectCount}
         isTeacher={isTeacherRole}
         onToggleRole={() => setIsTeacherRole(!isTeacherRole)}
-        allowSubmission={allowSubmission}
+        allowSubmission={isClassSubmissionAllowed(userClassName)}
         onToggleSubmissionPermission={handleToggleSubmissionPermission}
         dbStatus={dbStatus}
         onRefreshDb={refreshSubmissionsAndStatus}
@@ -1298,7 +1398,7 @@ export default function App() {
           mySubmissions={submissions}
           onSubmitWork={handleStudentSubmitWork}
           onOpenStudentInfoModal={() => setIsStudentInfoModalOpen(true)}
-          allowSubmission={allowSubmission}
+          allowSubmission={isClassSubmissionAllowed(userClassName)}
           isTeacher={isTeacherRole}
           onToggleSubmissionPermission={handleToggleSubmissionPermission}
         />
@@ -1368,7 +1468,7 @@ export default function App() {
           onClose={() => setIsClassResultsOpen(false)}
           onExportExcel={handleExportClassExcel}
           isTeacher={isTeacherRole}
-          allowSubmission={allowSubmission}
+          allowSubmission={isClassSubmissionAllowed(userClassName)}
           onToggleSubmissionPermission={handleToggleSubmissionPermission}
           onChangeClassName={handleSelectClassName}
           onRefresh={refreshSubmissionsAndStatus}
@@ -1392,7 +1492,9 @@ export default function App() {
           onRefresh={refreshSubmissionsAndStatus}
           onClearSubmissions={handleClearAllSubmissions}
           isTeacher={isTeacherRole}
-          allowSubmission={allowSubmission}
+          allowSubmission={isClassSubmissionAllowed(userClassName)}
+          allowedClasses={allowedClasses}
+          onToggleSubmissionPermission={handleToggleSubmissionPermission}
         />
       )}
 
