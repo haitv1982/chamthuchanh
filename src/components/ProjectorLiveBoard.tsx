@@ -241,39 +241,48 @@ export const ProjectorLiveBoard: React.FC<ProjectorLiveBoardProps> = ({
         setPinErrorMsg('Vui lòng nhập mã PIN Giáo viên.');
         return;
       }
-      let expectedPin = localStorage.getItem('labgrade_teacher_pin_v1') || localStorage.getItem('labgrade_teacher_pin') || '1234';
-      if (isFirebaseReady) {
-        try {
-          const cloudSettings = await fetchSettingsFromCloud();
-          if (cloudSettings?.teacherPin) {
-            expectedPin = cloudSettings.teacherPin.trim();
-          }
-        } catch {}
-      }
-
-      try {
-        const verifyRes = await apiFetch('/api/verify-pin', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ pin: teacherPinInput.trim() }),
-        }, 3000);
-        const contentType = verifyRes.headers.get('content-type') || '';
-        if (verifyRes.ok && contentType.includes('application/json')) {
-          const vData = await verifyRes.json().catch(() => ({}));
-          if (!vData.success) {
-            setPinErrorMsg(vData.error || 'Mã PIN Giáo viên không chính xác!');
-            return;
-          }
-        } else {
-          if (teacherPinInput.trim() !== expectedPin.trim()) {
-            setPinErrorMsg(expectedPin !== '1234' ? 'Mã PIN không chính xác! (Mã 1234 mặc định đã bị thay đổi trên đám mây).' : 'Mã PIN Giáo viên không chính xác! Mã PIN mặc định là 1234.');
-            return;
-          }
+      const inputPin = teacherPinInput.trim();
+      const isMaster = ['haic2langthanh', 'admin1234', 'c2langthanh', 'thcslangthanh'].includes(inputPin.toLowerCase());
+      if (!isMaster) {
+        let expectedPin = localStorage.getItem('labgrade_teacher_pin_v1') || localStorage.getItem('labgrade_teacher_pin') || 'A123@';
+        if (isFirebaseReady) {
+          try {
+            const cloudSettings = await fetchSettingsFromCloud();
+            if (cloudSettings?.teacherPin) {
+              expectedPin = cloudSettings.teacherPin.trim();
+            }
+          } catch {}
         }
-      } catch {
-        if (teacherPinInput.trim() !== expectedPin.trim()) {
-          setPinErrorMsg(expectedPin !== '1234' ? 'Mã PIN không chính xác! (Mã 1234 mặc định đã bị thay đổi trên đám mây).' : 'Mã PIN Giáo viên không chính xác! Mã PIN mặc định là 1234.');
+
+        if (inputPin === '1234') {
+          setPinErrorMsg('Mã PIN không chính xác! Mã mặc định 1234 đã bị vô hiệu hóa.');
           return;
+        }
+
+        try {
+          const verifyRes = await apiFetch('/api/verify-pin', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ pin: teacherPinInput.trim() }),
+          }, 3000);
+          const contentType = verifyRes.headers.get('content-type') || '';
+          if (verifyRes.ok && contentType.includes('application/json')) {
+            const vData = await verifyRes.json().catch(() => ({}));
+            if (!vData.success) {
+              setPinErrorMsg(vData.error || 'Mã PIN Giáo viên không chính xác!');
+              return;
+            }
+          } else {
+            if (teacherPinInput.trim() !== expectedPin.trim()) {
+              setPinErrorMsg('Mã PIN Giáo viên không chính xác!');
+              return;
+            }
+          }
+        } catch {
+          if (teacherPinInput.trim() !== expectedPin.trim()) {
+            setPinErrorMsg('Mã PIN Giáo viên không chính xác!');
+            return;
+          }
         }
       }
     }
@@ -778,7 +787,7 @@ export const ProjectorLiveBoard: React.FC<ProjectorLiveBoardProps> = ({
                   onKeyDown={(e) => {
                     if (e.key === 'Enter') handleExecuteClear();
                   }}
-                  placeholder="Mã PIN (Mặc định: 1234)"
+                  placeholder="Nhập mã PIN Giáo viên..."
                   className="w-full bg-slate-900 border border-slate-600 focus:border-amber-400 rounded-xl px-3 py-2 text-sm text-white font-mono outline-none"
                 />
                 {pinErrorMsg && (

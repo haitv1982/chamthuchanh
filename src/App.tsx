@@ -448,51 +448,62 @@ export default function App() {
         }
       }).catch(() => {});
 
-      unsubCloudSubs = subscribeToSubmissionsCloud((cloudSubs) => {
-        if (Array.isArray(cloudSubs)) {
-          setSubmissions((prev) => {
-            const map = new Map<string, Submission>();
-            prev.forEach((s) => map.set(s.id, s));
-            cloudSubs.forEach((s) => map.set(s.id, s));
-            const merged = pruneOldSubmissions(Array.from(map.values()));
-            saveSubmissionsSafely(merged);
-            return merged;
-          });
-          setDbStatus((prev) => ({
-            ...prev,
-            status: 'connected',
-            isPersistent: true,
-            totalSubmissions: cloudSubs.length,
-            lastUpdated: new Date().toLocaleTimeString('vi-VN'),
-          }));
-          setIsRealtimeConnected(true);
+      unsubCloudSubs = subscribeToSubmissionsCloud(
+        (cloudSubs) => {
+          if (Array.isArray(cloudSubs)) {
+            setSubmissions((prev) => {
+              const map = new Map<string, Submission>();
+              prev.forEach((s) => map.set(s.id, s));
+              cloudSubs.forEach((s) => map.set(s.id, s));
+              const merged = pruneOldSubmissions(Array.from(map.values()));
+              saveSubmissionsSafely(merged);
+              return merged;
+            });
+            setDbStatus((prev) => ({
+              ...prev,
+              status: 'connected',
+              isPersistent: true,
+              totalSubmissions: cloudSubs.length,
+              lastUpdated: new Date().toLocaleTimeString('vi-VN'),
+            }));
+            setIsRealtimeConnected(true);
+          }
+        },
+        () => {
+          // Quota exceeded hoặc lỗi mạng: duy trì hoạt động trên CSDL máy
         }
-      });
+      );
 
-      unsubCloudRoster = subscribeToRosterCloud((cloudRoster) => {
-        if (Array.isArray(cloudRoster) && cloudRoster.length > 0) {
-          setStudentRoster(cloudRoster);
-          try {
-            localStorage.setItem('labgrade_student_roster', JSON.stringify(cloudRoster));
-          } catch {}
-        }
-      });
+      unsubCloudRoster = subscribeToRosterCloud(
+        (cloudRoster) => {
+          if (Array.isArray(cloudRoster) && cloudRoster.length > 0) {
+            setStudentRoster(cloudRoster);
+            try {
+              localStorage.setItem('labgrade_student_roster', JSON.stringify(cloudRoster));
+            } catch {}
+          }
+        },
+        () => {}
+      );
 
-      unsubCloudSettings = subscribeToSettingsCloud((cloudSettings) => {
-        if (typeof cloudSettings.allowSubmission === 'boolean') {
-          setAllowSubmission(cloudSettings.allowSubmission);
-          try {
-            localStorage.setItem('labgrade_allow_submission', String(cloudSettings.allowSubmission));
-          } catch {}
-        }
-        if (typeof cloudSettings.teacherPin === 'string' && cloudSettings.teacherPin.trim()) {
-          const pin = cloudSettings.teacherPin.trim();
-          try {
-            localStorage.setItem('labgrade_teacher_pin_v1', pin);
-            localStorage.setItem('labgrade_teacher_pin', pin);
-          } catch {}
-        }
-      });
+      unsubCloudSettings = subscribeToSettingsCloud(
+        (cloudSettings) => {
+          if (typeof cloudSettings.allowSubmission === 'boolean') {
+            setAllowSubmission(cloudSettings.allowSubmission);
+            try {
+              localStorage.setItem('labgrade_allow_submission', String(cloudSettings.allowSubmission));
+            } catch {}
+          }
+          if (typeof cloudSettings.teacherPin === 'string' && cloudSettings.teacherPin.trim()) {
+            const pin = cloudSettings.teacherPin.trim();
+            try {
+              localStorage.setItem('labgrade_teacher_pin_v1', pin);
+              localStorage.setItem('labgrade_teacher_pin', pin);
+            } catch {}
+          }
+        },
+        () => {}
+      );
     }
 
     const handleStorageChange = (e: StorageEvent) => {

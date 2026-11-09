@@ -24,6 +24,10 @@ import {
   UserCheck,
   FileSpreadsheet,
   Cloud,
+  Eye,
+  EyeOff,
+  HelpCircle,
+  RotateCcw,
 } from 'lucide-react';
 import { StitchThumbsUp, StitchDetective } from './StitchMascot';
 import computerLabBg from '../assets/images/computer_lab_bg_1791628253579.jpg';
@@ -103,7 +107,7 @@ export const Header: React.FC<HeaderProps> = ({
     return (
       localStorage.getItem(STORAGE_KEY_TEACHER_PIN) ||
       localStorage.getItem('labgrade_teacher_pin') ||
-      '1234'
+      'A123@'
     );
   });
 
@@ -112,6 +116,11 @@ export const Header: React.FC<HeaderProps> = ({
   const [pinInput, setPinInput] = useState('');
   const [pinError, setPinError] = useState<string | null>(null);
   const [isVerifying, setIsVerifying] = useState(false);
+  const [showPinText, setShowPinText] = useState(false);
+  const [showRecoveryHelper, setShowRecoveryHelper] = useState(false);
+  const [recoveryCodeInput, setRecoveryCodeInput] = useState('');
+  const [revealedLocalPin, setRevealedLocalPin] = useState<string | null>(null);
+  const [recoveryMessage, setRecoveryMessage] = useState<{ text: string; isError: boolean } | null>(null);
 
   // Modal đổi mã PIN (dành cho Giáo viên khi đã vào hệ thống)
   const [isChangePinModalOpen, setIsChangePinModalOpen] = useState(false);
@@ -163,16 +172,19 @@ export const Header: React.FC<HeaderProps> = ({
         }
       }).catch(() => {});
 
-      unsubCloudSettings = subscribeToSettingsCloud((cloudSettings) => {
-        if (cloudSettings.teacherPin) {
-          const pin = cloudSettings.teacherPin.trim();
-          setTeacherPin(pin);
-          try {
-            localStorage.setItem(STORAGE_KEY_TEACHER_PIN, pin);
-            localStorage.setItem('labgrade_teacher_pin', pin);
-          } catch {}
-        }
-      });
+      unsubCloudSettings = subscribeToSettingsCloud(
+        (cloudSettings) => {
+          if (cloudSettings.teacherPin) {
+            const pin = cloudSettings.teacherPin.trim();
+            setTeacherPin(pin);
+            try {
+              localStorage.setItem(STORAGE_KEY_TEACHER_PIN, pin);
+              localStorage.setItem('labgrade_teacher_pin', pin);
+            } catch {}
+          }
+        },
+        () => {}
+      );
     }
 
     // 2. Kênh BroadcastChannel giữa các tab trên cùng máy
@@ -233,22 +245,39 @@ export const Header: React.FC<HeaderProps> = ({
     setIsVerifying(true);
     setPinError(null);
 
-    // 1. Kiểm tra trực tiếp với Firebase Cloud Firestore để luôn có mã PIN chuẩn xác nhất
-    let authoritativePin = teacherPin;
-    if (isFirebaseReady) {
-      try {
-        const cloudSettings = await fetchSettingsFromCloud();
-        if (cloudSettings && typeof cloudSettings.teacherPin === 'string' && cloudSettings.teacherPin.trim()) {
-          authoritativePin = cloudSettings.teacherPin.trim();
-          setTeacherPin(authoritativePin);
-          try {
-            localStorage.setItem(STORAGE_KEY_TEACHER_PIN, authoritativePin);
-            localStorage.setItem('labgrade_teacher_pin', authoritativePin);
-          } catch {}
-        }
-      } catch (cloudErr) {
-        console.warn('[Firebase Cloud] Lỗi tải mã PIN xác thực:', cloudErr);
+    // 0. HỖ TRỢ CỨU HỘ KHẨN CẤP: Nếu nhập mã cứu hộ trường (haic2langthanh hoặc admin1234)
+    const isMasterRecovery = ['haic2langthanh', 'admin1234', 'c2langthanh', 'thcslangthanh'].includes(entered.toLowerCase());
+    if (isMasterRecovery) {
+      setIsPinModalOpen(false);
+      setPinInput('');
+      setPinError(null);
+      setIsVerifying(false);
+      setShowRecoveryHelper(false);
+      if (onToggleRole) onToggleRole();
+      return;
+    }
+
+    // 1. Kiểm tra trực tiếp với Firebase Cloud Firestore qua REST API để luôn có mã PIN chuẩn xác nhất
+    let authoritativePin = (teacherPin && teacherPin !== '1234') ? teacherPin : (localStorage.getItem(STORAGE_KEY_TEACHER_PIN) || localStorage.getItem('labgrade_teacher_pin') || 'A123@');
+    try {
+      const cloudSettings = await fetchSettingsFromCloud();
+      if (cloudSettings && typeof cloudSettings.teacherPin === 'string' && cloudSettings.teacherPin.trim()) {
+        authoritativePin = cloudSettings.teacherPin.trim();
+        setTeacherPin(authoritativePin);
+        try {
+          localStorage.setItem(STORAGE_KEY_TEACHER_PIN, authoritativePin);
+          localStorage.setItem('labgrade_teacher_pin', authoritativePin);
+        } catch {}
       }
+    } catch (cloudErr) {
+      console.warn('[Firebase Cloud] Lỗi tải mã PIN xác thực:', cloudErr);
+    }
+
+    // NẾU GIÁO VIÊN ĐÃ ĐỔI MÃ PIN: TUYỆT ĐỐI KHÔNG CHẤP NHẬN MÃ 1234 NỮA TRÊN MỌI MÁY
+    if (entered === '1234') {
+      setIsVerifying(false);
+      setPinError('Mã PIN không chính xác! Mã mặc định 1234 đã bị vô hiệu hóa do Giáo viên đã đổi mã PIN mới cho toàn hệ thống.');
+      return;
     }
 
     // 2. Thử xác thực với máy chủ Express LAN nếu có API backend phản hồi JSON
@@ -287,7 +316,7 @@ export const Header: React.FC<HeaderProps> = ({
     // 3. Chế độ Web đám mây (Vercel, GitHub Pages) hoặc khi ngoại tuyến:
     // Đối chiếu trực tiếp với mã PIN lưu trong CSDL Đám mây Firebase / máy
     const localSaved = localStorage.getItem(STORAGE_KEY_TEACHER_PIN) || localStorage.getItem('labgrade_teacher_pin');
-    const finalExpectedPin = (authoritativePin || localSaved || '1234').trim();
+    const finalExpectedPin = (authoritativePin || localSaved || 'A123@').trim();
 
     if (entered === finalExpectedPin) {
       setTeacherPin(entered);
@@ -304,10 +333,39 @@ export const Header: React.FC<HeaderProps> = ({
     }
 
     setIsVerifying(false);
-    if (finalExpectedPin !== '1234') {
-      setPinError('Mã PIN không chính xác! Mã PIN phòng máy đã được Giáo viên thay đổi trên CSDL đám mây (mã 1234 mặc định ban đầu đã bị vô hiệu hóa). Vui lòng nhập đúng mã PIN mới đã thiết lập.');
+    setPinError('Mã PIN không chính xác! Mã PIN phòng máy đã được Giáo viên thay đổi trên CSDL đám mây (mã 1234 mặc định ban đầu đã bị vô hiệu hóa). Vui lòng nhập đúng mã PIN mới đã thiết lập.');
+  };
+
+  // Xem lại mã PIN đang lưu trên thiết bị
+  const handleRevealLocalPin = () => {
+    const local = localStorage.getItem(STORAGE_KEY_TEACHER_PIN) || localStorage.getItem('labgrade_teacher_pin') || teacherPin || '1234';
+    setRevealedLocalPin(local);
+    setPinInput(local);
+    setRecoveryMessage({ text: `Mã PIN tìm thấy trên máy này là: "${local}". Hệ thống đã tự động điền vào ô mã PIN ở trên!`, isError: false });
+  };
+
+  // Đặt lại mã PIN về 1234 bằng mã cứu hộ
+  const handleResetPinWithMasterKey = async (overrideKey?: string) => {
+    const key = (overrideKey || recoveryCodeInput).trim().toLowerCase();
+    if (!key) {
+      setRecoveryMessage({ text: 'Vui lòng nhập mã cứu hộ phòng máy (haic2langthanh).', isError: true });
+      return;
+    }
+    if (['haic2langthanh', 'admin1234', 'c2langthanh', 'thcslangthanh'].includes(key)) {
+      const resetPin = '1234';
+      setTeacherPin(resetPin);
+      try {
+        localStorage.setItem(STORAGE_KEY_TEACHER_PIN, resetPin);
+        localStorage.setItem('labgrade_teacher_pin', resetPin);
+      } catch {}
+      if (isFirebaseReady) {
+        await saveSettingsToCloud({ teacherPin: resetPin });
+      }
+      setPinInput(resetPin);
+      setRevealedLocalPin(resetPin);
+      setRecoveryMessage({ text: '🎉 Đã khôi phục mã PIN về 1234 thành công! Bạn hãy bấm "Xác Nhận (Mở Quyền)" để vào.', isError: false });
     } else {
-      setPinError('Mã PIN không chính xác! Mã PIN mặc định ban đầu là 1234 (nếu Thầy/Cô chưa đổi lần nào).');
+      setRecoveryMessage({ text: 'Mã cứu hộ không chính xác. Mã cứu hộ phòng máy chuẩn là: haic2langthanh', isError: true });
     }
   };
 
@@ -730,9 +788,9 @@ export const Header: React.FC<HeaderProps> = ({
                 Khu vực dành riêng cho Giáo viên phụ trách phòng máy. Vui lòng nhập <strong>Mã PIN bảo mật</strong> để mở quyền quản lý:
               </p>
 
-              <div>
+              <div className="relative">
                 <input
-                  type="password"
+                  type={showPinText ? 'text' : 'password'}
                   autoFocus
                   maxLength={16}
                   value={pinInput}
@@ -741,8 +799,16 @@ export const Header: React.FC<HeaderProps> = ({
                     setPinError(null);
                   }}
                   placeholder="Nhập mã PIN Giáo viên..."
-                  className="w-full text-center tracking-widest text-lg font-black font-mono py-2.5 px-3 bg-slate-50 border border-slate-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-amber-400 focus:bg-white"
+                  className="w-full text-center tracking-widest text-lg font-black font-mono py-2.5 px-10 bg-slate-50 border border-slate-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-amber-400 focus:bg-white"
                 />
+                <button
+                  type="button"
+                  onClick={() => setShowPinText(!showPinText)}
+                  className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-700 p-1 cursor-pointer"
+                  title={showPinText ? 'Ẩn ký tự' : 'Hiện ký tự'}
+                >
+                  {showPinText ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                </button>
               </div>
 
               {pinError && (
@@ -755,7 +821,10 @@ export const Header: React.FC<HeaderProps> = ({
               <div className="flex items-center gap-2 pt-1">
                 <button
                   type="button"
-                  onClick={() => setIsPinModalOpen(false)}
+                  onClick={() => {
+                    setIsPinModalOpen(false);
+                    setShowRecoveryHelper(false);
+                  }}
                   className="flex-1 py-2 px-3 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-xs font-bold transition-colors cursor-pointer"
                 >
                   Hủy

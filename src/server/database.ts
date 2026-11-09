@@ -27,7 +27,7 @@ let dbState: DatabaseState = {
   version: '2.0.0',
   lastUpdated: new Date().toISOString(),
   allowSubmission: true,
-  teacherPin: '1234',
+  teacherPin: 'A123@',
   submissions: [],
 };
 
@@ -82,7 +82,7 @@ export function initLabDatabase(): DatabaseState {
           version: parsed.version || '2.0.0',
           lastUpdated: parsed.lastUpdated || new Date().toISOString(),
           allowSubmission: typeof parsed.allowSubmission === 'boolean' ? parsed.allowSubmission : true,
-          teacherPin: typeof parsed.teacherPin === 'string' && parsed.teacherPin ? parsed.teacherPin : '1234',
+          teacherPin: typeof parsed.teacherPin === 'string' && parsed.teacherPin && parsed.teacherPin !== '1234' ? parsed.teacherPin : 'A123@',
           submissions: cleanSubmissions,
         };
         flushDatabaseToDisk();
@@ -104,7 +104,7 @@ export function initLabDatabase(): DatabaseState {
               version: parsed.version || '2.0.0',
               lastUpdated: parsed.lastUpdated || new Date().toISOString(),
               allowSubmission: typeof parsed.allowSubmission === 'boolean' ? parsed.allowSubmission : true,
-              teacherPin: typeof parsed.teacherPin === 'string' ? parsed.teacherPin : '1234',
+              teacherPin: typeof parsed.teacherPin === 'string' && parsed.teacherPin !== '1234' ? parsed.teacherPin : 'A123@',
               submissions: cleanSubmissions,
             };
             console.log(`[CSDL Thực Hành] Đã khôi phục ${dbState.submissions.length} bản ghi từ tệp sao lưu.`);
@@ -121,7 +121,7 @@ export function initLabDatabase(): DatabaseState {
     version: '2.0.0',
     lastUpdated: new Date().toISOString(),
     allowSubmission: true,
-    teacherPin: '1234',
+    teacherPin: 'A123@',
     submissions: [],
   };
 
@@ -196,6 +196,28 @@ export function setTeacherPin(newPin: string): void {
   flushDatabaseToDisk();
 }
 
+export function calculateTextSimilarity(text1: string, text2: string): number {
+  if (!text1 || !text2) return 0;
+  const t1 = text1.trim();
+  const t2 = text2.trim();
+  if (t1 === t2) return 1.0;
+
+  const words1 = t1.toLowerCase().split(/[\s,.;:!?()_\[\]{}"'\/\\]+/).filter((w) => w.length > 2);
+  const words2 = t2.toLowerCase().split(/[\s,.;:!?()_\[\]{}"'\/\\]+/).filter((w) => w.length > 2);
+  if (words1.length < 5 || words2.length < 5) {
+    return t1 === t2 ? 1.0 : 0;
+  }
+
+  const set1 = new Set(words1);
+  const set2 = new Set(words2);
+  let common = 0;
+  for (const w of set1) {
+    if (set2.has(w)) common++;
+  }
+  const union = new Set([...words1, ...words2]).size;
+  return union > 0 ? common / union : 0;
+}
+
 // Thuật toán quét và phát hiện học sinh lớp sau lấy y nguyên tệp của học sinh lớp trước
 export function detectPlagiarism(params: {
   className: string;
@@ -230,48 +252,65 @@ export function detectPlagiarism(params: {
     for (const attempt of sub.attempts) {
       if (!attempt || !attempt.fileSize) continue;
 
-      // 1. Kiểm tra kích thước byte trùng khớp tuyệt đối
-      const isExactSize = Math.abs(attempt.fileSize - fileSize) === 0;
+      // 1. Kiểm tra kích thước byte trùng khớp (hoặc chênh lệch cực nhỏ dưới 150 bytes)
+      const sizeDiff = Math.abs(attempt.fileSize - fileSize);
+      const isExactSize = sizeDiff === 0;
+      const isVeryCloseSize = sizeDiff < 150 && fileSize > 500;
 
       // 2. Kiểm tra thời gian khởi tạo/chỉnh sửa tệp trên máy tính (lastModified timestamp)
       const isExactLastModified = Boolean(
         fileLastModified &&
         attempt.fileLastModified &&
-        Math.abs(attempt.fileLastModified - fileLastModified) < 3000
+        Math.abs(attempt.fileLastModified - fileLastModified) < 5000
       );
 
-      // 3. Kiểm tra nội dung văn bản trùng khớp
+      // 3. Kiểm tra độ tương đồng văn bản
       const attemptContent = (attempt.fileContent || '').trim();
-      const isExactTextContent = currentContent.length > 50 && attemptContent.length > 50 && currentContent === attemptContent;
+      const textSimilarity = calculateTextSimilarity(currentContent, attemptContent);
+      const isHighTextSimilarity = textSimilarity >= 0.78;
+      const isExactTextContent = currentContent.length > 30 && attemptContent.length > 30 && currentContent === attemptContent;
 
-      // 4. Kiểm tra dữ liệu hình ảnh trùng khớp tuyệt đối
-      const isExactImage = Boolean(imageBase64 && attempt.imageBase64 && imageBase64.length > 500 && imageBase64 === attempt.imageBase64);
+      // 4. Kiểm tra dữ liệu hình ảnh trùng khớp
+      const isExactImage = Boolean(imageBase64 && attempt.imageBase64 && imageBase64.length > 400 && imageBase64 === attempt.imageBase64);
 
-      // 5. Kiểm tra cùng máy lớp trước để lại tệp
+      // 5. Kiểm tra tên tệp
+      const isSameFileName = Boolean(
+        fileName &&
+        attempt.fileName &&
+        fileName.trim().toLowerCase() === attempt.fileName.trim().toLowerCase()
+      );
+
+      // 6. Kiểm tra cùng máy lớp trước để lại tệp
       const isSameMachineOldFileReuse =
         isSameMachine &&
         isDifferentClass &&
-        (isExactSize || isExactLastModified || isExactImage || (fileName && attempt.fileName && fileName.toLowerCase() === attempt.fileName.toLowerCase()));
+        (isExactSize || isExactLastModified || (isSameFileName && isVeryCloseSize) || isHighTextSimilarity || isExactImage);
 
       const isExactCopy =
         isSameMachineOldFileReuse ||
-        (isExactSize && (isExactTextContent || isExactImage || isExactLastModified || (fileName && attempt.fileName && fileName.toLowerCase() === attempt.fileName.toLowerCase() && fileSize > 500))) ||
+        (isSameFileName && (isExactSize || isVeryCloseSize || isHighTextSimilarity)) ||
         isExactTextContent ||
+        isHighTextSimilarity ||
+        (isExactSize && (isSameFileName || isExactLastModified)) ||
         isExactImage;
 
       if (isExactCopy) {
-        let msg = `🚨 CẢNH BÁO SAO CHÉP: Tệp nộp trùng khớp y nguyên 100% với sản phẩm của bạn ${sub.studentLeader} (${sub.className} - ${sub.machineNumber}) đã nộp trước đó!`;
+        const fromStudent = sub.studentLeader || 'Học sinh lớp trước';
+        const fromClass = sub.className;
+        const fromMachine = sub.machineNumber || machineNumber;
+
+        let msg = `🚨 CẢNH BÁO SAO CHÉP: Tệp nộp trùng khớp y nguyên với sản phẩm của bạn ${fromStudent} (${fromClass} - ${fromMachine}) đã chấm trước đó!`;
         if (isSameMachineOldFileReuse) {
-          msg = `🚨 PHÁT HIỆN DÙNG LẠI TỆP LỚP TRƯỚC TRÊN ${machineNumber}: Tệp "${fileName}" là bài làm của bạn ${sub.studentLeader} (${sub.className}) để lại trên máy tính này. Hệ thống không chấm điểm tệp có sẵn!`;
+          msg = `🚨 PHÁT HIỆN DÙNG LẠI TỆP LỚP TRƯỚC TRÊN ${machineNumber}: Tệp "${fileName}" là bài làm của bạn ${fromStudent} (${fromClass}) để lại trên máy tính này. Hệ thống không chấm điểm tệp có sẵn!`;
         }
 
         return {
           isCopied: true,
-          copiedFromStudent: sub.studentLeader || 'Học sinh lớp trước',
-          copiedFromClass: sub.className,
-          copiedFromMachine: sub.machineNumber,
+          copiedFromStudent: fromStudent,
+          copiedFromClass: fromClass,
+          copiedFromMachine: fromMachine,
           copiedAt: attempt.timestamp || sub.latestSubmittedAt,
-          similarityPercent: 100,
+          similarityPercent: Math.round(Math.max(85, textSimilarity * 100)),
           message: msg,
         };
       }

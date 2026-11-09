@@ -34,6 +34,19 @@ try {
   console.warn('[Firebase Cloud] Không thể khởi tạo Firestore:', err);
 }
 
+let isCloudQuotaExhausted = false;
+
+export function getIsCloudQuotaExhausted(): boolean {
+  return isCloudQuotaExhausted;
+}
+
+export function markCloudQuotaExhausted(): void {
+  if (!isCloudQuotaExhausted) {
+    isCloudQuotaExhausted = true;
+    console.warn('[Firebase Cloud] ⚠️ Hạn ngạch đọc/ghi hàng ngày của Firebase Spark đã đạt giới hạn (resource-exhausted). Hệ thống tự động chuyển sang CSDL bộ nhớ máy tính & máy chủ mạng LAN.');
+  }
+}
+
 export { db, isInitialized as isFirebaseReady };
 
 /**
@@ -137,29 +150,41 @@ export function subscribeToSubmissionsCloud(
   onUpdate: (subs: Submission[]) => void,
   onError?: (err: any) => void
 ): Unsubscribe | null {
-  if (!db) return null;
+  if (!db || isCloudQuotaExhausted) return null;
   try {
     const subCol = collection(db, 'submissions');
-    const q = query(subCol, limit(500));
+    const q = query(subCol, limit(150));
     return onSnapshot(
       q,
       (snapshot) => {
-        const results: Submission[] = [];
-        snapshot.forEach((docSnap) => {
-          const data = docSnap.data();
-          if (data && !String(data.id || docSnap.id).startsWith('mock-')) {
-            results.push(sanitizeSubmission({ ...data, id: data.id || docSnap.id }));
-          }
-        });
-        onUpdate(results);
+        try {
+          const results: Submission[] = [];
+          snapshot.forEach((docSnap) => {
+            const data = docSnap.data();
+            if (data && !String(data.id || docSnap.id).startsWith('mock-')) {
+              results.push(sanitizeSubmission({ ...data, id: data.id || docSnap.id }));
+            }
+          });
+          onUpdate(results);
+        } catch (procErr) {
+          console.warn('[Firebase Cloud] Lỗi xử lý snapshot bài nộp:', procErr);
+        }
       },
       (err) => {
-        console.warn('[Firebase Cloud] Lỗi snapshot submissions:', err);
+        if (err?.code === 'resource-exhausted') {
+          markCloudQuotaExhausted();
+        } else {
+          console.warn('[Firebase Cloud] Snapshot submissions:', err?.message || err);
+        }
         if (onError) onError(err);
       }
     );
-  } catch (err) {
-    console.warn('[Firebase Cloud] Không thể subscribe submissions:', err);
+  } catch (err: any) {
+    if (err?.code === 'resource-exhausted') {
+      markCloudQuotaExhausted();
+    } else {
+      console.warn('[Firebase Cloud] Không thể subscribe submissions:', err);
+    }
     return null;
   }
 }
@@ -169,7 +194,7 @@ export function subscribeToSubmissionsCloud(
  * Dùng document đơn lẻ tối ưu chi phí Spark plan
  */
 export async function saveRosterToCloud(roster: StudentRecord[]): Promise<boolean> {
-  if (!db) return false;
+  if (!db || isCloudQuotaExhausted) return false;
   try {
     const rosterRef = doc(db, 'app_settings', 'student_roster');
     await setDoc(rosterRef, {
@@ -178,8 +203,12 @@ export async function saveRosterToCloud(roster: StudentRecord[]): Promise<boolea
       count: roster.length,
     });
     return true;
-  } catch (err) {
-    console.warn('[Firebase Cloud] Lỗi lưu danh sách học sinh:', err);
+  } catch (err: any) {
+    if (err?.code === 'resource-exhausted') {
+      markCloudQuotaExhausted();
+    } else {
+      console.warn('[Firebase Cloud] Lỗi lưu danh sách học sinh:', err);
+    }
     return false;
   }
 }
@@ -188,7 +217,7 @@ export async function saveRosterToCloud(roster: StudentRecord[]): Promise<boolea
  * Tải danh sách học sinh (Roster) từ Firebase Cloud Firestore
  */
 export async function fetchRosterFromCloud(): Promise<StudentRecord[]> {
-  if (!db) return [];
+  if (!db || isCloudQuotaExhausted) return [];
   try {
     const rosterRef = doc(db, 'app_settings', 'student_roster');
     const snap = await getDoc(rosterRef);
@@ -199,8 +228,12 @@ export async function fetchRosterFromCloud(): Promise<StudentRecord[]> {
       }
     }
     return [];
-  } catch (err) {
-    console.warn('[Firebase Cloud] Lỗi đọc danh sách học sinh:', err);
+  } catch (err: any) {
+    if (err?.code === 'resource-exhausted') {
+      markCloudQuotaExhausted();
+    } else {
+      console.warn('[Firebase Cloud] Lỗi đọc danh sách học sinh:', err);
+    }
     return [];
   }
 }
@@ -209,21 +242,41 @@ export async function fetchRosterFromCloud(): Promise<StudentRecord[]> {
  * Lắng nghe danh sách học sinh thời gian thực
  */
 export function subscribeToRosterCloud(
-  onUpdate: (roster: StudentRecord[]) => void
+  onUpdate: (roster: StudentRecord[]) => void,
+  onError?: (err: any) => void
 ): Unsubscribe | null {
-  if (!db) return null;
+  if (!db || isCloudQuotaExhausted) return null;
   try {
     const rosterRef = doc(db, 'app_settings', 'student_roster');
-    return onSnapshot(rosterRef, (snap) => {
-      if (snap.exists()) {
-        const data = snap.data();
-        if (Array.isArray(data.students)) {
-          onUpdate(data.students);
+    return onSnapshot(
+      rosterRef,
+      (snap) => {
+        try {
+          if (snap.exists()) {
+            const data = snap.data();
+            if (Array.isArray(data.students)) {
+              onUpdate(data.students);
+            }
+          }
+        } catch (procErr) {
+          console.warn('[Firebase Cloud] Lỗi xử lý snapshot roster:', procErr);
         }
+      },
+      (err) => {
+        if (err?.code === 'resource-exhausted') {
+          markCloudQuotaExhausted();
+        } else {
+          console.warn('[Firebase Cloud] Snapshot roster:', err?.message || err);
+        }
+        if (onError) onError(err);
       }
-    });
-  } catch (err) {
-    console.warn('[Firebase Cloud] Lỗi subscribe roster:', err);
+    );
+  } catch (err: any) {
+    if (err?.code === 'resource-exhausted') {
+      markCloudQuotaExhausted();
+    } else {
+      console.warn('[Firebase Cloud] Lỗi subscribe roster:', err);
+    }
     return null;
   }
 }
@@ -257,25 +310,58 @@ export async function saveSettingsToCloud(settings: {
 
 /**
  * Tải cài đặt phiên thực hành (quyền nộp bài, mã pin...) trực tiếp từ Firebase Cloud Firestore
+ * Ưu tiên gọi qua Firestore REST API để đảm bảo 100% tất cả máy học sinh đều nhận mã PIN mới nhất
  */
 export async function fetchSettingsFromCloud(): Promise<{
   allowSubmission?: boolean;
   teacherPin?: string;
 } | null> {
+  // 1. Luôn thử truy vấn trực tiếp qua REST API (không bị ảnh hưởng bởi lỗi quota hay kết nối SDK của trình duyệt)
+  try {
+    if (firebaseConfigJson?.projectId && firebaseConfigJson?.apiKey) {
+      const dbId = firebaseConfigJson.firestoreDatabaseId || '(default)';
+      const url = `https://firestore.googleapis.com/v1/projects/${firebaseConfigJson.projectId}/databases/${dbId}/documents/app_settings/session_config?key=${firebaseConfigJson.apiKey}`;
+      const res = await fetch(url, { cache: 'no-cache' });
+      if (res.ok) {
+        const json = await res.json();
+        const fields = json?.fields || {};
+        const teacherPin = fields.teacherPin?.stringValue ? fields.teacherPin.stringValue.trim() : undefined;
+        const allowSubmission = typeof fields.allowSubmission?.booleanValue === 'boolean' ? fields.allowSubmission.booleanValue : undefined;
+        if (teacherPin) {
+          try {
+            localStorage.setItem('labgrade_teacher_pin_v1', teacherPin);
+            localStorage.setItem('labgrade_teacher_pin', teacherPin);
+          } catch {}
+        }
+        return { allowSubmission, teacherPin };
+      }
+    }
+  } catch (restErr) {
+    console.warn('[Firebase Cloud REST] Lỗi đọc cài đặt:', restErr);
+  }
+
+  // 2. Dự phòng bằng Firestore JS SDK
   if (!db) return null;
   try {
     const settingsRef = doc(db, 'app_settings', 'session_config');
     const snap = await getDoc(settingsRef);
     if (snap.exists()) {
       const data = snap.data();
+      const teacherPin = typeof data.teacherPin === 'string' && data.teacherPin.trim() ? data.teacherPin.trim() : undefined;
+      if (teacherPin) {
+        try {
+          localStorage.setItem('labgrade_teacher_pin_v1', teacherPin);
+          localStorage.setItem('labgrade_teacher_pin', teacherPin);
+        } catch {}
+      }
       return {
         allowSubmission: typeof data.allowSubmission === 'boolean' ? data.allowSubmission : undefined,
-        teacherPin: typeof data.teacherPin === 'string' && data.teacherPin.trim() ? data.teacherPin.trim() : undefined,
+        teacherPin,
       };
     }
     return null;
   } catch (err) {
-    console.warn('[Firebase Cloud] Lỗi đọc cài đặt phiên:', err);
+    console.warn('[Firebase Cloud SDK] Lỗi đọc cài đặt phiên:', err);
     return null;
   }
 }
@@ -284,22 +370,42 @@ export async function fetchSettingsFromCloud(): Promise<{
  * Lắng nghe cài đặt phiên thực hành thời gian thực từ Firebase Cloud
  */
 export function subscribeToSettingsCloud(
-  onUpdate: (settings: { allowSubmission?: boolean; teacherPin?: string }) => void
+  onUpdate: (settings: { allowSubmission?: boolean; teacherPin?: string }) => void,
+  onError?: (err: any) => void
 ): Unsubscribe | null {
-  if (!db) return null;
+  if (!db || isCloudQuotaExhausted) return null;
   try {
     const settingsRef = doc(db, 'app_settings', 'session_config');
-    return onSnapshot(settingsRef, (snap) => {
-      if (snap.exists()) {
-        const data = snap.data();
-        onUpdate({
-          allowSubmission: typeof data.allowSubmission === 'boolean' ? data.allowSubmission : undefined,
-          teacherPin: typeof data.teacherPin === 'string' && data.teacherPin.trim() ? data.teacherPin.trim() : undefined,
-        });
+    return onSnapshot(
+      settingsRef,
+      (snap) => {
+        try {
+          if (snap.exists()) {
+            const data = snap.data();
+            onUpdate({
+              allowSubmission: typeof data.allowSubmission === 'boolean' ? data.allowSubmission : undefined,
+              teacherPin: typeof data.teacherPin === 'string' && data.teacherPin.trim() ? data.teacherPin.trim() : undefined,
+            });
+          }
+        } catch (procErr) {
+          console.warn('[Firebase Cloud] Lỗi xử lý snapshot cài đặt:', procErr);
+        }
+      },
+      (err) => {
+        if (err?.code === 'resource-exhausted') {
+          markCloudQuotaExhausted();
+        } else {
+          console.warn('[Firebase Cloud] Snapshot settings:', err?.message || err);
+        }
+        if (onError) onError(err);
       }
-    });
-  } catch (err) {
-    console.warn('[Firebase Cloud] Lỗi subscribe settings:', err);
+    );
+  } catch (err: any) {
+    if (err?.code === 'resource-exhausted') {
+      markCloudQuotaExhausted();
+    } else {
+      console.warn('[Firebase Cloud] Lỗi subscribe settings:', err);
+    }
     return null;
   }
 }

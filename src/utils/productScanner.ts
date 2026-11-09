@@ -165,6 +165,38 @@ function extractTargetKeywords(assignment: Assignment): {
   return { coreTerms, secondaryTerms };
 }
 
+// Tách lấy nội dung thực tế của học sinh (loại bỏ các tiêu đề kỹ thuật do hệ thống trích xuất đính kèm)
+export function extractCleanStudentText(rawText: string): {
+  cleanText: string;
+  cleanWordCount: number;
+  slideCount: number;
+} {
+  if (!rawText) return { cleanText: '', cleanWordCount: 0, slideCount: 0 };
+
+  const slideMatches = rawText.match(/---\s*Slide\s*\d+\s*---/gi) || [];
+  const slideCount = slideMatches.length;
+
+  // Loại bỏ các thẻ nhãn kỹ thuật hệ thống
+  const cleaned = rawText
+    .replace(/\[BÀI TRÌNH CHIẾU POWERPOINT.*?\]/gi, ' ')
+    .replace(/\[Tệp Word:.*?\]/gi, ' ')
+    .replace(/\[Tệp PowerPoint:.*?\]/gi, ' ')
+    .replace(/\[DỰ ÁN LẬP TRÌNH SCRATCH.*?\]/gi, ' ')
+    .replace(/---\s*Slide\s*\d+\s*---/gi, ' ')
+    .replace(/<[^>]+>/g, ' ')
+    .trim();
+
+  const words = cleaned
+    .split(/\s+/)
+    .filter((w) => w.length > 0 && !['---', '|', ':', '•', '*', '[', ']'].includes(w));
+
+  return {
+    cleanText: cleaned,
+    cleanWordCount: words.length,
+    slideCount,
+  };
+}
+
 // Hàm quét cấu trúc văn bản/tệp (Hình thức)
 export function inspectDocumentStructure(params: {
   fileName: string;
@@ -174,6 +206,8 @@ export function inspectDocumentStructure(params: {
   hasTable: boolean;
   tableCount: number;
   wordCount: number;
+  cleanWordCount: number;
+  slideCount: number;
   paragraphCount: number;
   headingDetected: boolean;
   hasFormulas: boolean;
@@ -183,17 +217,16 @@ export function inspectDocumentStructure(params: {
   const { fileName, fileContent = '', subjectType } = params;
   const content = fileContent;
   const lowerContent = content.toLowerCase();
-  const normContent = normalizeVi(content);
+  const ext = fileName.split('.').pop()?.toLowerCase() || '';
+
+  const { cleanText, cleanWordCount, slideCount } = extractCleanStudentText(content);
+  const words = cleanText.split(/\s+/).filter(Boolean);
+  const wordCount = cleanWordCount;
 
   const structuralNotes: string[] = [];
   let formatScorePercent = 50;
 
-  // Đếm từ
-  const words = content.replace(/\[.*?\]/g, ' ').trim().split(/\s+/).filter(Boolean);
-  const wordCount = words.length;
-
   // Kiểm tra bảng (Tables)
-  // Nhận diện bảng qua định dạng trích xuất từ Mammoth/HTML/Text/Markdown/TSV
   const hasTableTags = content.includes('<table') || content.includes('[BẢNG') || content.includes('| ---') || content.includes('|:---');
   const pipeTableLines = content.split('\n').filter((l) => l.trim().startsWith('|') && l.trim().endsWith('|'));
   const hasTextTable = pipeTableLines.length >= 2;
@@ -209,20 +242,20 @@ export function inspectDocumentStructure(params: {
     tableCount = 1;
   }
 
-  // Tiêu đề
+  // Tiêu đề (dựa trên nội dung thực tế sạch)
   const headingDetected =
     content.includes('<h1') ||
     content.includes('<h2') ||
-    content.includes('TIÊU ĐỀ') ||
-    content.includes('TIEU DE') ||
-    content.includes('BÁO CÁO') ||
-    content.includes('CẨM NANG') ||
-    content.includes('THIẾT BỊ VÀO') ||
-    content.includes('SƠ ĐỒ') ||
-    (words.length > 0 && words.slice(0, 8).join(' ').toUpperCase() === words.slice(0, 8).join(' '));
+    cleanText.includes('TIÊU ĐỀ') ||
+    cleanText.includes('TIEU DE') ||
+    cleanText.includes('BÁO CÁO') ||
+    cleanText.includes('CẨM NANG') ||
+    cleanText.includes('THIẾT BỊ VÀO') ||
+    cleanText.includes('SƠ ĐỒ') ||
+    (words.length >= 4 && words.slice(0, 6).join(' ').toUpperCase() === words.slice(0, 6).join(' '));
 
   // Đoạn văn
-  const paragraphCount = Math.max(1, content.split(/\n\s*\n/).length);
+  const paragraphCount = Math.max(1, cleanText.split(/\n\s*\n/).length);
 
   // Công thức Excel
   const hasFormulas =
@@ -232,10 +265,22 @@ export function inspectDocumentStructure(params: {
     lowerContent.includes('rank(') ||
     lowerContent.includes('=');
 
-  // Đánh giá điểm hình thức cơ bản
-  const ext = fileName.split('.').pop()?.toLowerCase() || '';
-
-  if (wordCount < 10 && !['png', 'jpg', 'jpeg', 'sb3'].includes(ext)) {
+  // Đánh giá điểm hình thức cơ bản theo từng loại tệp
+  if (ext === 'pptx' || ext === 'ppt') {
+    if (slideCount === 0 && cleanWordCount < 15) {
+      formatScorePercent = 25;
+      structuralNotes.push('Bài trình chiếu trống hoặc quá ít nội dung.');
+    } else if (slideCount <= 1 || cleanWordCount < 25) {
+      formatScorePercent = 45;
+      structuralNotes.push(`Bài trình chiếu còn sơ sài (chỉ có ${Math.max(1, slideCount)} slide, ${cleanWordCount} từ).`);
+    } else if (slideCount >= 2 && cleanWordCount >= 40) {
+      formatScorePercent = 85;
+      structuralNotes.push(`Bài trình chiếu hoàn chỉnh gồm ${slideCount} trang slide với bố cục rõ ràng.`);
+    } else {
+      formatScorePercent = 65;
+      structuralNotes.push(`Đã tạo ${slideCount || 1} slide trình chiếu.`);
+    }
+  } else if (cleanWordCount < 10 && !['png', 'jpg', 'jpeg', 'sb3'].includes(ext)) {
     structuralNotes.push('Tệp nộp có dung lượng văn bản quá ít (dưới 10 từ).');
     formatScorePercent = 20;
   } else {
@@ -248,9 +293,9 @@ export function inspectDocumentStructure(params: {
       formatScorePercent += 15;
       structuralNotes.push(`Đã tạo bảng biểu (${tableCount} bảng) theo đúng yêu cầu bài học.`);
     }
-    if (wordCount >= 40) {
+    if (cleanWordCount >= 40) {
       formatScorePercent += 10;
-      structuralNotes.push(`Độ dài văn bản đầy đủ (${wordCount} từ).`);
+      structuralNotes.push(`Độ dài văn bản đầy đủ (${cleanWordCount} từ).`);
     }
   }
 
@@ -259,7 +304,9 @@ export function inspectDocumentStructure(params: {
   return {
     hasTable,
     tableCount,
-    wordCount,
+    wordCount: cleanWordCount,
+    cleanWordCount,
+    slideCount,
     paragraphCount,
     headingDetected,
     hasFormulas,
@@ -487,12 +534,27 @@ export function scanAndGradeProduct(params: {
           detail = `Cần kiểm tra lại các công thức tính toán (như =SUM, =AVERAGE, =IF...).`;
         }
       } else if (normStep.includes('slide') || normStep.includes('trinh chieu') || normStep.includes('trang chieu')) {
-        if (normContent.includes('slide') || normContent.includes('trang') || structure.paragraphCount >= 2 || ext === 'pptx') {
-          status = 'passed';
-          detail = `Đã xây dựng các trang slide trình chiếu với đầy đủ tiêu đề và nội dung.`;
+        const slideCnt = structure.slideCount || 0;
+        const cleanWords = structure.cleanWordCount || 0;
+        if (ext === 'pptx' || ext === 'ppt') {
+          if (slideCnt >= 2 && cleanWords >= 35 && (coreMatches >= 1 || secondaryMatches >= 1)) {
+            status = 'passed';
+            detail = `Đã xây dựng ${slideCnt} trang slide trình chiếu với đầy đủ tiêu đề và nội dung bài học.`;
+          } else if (slideCnt >= 1 && cleanWords >= 15) {
+            status = 'partial';
+            detail = `Bài trình chiếu còn sơ sài (chỉ có ${Math.max(1, slideCnt)} slide, ${cleanWords} từ), cần bổ sung thêm trang slide và nội dung chi tiết.`;
+          } else {
+            status = 'failed';
+            detail = `Chưa hoàn thiện slide trình chiếu (slide rỗng hoặc quá ít nội dung: ${cleanWords} từ).`;
+          }
         } else {
-          status = 'partial';
-          detail = `Nên bổ sung thêm các trang slide để nội dung phong phú hơn.`;
+          if (cleanWords >= 35 && (normContent.includes('slide') || structure.paragraphCount >= 2)) {
+            status = 'passed';
+            detail = `Đã trình bày nội dung bài thuyết trình đầy đủ.`;
+          } else {
+            status = 'partial';
+            detail = `Cần bổ sung thêm nội dung trình chiếu chi tiết hơn.`;
+          }
         }
       } else if (normStep.includes('khoi lenh') || normStep.includes('nhan vat') || normStep.includes('san khau') || normStep.includes('re nhanh') || normStep.includes('lap') || normStep.includes('scratch') || normStep.includes('thuat toan')) {
         if (normContent.includes('khoi lenh') || normContent.includes('nhan vat') || normContent.includes('sprite') || normContent.includes('if') || normContent.includes('for') || normContent.includes('while') || ext === 'sb3' || ext === 'py') {
@@ -503,7 +565,7 @@ export function scanAndGradeProduct(params: {
           detail = `Cần rà soát các khối lệnh rẽ nhánh và vòng lặp theo đúng kịch bản.`;
         }
       } else if (normStep.includes('dinh dang') || normStep.includes('phong chu') || normStep.includes('co chu') || normStep.includes('mau chu') || normStep.includes('can le')) {
-        if (structure.wordCount >= 15 || structure.headingDetected || structure.paragraphCount >= 2) {
+        if (structure.cleanWordCount >= 15 || structure.headingDetected || structure.paragraphCount >= 2) {
           status = 'passed';
           detail = `Đã hoàn thành tốt định dạng văn bản, phông chữ và bố cục trang.`;
         } else {
@@ -538,20 +600,21 @@ export function scanAndGradeProduct(params: {
         status = 'passed';
         detail = `Đã lưu tệp với định dạng hợp lệ (${fileName}).`;
       } else {
-        // Kiểm tra chung theo từ khóa của bước
-        const stepWords = normStep.split(/\s+/).filter((w) => w.length >= 4);
+        // Kiểm tra chung theo từ khóa của bước và độ phong phú nội dung
+        const stepWords = normStep.split(/\s+/).filter((w) => w.length >= 4 && !['thuc', 'hien', 'yeu', 'cau', 'theo', 'trong'].includes(w));
         const matchWords = stepWords.filter((w) => normContent.includes(w));
         const ratio = stepWords.length > 0 ? matchWords.length / stepWords.length : 1;
+        const hasCoreOrSec = coreMatches >= 1 || secondaryMatches >= 1;
 
-        if (ratio >= 0.4 || normContent.length >= 100) {
+        if (ratio >= 0.4 && structure.cleanWordCount >= 25 && hasCoreOrSec) {
           status = 'passed';
           detail = `Đã hoàn thành tốt yêu cầu của bước này.`;
-        } else if (ratio >= 0.2) {
+        } else if (ratio >= 0.25 || (structure.cleanWordCount >= 40 && hasCoreOrSec)) {
           status = 'partial';
           detail = `Đã làm một phần nhưng cần hoàn thiện thêm chi tiết.`;
         } else {
-          status = 'partial';
-          detail = `Cần rà soát và hoàn thiện thêm chi tiết cho bước này.`;
+          status = structure.cleanWordCount < 15 ? 'failed' : 'partial';
+          detail = `Nội dung bước này còn sơ sài (${structure.cleanWordCount} từ), cần bổ sung theo yêu cầu đề bài.`;
         }
       }
     }
@@ -567,22 +630,22 @@ export function scanAndGradeProduct(params: {
     });
   });
 
-  // 4. TÍNH ĐIỂM SỐ CHÍNH XÁC (TUYỆT ĐỐI KHÔNG CHẤM BỪA 8 ĐIỂM!)
+  // 4. TÍNH ĐIỂM SỐ CHÍNH XÁC (TUYỆT ĐỐI KHÔNG CHẤM BỪA 10 ĐIỂM!)
   const totalSteps = steps.length;
   const stepScoreRatio = totalSteps > 0 ? (passedStepsCount * 1.0 + partialStepsCount * 0.5) / totalSteps : 0.8;
   const stepCompletionRate = `${passedStepsCount}/${totalSteps} bước đã hoàn thành`;
 
+  const isPptxSuperficial = (ext === 'pptx' || ext === 'ppt') && (structure.slideCount < 2 || structure.cleanWordCount < 30);
   const isImageTinyOrRough = isImageSubmission && imageBase64Length < 25000;
-  const isDocSuperficial = !isImageSubmission && !['sb3', 'py', 'cpp'].includes(ext) && structure.wordCount < 35;
+  const isDocSuperficial = !isImageSubmission && !['sb3', 'py', 'cpp', 'xlsx', 'xls'].includes(ext) && (structure.cleanWordCount < 35 || isPptxSuperficial);
 
   let finalScore = 0;
 
   if (isOffTopic) {
     // TỆP LẠC ĐỀ HOẶC QUÁ NGẮN: Chấm từ 1.0 đến 3.5 điểm tùy mức độ
-    if (structure.wordCount < 10) {
+    if (structure.cleanWordCount < 10) {
       finalScore = 1.0;
     } else {
-      // Có tệp nhưng nội dung không liên quan đến bài thực hành
       finalScore = Math.min(3.5, Math.max(1.5, Math.round((structure.formatScorePercent / 100 * 2.0 + (contentScorePercent / 100) * 1.5) * 10) / 10));
     }
   } else {
@@ -600,26 +663,29 @@ export function scanAndGradeProduct(params: {
       finalScore = Math.min(5.5, Math.max(2.0, finalScore));
     } else if (isDocSuperficial) {
       finalScore = Math.min(5.0, Math.max(2.0, finalScore));
-    } else if (passedStepsCount === totalSteps && contentScorePercent >= 90 && structure.formatScorePercent >= 90) {
+    } else if (passedStepsCount === totalSteps && contentScorePercent >= 88 && structure.formatScorePercent >= 85) {
       // Chỉ cho 10.0 điểm khi:
       // 1. Toàn bộ các bước đều passed
-      // 2. Nội dung đạt >= 90% và hình thức >= 90%
-      // 3. Nếu là văn bản: độ dài >= 65 từ; nếu là ảnh: dung lượng >= 50KB; nếu là Excel: có bảng và dữ liệu
-      const isWordAdequate = structure.wordCount >= 65;
-      const isImageRich = isImageSubmission ? imageBase64Length >= 45000 : true;
-      const isExcelAdequate = ext === 'xlsx' || ext === 'xls' ? structure.hasTable || normContent.includes('sum') || normContent.includes('=') : true;
+      // 2. Nội dung đạt >= 88% và hình thức >= 85%
+      // 3. Có từ khóa cốt lõi của bài học (coreMatches >= 2 hoặc 1 core + 2 secondary)
+      // 4. Nếu là văn bản: độ dài >= 55 từ; nếu là PowerPoint: >= 2 slide & >= 40 từ; nếu là ảnh: >= 40KB
+      const isWordAdequate = structure.cleanWordCount >= 55;
+      const isPptAdequate = ext === 'pptx' || ext === 'ppt' ? (structure.slideCount >= 2 && structure.cleanWordCount >= 40) : true;
+      const isImageRich = isImageSubmission ? imageBase64Length >= 40000 : true;
+      const isExcelAdequate = ext === 'xlsx' || ext === 'xls' ? (structure.hasTable || structure.hasFormulas) : true;
+      const hasCoreConcepts = coreTerms.length === 0 || coreMatches >= 2 || (coreMatches >= 1 && secondaryMatches >= 2);
 
-      if (isWordAdequate && isImageRich && isExcelAdequate) {
+      if (isWordAdequate && isPptAdequate && isImageRich && isExcelAdequate && hasCoreConcepts && !isDocSuperficial) {
         finalScore = 10.0;
       } else {
-        finalScore = 9.0;
+        finalScore = 8.5;
       }
     } else if (passedStepsCount === totalSteps && contentScorePercent >= 75) {
-      finalScore = Math.min(9.0, Math.max(8.0, finalScore));
+      finalScore = Math.min(8.5, Math.max(7.5, finalScore));
     } else if (stepScoreRatio >= 0.7) {
-      finalScore = Math.min(8.0, Math.max(6.5, finalScore));
+      finalScore = Math.min(7.5, Math.max(6.0, finalScore));
     } else {
-      finalScore = Math.min(6.0, Math.max(2.5, finalScore));
+      finalScore = Math.min(5.5, Math.max(2.5, finalScore));
     }
   }
 
@@ -631,8 +697,8 @@ export function scanAndGradeProduct(params: {
   const howToGetTen: string[] = [];
 
   if (isOffTopic) {
-    if (structure.wordCount < 10) {
-      weaknesses.push(`⚠️ Tệp nộp hầu như không có nội dung (chỉ có ${structure.wordCount} từ).`);
+    if (structure.cleanWordCount < 10) {
+      weaknesses.push(`⚠️ Tệp nộp hầu như không có nội dung (chỉ có ${structure.cleanWordCount} từ).`);
       weaknesses.push(`Chưa thực hiện các bước theo yêu cầu đề bài ${assignment.title}.`);
       howToGetTen.push(`Bước 1: Mở phần mềm ${assignment.toolRequired || 'Word/PowerPoint'} trên máy tính.`);
       howToGetTen.push(`Bước 2: Đọc kỹ hướng dẫn các bước ở cột bên trái và hoàn thành sản phẩm.`);
@@ -651,6 +717,9 @@ export function scanAndGradeProduct(params: {
     if (structure.hasTable) {
       strengths.push(`Hình thức trình bày tốt: Đã tạo bảng biểu (${structure.tableCount} bảng) theo đúng yêu cầu.`);
     }
+    if (structure.slideCount >= 2) {
+      strengths.push(`Đã thiết kế ${structure.slideCount} trang slide trình chiếu hoàn chỉnh.`);
+    }
     if (passedStepsCount > 0) {
       strengths.push(`Đã hoàn thành tốt ${passedStepsCount}/${totalSteps} bước thực hành.`);
     }
@@ -659,9 +728,12 @@ export function scanAndGradeProduct(params: {
       weaknesses.push(`⚠️ Sản phẩm hình ảnh còn sơ sài (${(imageBase64Length / 1024).toFixed(1)} KB), chưa thể hiện đầy đủ các khối nội dung, nhãn và mũi tên liên kết.`);
       howToGetTen.push(`Bổ sung các khối chữ nhật bo góc, gõ đầy đủ các từ khóa, vẽ mũi tên kết nối tuần tự và định dạng màu sắc đẹp mắt.`);
     }
-    if (isDocSuperficial) {
-      weaknesses.push(`⚠️ Nội dung bài làm còn ngắn gọn và sơ sài (chỉ có ${structure.wordCount} từ). Chưa phân tích sâu các ý của bài học.`);
-      howToGetTen.push(`Mở rộng nội dung văn bản (tối thiểu 65 từ), bổ sung bảng biểu hoặc các ví dụ thực tiễn.`);
+    if (isPptxSuperficial) {
+      weaknesses.push(`⚠️ Bài trình chiếu còn quá ít trang slide hoặc nội dung sơ sài (${structure.slideCount || 1} slide, ${structure.cleanWordCount} từ).`);
+      howToGetTen.push(`Tạo thêm ít nhất 2-3 trang slide, gõ đầy đủ các đề mục, khái niệm và ví dụ minh họa.`);
+    } else if (isDocSuperficial) {
+      weaknesses.push(`⚠️ Nội dung bài làm còn ngắn gọn và sơ sài (chỉ có ${structure.cleanWordCount} từ). Chưa phân tích sâu các ý của bài học.`);
+      howToGetTen.push(`Mở rộng nội dung văn bản (tối thiểu 55 từ), bổ sung bảng biểu hoặc các ví dụ thực tiễn.`);
     }
 
     // Liệt kê các bước bị failed hoặc partial vào weaknesses
@@ -697,33 +769,33 @@ export function scanAndGradeProduct(params: {
     let feedback = '';
 
     if (isImageSubmission && isImageExpected) {
-      critRatio = 1.0;
+      critRatio = Math.max(0.4, (contentScorePercent / 100 * 0.6) + (stepScoreRatio * 0.4));
       if (idx === 0) {
-        feedback = 'Đã thể hiện đầy đủ 4 hoạt động xử lí thông tin (Thu nhận, Xử lí, Lưu trữ và Truyền thông tin).';
+        feedback = critRatio >= 0.8 ? 'Đã thể hiện đầy đủ các hoạt động/khái niệm theo yêu cầu đề bài.' : 'Sản phẩm sơ đồ còn đơn giản, cần thêm nội dung.';
       } else if (idx === 1) {
-        feedback = 'Mũi tên liên kết các khối chỉ đúng trình tự quy trình luồng thông tin.';
+        feedback = critRatio >= 0.8 ? 'Mũi tên liên kết các khối chỉ đúng trình tự quy trình.' : 'Cần vẽ rõ các liên kết và mũi tên quy trình.';
       } else if (idx === 2) {
-        feedback = 'Có tiêu đề QUY TRÌNH XỬ LÍ THÔNG TIN rõ ràng, có biểu tượng/hình ảnh minh họa trực quan.';
+        feedback = 'Có tiêu đề và hình ảnh minh họa trực quan.';
       } else {
-        feedback = 'Bố cục sơ đồ đẹp mắt, phối màu tương phản hài hòa, xuất đúng tệp ảnh quy định.';
+        feedback = 'Bố cục sơ đồ đẹp mắt, xuất đúng tệp ảnh quy định.';
       }
     } else if (isOffTopic) {
       critRatio = idx === 0 ? 0.2 : 0.3;
       feedback = 'Nội dung tệp nộp chưa đáp ứng tiêu chí này do chưa đúng yêu cầu bài học.';
     } else {
       if (idx === 0) {
-        critRatio = Math.max(0.7, contentScorePercent / 100);
+        critRatio = Math.max(0.5, contentScorePercent / 100);
         feedback = critRatio >= 0.85 ? 'Nội dung kiến thức chuẩn xác, đầy đủ theo yêu cầu bài học.' : 'Nội dung bám sát chủ đề bài thực hành.';
       } else if (idx === 1) {
-        critRatio = Math.max(0.75, stepScoreRatio);
+        critRatio = Math.max(0.5, stepScoreRatio);
         feedback = `Đã hoàn thành ${passedStepsCount}/${totalSteps} bước thực hành theo hướng dẫn.`;
       } else if (idx === 2) {
-        critRatio = Math.max(0.8, structure.formatScorePercent / 100);
-        feedback = structure.hasTable || structure.hasFormulas || structure.headingDetected
-          ? 'Hình thức định dạng, bảng biểu ngay ngắn, chuẩn xác.'
+        critRatio = Math.max(0.5, structure.formatScorePercent / 100);
+        feedback = structure.hasTable || structure.hasFormulas || structure.headingDetected || structure.slideCount >= 2
+          ? 'Hình thức định dạng, bảng biểu/slide ngay ngắn, chuẩn xác.'
           : 'Bố cục bài làm cân đối, trình bày rõ ràng.';
       } else {
-        critRatio = Math.max(0.85, (stepScoreRatio + structure.formatScorePercent / 100) / 2);
+        critRatio = Math.max(0.5, (stepScoreRatio + structure.formatScorePercent / 100) / 2);
         feedback = 'Định dạng tệp nộp và tính thẩm mỹ đạt yêu cầu quy định.';
       }
     }
