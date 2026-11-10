@@ -406,6 +406,9 @@ export const StudentSubmissionView: React.FC<StudentSubmissionViewProps> = ({
       setTimeout(() => setGradingStep('AI đang đối chiếu từng bước với yêu cầu đề bài...'), 300);
       setTimeout(() => setGradingStep('AI phân tích cấu trúc sản phẩm và chuẩn Tin học...'), 700);
 
+      const fileExt = (selectedFile.name.split('.').pop() || '').toLowerCase();
+      const isActualImageFile = ['png', 'jpg', 'jpeg', 'webp', 'bmp', 'svg'].includes(fileExt);
+
       const attemptResult = await onSubmitWork({
         assignmentId: activeAssignment.id,
         className: userClassName,
@@ -416,8 +419,8 @@ export const StudentSubmissionView: React.FC<StudentSubmissionViewProps> = ({
         fileSize: selectedFile.size,
         fileLastModified: selectedFile.lastModified,
         fileContent: fileContent,
-        fileDataUrl: fileDataUrl || imagePreviewUrl || undefined,
-        imageBase64: imagePreviewUrl || undefined,
+        fileDataUrl: (fileDataUrl || (isActualImageFile && imagePreviewUrl ? imagePreviewUrl : undefined)) || undefined,
+        imageBase64: isActualImageFile && imagePreviewUrl ? imagePreviewUrl : undefined,
       });
 
       if (attemptResult) {

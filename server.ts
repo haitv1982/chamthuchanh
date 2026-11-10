@@ -122,7 +122,7 @@ app.post('/api/grade', async (req, res) => {
     }
 
     const ext = (fileName.split('.').pop() || '').toLowerCase();
-    const isImageFile = ['png', 'jpg', 'jpeg', 'webp', 'bmp'].includes(ext) || Boolean(imageBase64);
+    const isImageFile = ['png', 'jpg', 'jpeg', 'webp', 'bmp', 'svg'].includes(ext);
 
     // 0.1 PHÁT HIỆN HỌC SINH LỚP SAU LẤY Y NGUYÊN TỆP BÀI LÀM CỦA HỌC SINH LỚP TRƯỚC
     const plagiarismAlert = detectPlagiarism({
@@ -322,9 +322,9 @@ QUY TẮC CHIẾT ĐIỂM (BẮT BUỘC):
 }
 `;
 
-        // Chuẩn bị payload Gemini: Hỗ trợ Multimodal Vision nếu có ảnh base64
+        // Chuẩn bị payload Gemini: Chỉ kích hoạt Multimodal Vision khi tệp nộp thực sự là hình ảnh đồ họa/sơ đồ
         const contentsPayload: any[] = [];
-        if (imageBase64 && typeof imageBase64 === 'string' && imageBase64.includes(',')) {
+        if (isImageFile && imageBase64 && typeof imageBase64 === 'string' && imageBase64.includes(',')) {
           const [header, base64Data] = imageBase64.split(',');
           const mimeTypeMatch = header.match(/:(.*?);/);
           const mimeType = mimeTypeMatch ? mimeTypeMatch[1] : 'image/png';
