@@ -24,7 +24,8 @@ import { SCHOOL_CLASSES } from '../data/classes';
 import { apiFetch } from '../utils/apiConfig';
 import { realtimeSync } from '../utils/realtimeSync';
 import { playPlagiarismWarningSound } from '../utils/antiPlagiarism';
-import { isFirebaseReady, fetchSettingsFromCloud } from '../services/firebase';
+import { isFirebaseReady, fetchSettingsFromCloud, subscribeToSubmissionsCloud } from '../services/firebase';
+import { getTodayDateString, isSubmittedToday, sanitizeSubmission } from '../utils/storageManager';
 import { downloadSubmissionProductFile } from '../utils/fileDownload';
 
 interface ProjectorLiveBoardProps {
@@ -123,16 +124,15 @@ export const ProjectorLiveBoard: React.FC<ProjectorLiveBoardProps> = ({
 
   // Sync strictly when prop submissions updates (chỉ giữ lại bài nộp của ngày hôm nay)
   useEffect(() => {
-    const todayStr = new Date().toISOString().slice(0, 10);
+    const todayStr = getTodayDateString();
     const validSubs = (submissions || []).filter((s) => {
       if (!s || String(s.id).startsWith('mock-')) return false;
-      const subDate = s.practiceDate || (s.latestSubmittedAt ? s.latestSubmittedAt.slice(0, 10) : '');
-      return subDate === todayStr;
+      return s.practiceDate === todayStr || isSubmittedToday(s.latestSubmittedAt, todayStr);
     });
     setLiveSubmissions(validSubs);
   }, [submissions]);
 
-  // Lắng nghe tín hiệu xóa bài nộp và CẢNH BÁO SAO CHÉP từ BroadcastChannel & SSE Realtime
+  // Lắng nghe tín hiệu thời gian thực từ: BroadcastChannel, SSE Server, và Firebase Cloud Firestore
   useEffect(() => {
     let bc: BroadcastChannel | null = null;
     if (typeof BroadcastChannel !== 'undefined') {
@@ -143,7 +143,8 @@ export const ProjectorLiveBoard: React.FC<ProjectorLiveBoardProps> = ({
             if (!event.data.targetClass || event.data.targetClass === 'Tất cả') {
               setLiveSubmissions([]);
             } else {
-              setLiveSubmissions((prev) => prev.filter((s) => s.className !== event.data.targetClass));
+              const normTarget = event.data.targetClass.toUpperCase().replace(/^LỚP\s*|^LOP\s*/i, '');
+              setLiveSubmissions((prev) => prev.filter((s) => s.className.toUpperCase().replace(/^LỚP\s*|^LOP\s*/i, '') !== normTarget));
             }
           } else if (event.data?.type === 'PLAGIARISM_ALERT') {
             playPlagiarismWarningSound();
@@ -153,20 +154,74 @@ export const ProjectorLiveBoard: React.FC<ProjectorLiveBoardProps> = ({
       } catch {}
     }
 
-    const unsub = realtimeSync.subscribe((event) => {
+    // 1. Kênh Server-Sent Events (SSE) tức thời từ máy chủ CSDL
+    const unsubSSE = realtimeSync.subscribe((event) => {
       if (event.type === 'PLAGIARISM_ALERT') {
         playPlagiarismWarningSound();
         setActivePlagiarismAlert(event as any);
+      } else if (event.type === 'SUBMISSION_UPDATED' && event.submission) {
+        const clean = sanitizeSubmission(event.submission);
+        const todayStr = getTodayDateString();
+        const isToday = clean.practiceDate === todayStr || isSubmittedToday(clean.latestSubmittedAt, todayStr);
+
+        if (isToday) {
+          setLiveSubmissions((prev) => {
+            const filtered = prev.filter(
+              (s) => s.id !== clean.id && !(s.className === clean.className && s.machineNumber === clean.machineNumber)
+            );
+            return [clean, ...filtered];
+          });
+          setRecentMachineId(clean.machineNumber);
+          setTimeout(() => setRecentMachineId(null), 4000);
+          setLastSyncTime(new Date().toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit', second: '2-digit' }));
+        }
+      } else if (event.type === 'SUBMISSIONS_CLEARED') {
+        const targetCls = event.targetClass || event.className;
+        if (!targetCls || targetCls === 'Tất cả') {
+          setLiveSubmissions([]);
+        } else {
+          const normTarget = String(targetCls).toUpperCase().replace(/^LỚP\s*|^LOP\s*/i, '');
+          setLiveSubmissions((prev) => prev.filter((s) => s.className.toUpperCase().replace(/^LỚP\s*|^LOP\s*/i, '') !== normTarget));
+        }
       }
     });
 
+    // 2. Kênh Firebase Firestore đám mây (Liên thông tức thì giữa các thiết bị khác mạng/Vercel)
+    let unsubCloud: (() => void) | null = null;
+    if (isFirebaseReady) {
+      unsubCloud = subscribeToSubmissionsCloud((cloudSubs) => {
+        if (Array.isArray(cloudSubs)) {
+          const todayStr = getTodayDateString();
+          const valid = cloudSubs
+            .filter((s) => s && !String(s.id).startsWith('mock-'))
+            .map(sanitizeSubmission)
+            .filter((s) => s.practiceDate === todayStr || isSubmittedToday(s.latestSubmittedAt, todayStr));
+
+          setLiveSubmissions((prev) => {
+            // Phát hiện máy vừa mới nộp bài để làm nổi bật tức thì
+            const newlyUpdated = valid.find((s) => {
+              const old = prev.find((o) => o.id === s.id);
+              return !old || s.attempts?.length !== old.attempts?.length || s.highestScore !== old.highestScore;
+            });
+            if (newlyUpdated) {
+              setRecentMachineId(newlyUpdated.machineNumber);
+              setTimeout(() => setRecentMachineId(null), 4000);
+            }
+            return valid;
+          });
+          setLastSyncTime(new Date().toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit', second: '2-digit' }));
+        }
+      });
+    }
+
     return () => {
       if (bc) bc.close();
-      unsub();
+      unsubSSE();
+      if (unsubCloud) unsubCloud();
     };
   }, []);
 
-  // Active continuous live polling every 2.5 seconds to capture any student submission from any PC
+  // 3. Tự động quét dự phòng liên tục mỗi 2.0 giây để đảm bảo 100% không sót bất kỳ bài nộp nào
   useEffect(() => {
     let isMounted = true;
     const fetchLabUpdates = async () => {
@@ -175,12 +230,11 @@ export const ProjectorLiveBoard: React.FC<ProjectorLiveBoardProps> = ({
         if (res.ok) {
           const data = await res.json();
           if (isMounted && Array.isArray(data.submissions)) {
-            const todayStr = new Date().toISOString().slice(0, 10);
-            const validSubs = data.submissions.filter((s: Submission) => {
-              if (!s || String(s.id).startsWith('mock-')) return false;
-              const subDate = s.practiceDate || (s.latestSubmittedAt ? s.latestSubmittedAt.slice(0, 10) : '');
-              return subDate === todayStr;
-            });
+            const todayStr = getTodayDateString();
+            const validSubs = data.submissions
+              .filter((s: Submission) => s && !String(s.id).startsWith('mock-'))
+              .map(sanitizeSubmission)
+              .filter((s: Submission) => s.practiceDate === todayStr || isSubmittedToday(s.latestSubmittedAt, todayStr));
 
             // Phát hiện máy vừa mới nộp bài hoặc cập nhật điểm số
             const newlyUpdated = validSubs.find((s: Submission) => {
@@ -202,7 +256,7 @@ export const ProjectorLiveBoard: React.FC<ProjectorLiveBoardProps> = ({
       } catch {}
     };
 
-    const interval = setInterval(fetchLabUpdates, 2500);
+    const interval = setInterval(fetchLabUpdates, 2000);
     return () => {
       isMounted = false;
       clearInterval(interval);

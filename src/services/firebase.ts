@@ -281,13 +281,18 @@ export function subscribeToRosterCloud(
   }
 }
 
-/**
- * Lưu cài đặt phiên thực hành (quyền nộp bài, mã pin...) lên Firebase Cloud
- */
-export async function saveSettingsToCloud(settings: {
+export interface CloudSessionSettings {
   allowSubmission?: boolean;
+  allowedClasses?: string[];
+  lockedClasses?: string[];
   teacherPin?: string;
-}): Promise<boolean> {
+  updatedAt?: string;
+}
+
+/**
+ * Lưu cài đặt phiên thực hành (quyền nộp bài, danh sách lớp mở/khóa, mã pin...) lên Firebase Cloud
+ */
+export async function saveSettingsToCloud(settings: CloudSessionSettings): Promise<boolean> {
   if (!db) return false;
   try {
     const settingsRef = doc(db, 'app_settings', 'session_config');
@@ -296,6 +301,12 @@ export async function saveSettingsToCloud(settings: {
     };
     if (typeof settings.allowSubmission === 'boolean') {
       payload.allowSubmission = settings.allowSubmission;
+    }
+    if (Array.isArray(settings.allowedClasses)) {
+      payload.allowedClasses = settings.allowedClasses;
+    }
+    if (Array.isArray(settings.lockedClasses)) {
+      payload.lockedClasses = settings.lockedClasses;
     }
     if (typeof settings.teacherPin === 'string') {
       payload.teacherPin = settings.teacherPin;
@@ -309,13 +320,10 @@ export async function saveSettingsToCloud(settings: {
 }
 
 /**
- * Tải cài đặt phiên thực hành (quyền nộp bài, mã pin...) trực tiếp từ Firebase Cloud Firestore
- * Ưu tiên gọi qua Firestore REST API để đảm bảo 100% tất cả máy học sinh đều nhận mã PIN mới nhất
+ * Tải cài đặt phiên thực hành (quyền nộp bài, mã pin, lớp mở/khóa...) trực tiếp từ Firebase Cloud Firestore
+ * Ưu tiên gọi qua Firestore REST API để đảm bảo 100% tất cả máy học sinh đều nhận dữ liệu mới nhất
  */
-export async function fetchSettingsFromCloud(): Promise<{
-  allowSubmission?: boolean;
-  teacherPin?: string;
-} | null> {
+export async function fetchSettingsFromCloud(): Promise<CloudSessionSettings | null> {
   // 1. Luôn thử truy vấn trực tiếp qua REST API (không bị ảnh hưởng bởi lỗi quota hay kết nối SDK của trình duyệt)
   try {
     if (firebaseConfigJson?.projectId && firebaseConfigJson?.apiKey) {
@@ -327,13 +335,28 @@ export async function fetchSettingsFromCloud(): Promise<{
         const fields = json?.fields || {};
         const teacherPin = fields.teacherPin?.stringValue ? fields.teacherPin.stringValue.trim() : undefined;
         const allowSubmission = typeof fields.allowSubmission?.booleanValue === 'boolean' ? fields.allowSubmission.booleanValue : undefined;
+
+        let allowedClasses: string[] | undefined = undefined;
+        if (fields.allowedClasses?.arrayValue?.values) {
+          allowedClasses = fields.allowedClasses.arrayValue.values
+            .map((v: any) => v?.stringValue)
+            .filter(Boolean);
+        }
+
+        let lockedClasses: string[] | undefined = undefined;
+        if (fields.lockedClasses?.arrayValue?.values) {
+          lockedClasses = fields.lockedClasses.arrayValue.values
+            .map((v: any) => v?.stringValue)
+            .filter(Boolean);
+        }
+
         if (teacherPin) {
           try {
             localStorage.setItem('labgrade_teacher_pin_v1', teacherPin);
             localStorage.setItem('labgrade_teacher_pin', teacherPin);
           } catch {}
         }
-        return { allowSubmission, teacherPin };
+        return { allowSubmission, allowedClasses, lockedClasses, teacherPin };
       }
     }
   } catch (restErr) {
@@ -356,6 +379,8 @@ export async function fetchSettingsFromCloud(): Promise<{
       }
       return {
         allowSubmission: typeof data.allowSubmission === 'boolean' ? data.allowSubmission : undefined,
+        allowedClasses: Array.isArray(data.allowedClasses) ? data.allowedClasses : undefined,
+        lockedClasses: Array.isArray(data.lockedClasses) ? data.lockedClasses : undefined,
         teacherPin,
       };
     }
@@ -370,7 +395,7 @@ export async function fetchSettingsFromCloud(): Promise<{
  * Lắng nghe cài đặt phiên thực hành thời gian thực từ Firebase Cloud
  */
 export function subscribeToSettingsCloud(
-  onUpdate: (settings: { allowSubmission?: boolean; teacherPin?: string }) => void,
+  onUpdate: (settings: CloudSessionSettings) => void,
   onError?: (err: any) => void
 ): Unsubscribe | null {
   if (!db || isCloudQuotaExhausted) return null;
@@ -384,6 +409,8 @@ export function subscribeToSettingsCloud(
             const data = snap.data();
             onUpdate({
               allowSubmission: typeof data.allowSubmission === 'boolean' ? data.allowSubmission : undefined,
+              allowedClasses: Array.isArray(data.allowedClasses) ? data.allowedClasses : undefined,
+              lockedClasses: Array.isArray(data.lockedClasses) ? data.lockedClasses : undefined,
               teacherPin: typeof data.teacherPin === 'string' && data.teacherPin.trim() ? data.teacherPin.trim() : undefined,
             });
           }

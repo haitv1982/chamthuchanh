@@ -821,7 +821,7 @@ export const StudentSubmissionView: React.FC<StudentSubmissionViewProps> = ({
 
             {/* Banner khi Giáo viên khóa nộp bài */}
             {!allowSubmission && (
-              <div className="p-2.5 bg-rose-50 border border-rose-300 rounded-xl text-rose-950 flex items-center justify-between gap-2 text-xs font-bold">
+              <div className="p-2.5 bg-rose-50 border border-rose-300 rounded-xl text-rose-950 flex items-center justify-between gap-2 text-xs font-bold animate-in fade-in duration-200">
                 <div className="flex items-center gap-2">
                   <Lock className="w-4 h-4 text-rose-600 shrink-0" />
                   <span>GIÁO VIÊN ĐANG KHÓA NHẬN BÀI LỚP {userClassName?.toUpperCase()}</span>
@@ -830,11 +830,29 @@ export const StudentSubmissionView: React.FC<StudentSubmissionViewProps> = ({
                   <button
                     type="button"
                     onClick={() => onToggleSubmissionPermission(true, userClassName)}
-                    className="px-2.5 py-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-bold shrink-0 cursor-pointer"
+                    className="px-2.5 py-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-bold shrink-0 cursor-pointer shadow-xs"
                   >
                     Mở nộp bài lớp {userClassName}
                   </button>
                 )}
+              </div>
+            )}
+
+            {/* Chỉ báo và nút khóa nhanh cho Giáo viên khi đang mở nộp bài */}
+            {allowSubmission && isTeacher && onToggleSubmissionPermission && userClassName && (
+              <div className="p-2 bg-emerald-50 border border-emerald-200 rounded-xl text-emerald-950 flex items-center justify-between gap-2 text-xs font-semibold">
+                <div className="flex items-center gap-1.5 text-emerald-700 font-bold">
+                  <Unlock className="w-4 h-4 text-emerald-600 shrink-0" />
+                  <span>Đang mở nhận bài Lớp {userClassName?.toUpperCase()}</span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => onToggleSubmissionPermission(false, userClassName)}
+                  className="px-2.5 py-1 bg-rose-600 hover:bg-rose-700 text-white rounded-lg text-xs font-bold shrink-0 cursor-pointer shadow-xs"
+                  title={`Khóa nộp bài và kết thúc tiết thực hành của Lớp ${userClassName}`}
+                >
+                  Khóa nộp bài lớp {userClassName}
+                </button>
               </div>
             )}
 

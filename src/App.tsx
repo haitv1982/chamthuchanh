@@ -276,6 +276,15 @@ export default function App() {
     return [];
   });
 
+  // Locked Classes (Quản lý các lớp bị khóa nộp bài rõ ràng trên toàn hệ thống)
+  const [lockedClasses, setLockedClasses] = useState<string[]>(() => {
+    try {
+      const saved = localStorage.getItem('labgrade_locked_classes');
+      if (saved) return JSON.parse(saved);
+    } catch {}
+    return [];
+  });
+
   // Tự động lưu trạng thái quyền nộp bài vào localStorage
   useEffect(() => {
     try {
@@ -289,13 +298,30 @@ export default function App() {
     } catch {}
   }, [allowedClasses]);
 
+  useEffect(() => {
+    try {
+      localStorage.setItem('labgrade_locked_classes', JSON.stringify(lockedClasses));
+    } catch {}
+  }, [lockedClasses]);
+
   // Kiểm tra quyền nộp bài của một lớp cụ thể
   const isClassSubmissionAllowed = (cls?: string): boolean => {
     if (!cls) return allowSubmission;
     if (!allowSubmission) return false;
-    if (!allowedClasses || allowedClasses.length === 0) return true;
     const clean = normalizeClassName(cls);
-    return allowedClasses.some((c) => normalizeClassName(c) === clean);
+
+    // 1. Nếu lớp nằm trong danh sách BỊ KHÓA -> Dứt khoát không cho phép nộp
+    if (lockedClasses && lockedClasses.some((c) => normalizeClassName(c) === clean)) {
+      return false;
+    }
+
+    // 2. Nếu có danh sách lớp mở cụ thể -> Chỉ các lớp trong allowedClasses mới được nộp
+    if (allowedClasses && allowedClasses.length > 0) {
+      return allowedClasses.some((c) => normalizeClassName(c) === clean);
+    }
+
+    // 3. Nếu chưa chỉ định danh sách lớp mở -> theo allowSubmission chung
+    return allowSubmission;
   };
 
   // Trạng thái kết nối kênh thời gian thực (Server-Sent Events) tới máy chủ CSDL
@@ -365,6 +391,12 @@ export default function App() {
           setAllowedClasses(event.allowedClasses);
           try {
             localStorage.setItem('labgrade_allowed_classes', JSON.stringify(event.allowedClasses));
+          } catch {}
+        }
+        if (Array.isArray(event.lockedClasses)) {
+          setLockedClasses(event.lockedClasses);
+          try {
+            localStorage.setItem('labgrade_locked_classes', JSON.stringify(event.lockedClasses));
           } catch {}
         }
       } else if (event.type === 'TEACHER_PIN_CHANGED') {
@@ -439,6 +471,18 @@ export default function App() {
             localStorage.setItem('labgrade_allow_submission', String(cloudSettings.allowSubmission));
           } catch {}
         }
+        if (Array.isArray(cloudSettings.allowedClasses)) {
+          setAllowedClasses(cloudSettings.allowedClasses);
+          try {
+            localStorage.setItem('labgrade_allowed_classes', JSON.stringify(cloudSettings.allowedClasses));
+          } catch {}
+        }
+        if (Array.isArray(cloudSettings.lockedClasses)) {
+          setLockedClasses(cloudSettings.lockedClasses);
+          try {
+            localStorage.setItem('labgrade_locked_classes', JSON.stringify(cloudSettings.lockedClasses));
+          } catch {}
+        }
         if (typeof cloudSettings.teacherPin === 'string' && cloudSettings.teacherPin.trim()) {
           const pin = cloudSettings.teacherPin.trim();
           try {
@@ -492,6 +536,18 @@ export default function App() {
             setAllowSubmission(cloudSettings.allowSubmission);
             try {
               localStorage.setItem('labgrade_allow_submission', String(cloudSettings.allowSubmission));
+            } catch {}
+          }
+          if (Array.isArray(cloudSettings.allowedClasses)) {
+            setAllowedClasses(cloudSettings.allowedClasses);
+            try {
+              localStorage.setItem('labgrade_allowed_classes', JSON.stringify(cloudSettings.allowedClasses));
+            } catch {}
+          }
+          if (Array.isArray(cloudSettings.lockedClasses)) {
+            setLockedClasses(cloudSettings.lockedClasses);
+            try {
+              localStorage.setItem('labgrade_locked_classes', JSON.stringify(cloudSettings.lockedClasses));
             } catch {}
           }
           if (typeof cloudSettings.teacherPin === 'string' && cloudSettings.teacherPin.trim()) {
@@ -575,6 +631,12 @@ export default function App() {
           setAllowedClasses(data.allowedClasses);
           try {
             localStorage.setItem('labgrade_allowed_classes', JSON.stringify(data.allowedClasses));
+          } catch {}
+        }
+        if (Array.isArray(data.lockedClasses)) {
+          setLockedClasses(data.lockedClasses);
+          try {
+            localStorage.setItem('labgrade_locked_classes', JSON.stringify(data.lockedClasses));
           } catch {}
         }
         if (data.dbStatus) {
@@ -716,18 +778,24 @@ export default function App() {
 
   // Toggle submission lock handler theo từng lớp (khi khóa lớp thì reset phiên thực hành lớp đó về ban đầu)
   const handleToggleSubmissionPermission = async (allow: boolean, targetClass?: string) => {
-    const normTarget = targetClass ? normalizeClassName(targetClass) : normalizeClassName(userClassName);
+    const rawClass = targetClass || userClassName;
+    const normTarget = normalizeClassName(rawClass);
     let nextAllowed = [...allowedClasses];
+    let nextLocked = [...lockedClasses];
 
     if (allow) {
       if (!nextAllowed.some((c) => normalizeClassName(c) === normTarget)) {
-        nextAllowed.push(targetClass || userClassName);
+        nextAllowed.push(rawClass);
       }
+      nextLocked = nextLocked.filter((c) => normalizeClassName(c) !== normTarget);
       setAllowSubmission(true);
     } else {
       // Khi giáo viên nháy nút khóa nộp bài của lớp đó:
       // Hệ thống reset về trạng thái ban đầu coi như kết thúc tiết thực hành của lớp đó!
       nextAllowed = nextAllowed.filter((c) => normalizeClassName(c) !== normTarget);
+      if (!nextLocked.some((c) => normalizeClassName(c) === normTarget)) {
+        nextLocked.push(normTarget);
+      }
 
       const todayStr = getTodayDateString();
       setSubmissions((prev) => {
@@ -746,9 +814,12 @@ export default function App() {
     }
 
     setAllowedClasses(nextAllowed);
+    setLockedClasses(nextLocked);
     try {
       localStorage.setItem('labgrade_allowed_classes', JSON.stringify(nextAllowed));
+      localStorage.setItem('labgrade_locked_classes', JSON.stringify(nextLocked));
       localStorage.setItem('labgrade_allow_submission', String(allow));
+
       if (typeof BroadcastChannel !== 'undefined') {
         const bc = new BroadcastChannel('labgrade_session_channel');
         bc.postMessage({
@@ -756,6 +827,7 @@ export default function App() {
           allow,
           targetClass: normTarget,
           allowedClasses: nextAllowed,
+          lockedClasses: nextLocked,
         });
         if (!allow) {
           bc.postMessage({
@@ -767,6 +839,17 @@ export default function App() {
         bc.close();
       }
     } catch {}
+
+    // Đồng bộ tức thời lên Google Firebase Cloud Firestore (để máy xách tay và máy bàn thấy nhau ngay)
+    if (isFirebaseReady) {
+      saveSettingsToCloud({
+        allowSubmission: true,
+        allowedClasses: nextAllowed,
+        lockedClasses: nextLocked,
+      }).catch((cloudErr) => {
+        console.warn('[Firebase Cloud] Lỗi lưu quyền nộp bài lên đám mây:', cloudErr);
+      });
+    }
 
     try {
       const res = await apiFetch('/api/session-status', {

@@ -19,6 +19,7 @@ export interface DatabaseState {
   lastUpdated: string;
   allowSubmission: boolean;
   allowedClasses?: string[];
+  lockedClasses?: string[];
   teacherPin: string;
   submissions: Submission[];
 }
@@ -27,6 +28,8 @@ let dbState: DatabaseState = {
   version: '2.0.0',
   lastUpdated: new Date().toISOString(),
   allowSubmission: true,
+  allowedClasses: [],
+  lockedClasses: [],
   teacherPin: 'A123@',
   submissions: [],
 };
@@ -144,30 +147,63 @@ export function getAllowedClasses(): string[] {
   return Array.isArray(dbState.allowedClasses) ? dbState.allowedClasses : [];
 }
 
+export function getLockedClasses(): string[] {
+  return Array.isArray(dbState.lockedClasses) ? dbState.lockedClasses : [];
+}
+
 export function isClassAllowedToSubmit(className?: string): boolean {
   if (!dbState.allowSubmission) return false;
   if (!className) return dbState.allowSubmission;
-  const list = getAllowedClasses();
-  if (list.length === 0) return dbState.allowSubmission;
   const norm = className.trim().toUpperCase().replace(/^LỚP\s*|^LOP\s*/i, '');
-  return list.some((c) => c.trim().toUpperCase().replace(/^LỚP\s*|^LOP\s*/i, '') === norm);
+
+  // 1. Nếu lớp nằm trong danh sách BỊ KHÓA -> Tuyệt đối không cho phép nộp bài!
+  const locked = getLockedClasses().map((c) => c.trim().toUpperCase().replace(/^LỚP\s*|^LOP\s*/i, ''));
+  if (locked.includes(norm)) {
+    return false;
+  }
+
+  // 2. Nếu có danh sách lớp mở cụ thể -> Chỉ các lớp trong danh sách này mới được phép nộp
+  const allowed = getAllowedClasses().map((c) => c.trim().toUpperCase().replace(/^LỚP\s*|^LOP\s*/i, ''));
+  if (allowed.length > 0) {
+    return allowed.includes(norm);
+  }
+
+  // 3. Mặc định theo trạng thái chung phòng máy
+  return dbState.allowSubmission;
 }
 
 export function setAllowSubmission(allow: boolean): void {
   dbState.allowSubmission = allow;
+  if (!allow) {
+    // Khóa toàn bộ
+    dbState.allowedClasses = [];
+  }
   flushDatabaseToDisk();
 }
 
-export function setClassSubmissionPermission(className: string, allow: boolean): { allowSubmission: boolean; allowedClasses: string[] } {
+export function setClassSubmissionPermission(className: string, allow: boolean): {
+  allowSubmission: boolean;
+  allowedClasses: string[];
+  lockedClasses: string[];
+} {
   const norm = className.trim().toUpperCase().replace(/^LỚP\s*|^LOP\s*/i, '');
-  let current = getAllowedClasses().map((c) => c.trim().toUpperCase().replace(/^LỚP\s*|^LOP\s*/i, ''));
+  let allowed = getAllowedClasses().map((c) => c.trim().toUpperCase().replace(/^LỚP\s*|^LOP\s*/i, ''));
+  let locked = getLockedClasses().map((c) => c.trim().toUpperCase().replace(/^LỚP\s*|^LOP\s*/i, ''));
+
   if (allow) {
-    if (!current.includes(norm)) {
-      current.push(norm);
+    // Mở khóa cho lớp này
+    if (!allowed.includes(norm)) {
+      allowed.push(norm);
     }
+    locked = locked.filter((c) => c !== norm);
     dbState.allowSubmission = true;
   } else {
-    current = current.filter((c) => c !== norm);
+    // Khóa lớp này
+    allowed = allowed.filter((c) => c !== norm);
+    if (!locked.includes(norm)) {
+      locked.push(norm);
+    }
+
     // Khi giáo viên khóa nộp bài của lớp đó: reset về trạng thái ban đầu coi như kết thúc tiết thực hành
     // Xóa kết quả hôm nay của lớp đó khỏi CSDL phòng máy
     const todayStr = new Date().toISOString().slice(0, 10);
@@ -181,9 +217,16 @@ export function setClassSubmissionPermission(className: string, allow: boolean):
       return true;
     });
   }
-  dbState.allowedClasses = current;
+
+  dbState.allowedClasses = allowed;
+  dbState.lockedClasses = locked;
   flushDatabaseToDisk();
-  return { allowSubmission: dbState.allowSubmission, allowedClasses: current };
+
+  return {
+    allowSubmission: dbState.allowSubmission,
+    allowedClasses: allowed,
+    lockedClasses: locked,
+  };
 }
 
 // Mã PIN Giáo viên

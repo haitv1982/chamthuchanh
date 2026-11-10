@@ -17,6 +17,7 @@ import {
   getAllowSubmission,
   setAllowSubmission,
   getAllowedClasses,
+  getLockedClasses,
   isClassAllowedToSubmit,
   setClassSubmissionPermission,
   getTeacherPin,
@@ -400,7 +401,9 @@ app.get('/api/session-status', (req, res) => {
   const className = typeof req.query.className === 'string' ? req.query.className : undefined;
   res.json({
     allowSubmission: isClassAllowedToSubmit(className),
+    globalAllow: getAllowSubmission(),
     allowedClasses: getAllowedClasses(),
+    lockedClasses: getLockedClasses(),
     hasPinConfigured: Boolean(getTeacherPin()),
   });
 });
@@ -415,6 +418,7 @@ app.post('/api/session-status', (req, res) => {
         allow: result.allowSubmission,
         className,
         allowedClasses: result.allowedClasses,
+        lockedClasses: result.lockedClasses,
         isClassLocked: !allow,
       });
       // Khi giáo viên khóa nộp bài của lớp đó: hệ thống reset về trạng thái ban đầu coi như kết thúc tiết thực hành
@@ -422,22 +426,32 @@ app.post('/api/session-status', (req, res) => {
         broadcastRealtimeEvent({
           type: 'SUBMISSIONS_CLEARED',
           targetClass: className,
+          className,
         });
       }
+      return res.json({
+        success: true,
+        allowSubmission: result.allowSubmission,
+        allowedClasses: result.allowedClasses,
+        lockedClasses: result.lockedClasses,
+      });
     } else {
       setAllowSubmission(allow);
       broadcastRealtimeEvent({
         type: 'SUBMISSION_PERMISSION_CHANGED',
         allow: getAllowSubmission(),
         allowedClasses: getAllowedClasses(),
+        lockedClasses: getLockedClasses(),
+      });
+      return res.json({
+        success: true,
+        allowSubmission: getAllowSubmission(),
+        allowedClasses: getAllowedClasses(),
+        lockedClasses: getLockedClasses(),
       });
     }
   }
-  res.json({
-    success: true,
-    allowSubmission: getAllowSubmission(),
-    allowedClasses: getAllowedClasses(),
-  });
+  res.status(400).json({ error: 'Dữ liệu không hợp lệ' });
 });
 
 // API: Xác thực mã PIN Giáo viên (Bảo vệ phía máy chủ, không để học sinh thấy mã PIN)
@@ -498,22 +512,24 @@ app.get('/api/submissions', (_req, res) => {
   res.json({
     submissions,
     allowSubmission: getAllowSubmission(),
+    allowedClasses: getAllowedClasses(),
+    lockedClasses: getLockedClasses(),
     dbStatus,
   });
 });
 
 // API: Tự động lưu và cập nhật ngay bài nộp của học sinh vào CSDL đĩa
 app.post('/api/submissions', (req, res) => {
-  if (!getAllowSubmission()) {
-    return res.status(403).json({
-      error: '🔒 Giáo viên hiện đang KHÓA nhận bài nộp phòng thực hành. Không thể lưu bài nộp vào CSDL lúc này.',
-      locked: true,
-    });
-  }
-
   const newSubmission = req.body;
   if (!newSubmission || !newSubmission.className || !newSubmission.machineNumber) {
     return res.status(400).json({ error: 'Dữ liệu bài nộp không hợp lệ hoặc thiếu thông tin lớp/số máy' });
+  }
+
+  if (!isClassAllowedToSubmit(newSubmission.className)) {
+    return res.status(403).json({
+      error: `🔒 Giáo viên hiện đang KHÓA nhận bài nộp của lớp ${newSubmission.className}. Tiết thực hành đã kết thúc hoặc chưa được mở khóa.`,
+      locked: true,
+    });
   }
 
   try {
