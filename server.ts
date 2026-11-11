@@ -758,7 +758,7 @@ if (!isDistReady && process.env.NODE_ENV === 'production') {
   }
 }
 
-if (process.env.NODE_ENV === 'production' && isDistReady) {
+if (isDistReady) {
   app.use(express.static(distDir));
   app.get('*', (_req, res) => {
     res.sendFile(indexHtmlFile, (err) => {

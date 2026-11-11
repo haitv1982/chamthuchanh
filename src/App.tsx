@@ -647,42 +647,9 @@ export default function App() {
             .filter((s: any) => s && !String(s.id).startsWith('mock-'))
             .map((raw: any) => sanitizeSubmission(raw));
 
-          // CỨU HỘ DỮ LIỆU THÔNG MINH:
-          // Nếu máy này có bài nộp học sinh thực tế mà máy chủ chưa kịp lưu (ví dụ nộp lúc máy chủ Render đang ngủ đông),
-          // tự động đẩy các bài còn thiếu lên CSDL máy chủ ngay lập tức!
-          const localList = loadSubmissionsSafely([]);
-          const missingOnServer = localList.filter((local) => {
-            return !serverSubs.some(
-              (server: Submission) =>
-                server.id === local.id ||
-                (server.className === local.className &&
-                  server.machineNumber === local.machineNumber &&
-                  (server.practiceDate || '') === (local.practiceDate || ''))
-            );
-          });
-
-          if (missingOnServer.length > 0) {
-            console.log(`[Tự Động Khôi Phục] Đang đẩy ${missingOnServer.length} bài nộp tồn đọng lên máy chủ CSDL...`);
-            apiFetch('/api/submissions/sync-batch', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ submissions: missingOnServer }),
-            }, 12000).catch(() => {});
-          }
-
-          // Hợp nhất danh sách để cả máy chủ và máy này luôn có đầy đủ 100% bài nộp
-          const mergedMap = new Map<string, Submission>();
-          serverSubs.forEach((s: Submission) => mergedMap.set(`${s.className}_${s.machineNumber}_${s.practiceDate || ''}`, s));
-          missingOnServer.forEach((s) => {
-            const key = `${s.className}_${s.machineNumber}_${s.practiceDate || ''}`;
-            if (!mergedMap.has(key)) {
-              mergedMap.set(key, s);
-            }
-          });
-
-          const merged = Array.from(mergedMap.values());
-          setSubmissions(merged);
-          saveSubmissionsSafely(merged);
+          // CSDL máy chủ là nguồn dữ liệu chuẩn mực duy nhất
+          setSubmissions(serverSubs);
+          saveSubmissionsSafely(serverSubs);
         }
       }
     } catch {
