@@ -6,6 +6,7 @@ import { fileURLToPath } from 'url';
 import { GoogleGenAI, Type } from '@google/genai';
 import { scanAndGradeProduct } from './src/utils/productScanner';
 import { INITIAL_SUBMISSIONS } from './src/data/mockSubmissions';
+import { normalizeClassName } from './src/data/classes';
 
 import os from 'os';
 import {
@@ -93,6 +94,115 @@ function fallbackHeuristicGrading(params: {
   return scanAndGradeProduct(params);
 }
 
+// Helper phát sóng bài nộp siêu nhẹ (< 1.5 KB, không chứa ảnh base64 nặng) tới máy chiếu & máy giáo viên
+function createLightweightSubmission(sub: any) {
+  if (!sub) return sub;
+  return {
+    ...sub,
+    attempts: (sub.attempts || []).map((att: any) => ({
+      attemptNumber: att.attemptNumber,
+      timestamp: att.timestamp,
+      fileName: att.fileName,
+      fileSize: att.fileSize,
+      fileLastModified: att.fileLastModified,
+      score: att.score,
+      aiComparisonDetails: att.aiComparisonDetails,
+      criteriaResults: att.criteriaResults,
+      strengths: att.strengths,
+      weaknesses: att.weaknesses,
+      howToGetTen: att.howToGetTen,
+      stepEvaluations: att.stepEvaluations,
+      inspectionSummary: att.inspectionSummary,
+      plagiarismAlert: att.plagiarismAlert,
+    })),
+  };
+}
+
+function recordAndBroadcastGradedSubmission(params: {
+  assignment: any;
+  className: string;
+  machineNumber: string;
+  studentLeader: string;
+  groupMembers?: string[];
+  attemptNumber: number;
+  fileName: string;
+  fileSize: number;
+  fileLastModified?: number;
+  fileContent?: string;
+  gradeResult: any;
+}) {
+  const {
+    assignment,
+    className,
+    machineNumber,
+    studentLeader,
+    groupMembers = [],
+    attemptNumber,
+    fileName,
+    fileSize,
+    fileLastModified,
+    fileContent = '',
+    gradeResult,
+  } = params;
+
+  if (!className || !machineNumber || !studentLeader) return null;
+
+  const now = new Date();
+  const year = now.getFullYear();
+  const month = String(now.getMonth() + 1).padStart(2, '0');
+  const day = String(now.getDate()).padStart(2, '0');
+  const todayStr = `${year}-${month}-${day}`;
+
+  const newAttempt: any = {
+    attemptNumber: Number(attemptNumber) || 1,
+    timestamp: now.toISOString(),
+    fileName,
+    fileSize: Number(fileSize) || 0,
+    fileLastModified: fileLastModified ? Number(fileLastModified) : undefined,
+    fileContent: typeof fileContent === 'string' && fileContent.length < 5000 ? fileContent : (fileContent ? fileContent.slice(0, 5000) : ''),
+    score: gradeResult.score,
+    aiComparisonDetails: gradeResult.aiComparisonDetails || '',
+    criteriaResults: gradeResult.criteriaResults || [],
+    strengths: gradeResult.strengths || [],
+    weaknesses: gradeResult.weaknesses || [],
+    howToGetTen: gradeResult.howToGetTen || [],
+    stepEvaluations: gradeResult.stepEvaluations || [],
+    inspectionSummary: gradeResult.inspectionSummary || undefined,
+    plagiarismAlert: gradeResult.plagiarismAlert || undefined,
+  };
+
+  const subToSave: any = {
+    assignmentId: assignment?.id || '',
+    assignmentTitle: assignment?.title || 'Bài thực hành',
+    className,
+    machineNumber,
+    studentLeader,
+    groupMembers: Array.isArray(groupMembers) ? groupMembers : [],
+    attempts: [newAttempt],
+    highestScore: gradeResult.score,
+    latestScore: gradeResult.score,
+    latestSubmittedAt: newAttempt.timestamp,
+    practiceDate: todayStr,
+    hasPlagiarism: Boolean(gradeResult.plagiarismAlert?.isCopied),
+    plagiarismAlert: gradeResult.plagiarismAlert,
+    status: gradeResult.score >= 10 ? 'perfect' : gradeResult.score >= 7 ? 'graded' : 'needs_improvement',
+  };
+
+  const saveRes = upsertSubmission(subToSave);
+  const savedSub = saveRes.submission;
+  const lightweightSub = createLightweightSubmission(savedSub);
+
+  // Phát sóng tức thì tới máy chiếu và máy giáo viên qua kênh SSE!
+  broadcastRealtimeEvent({
+    type: 'SUBMISSION_UPDATED',
+    submission: lightweightSub,
+    totalSubmissions: saveRes.totalCount,
+    dbStatus: getDatabaseMetrics(),
+  });
+
+  return savedSub;
+}
+
 // API: Chấm điểm bài thực hành (Gemini AI Vision + Heuristic Fallback)
 app.post('/api/grade', async (req, res) => {
   try {
@@ -155,7 +265,7 @@ app.post('/api/grade', async (req, res) => {
         timestamp: new Date().toISOString(),
       });
 
-      return res.json({
+      const plagResult = {
         score: 0.0,
         aiComparisonDetails: plagiarismAlert.message,
         strengths: ['Tệp được tải lên máy chủ thành công.'],
@@ -195,6 +305,25 @@ app.post('/api/grade', async (req, res) => {
         plagiarismAlert,
         encouragement: 'Em hãy tự tay thực hành lại bài học nhé. Thầy/Cô và hệ thống luôn ghi nhận nỗ lực thực chất của em!',
         engine: 'anti-plagiarism-detector',
+      };
+
+      const savedSub = recordAndBroadcastGradedSubmission({
+        assignment,
+        className,
+        machineNumber,
+        studentLeader,
+        groupMembers,
+        attemptNumber,
+        fileName,
+        fileSize,
+        fileLastModified,
+        fileContent,
+        gradeResult: plagResult,
+      });
+
+      return res.json({
+        ...plagResult,
+        submission: savedSub,
       });
     }
 
@@ -338,13 +467,19 @@ QUY TẮC CHIẾT ĐIỂM (BẮT BUỘC):
         }
         contentsPayload.push(prompt);
 
-        const response = await ai.models.generateContent({
+        const generatePromise = ai.models.generateContent({
           model: 'gemini-3.8-flash',
           contents: contentsPayload,
           config: {
             responseMimeType: 'application/json',
           },
         });
+
+        const timeoutPromise = new Promise((_, reject) =>
+          setTimeout(() => reject(new Error('Gemini API timeout sau 8 giây')), 8000)
+        );
+
+        const response: any = await Promise.race([generatePromise, timeoutPromise]);
 
         const rawJson = response.text?.trim() || '{}';
         const parsed = JSON.parse(rawJson);
@@ -359,7 +494,7 @@ QUY TẮC CHIẾT ĐIỂM (BẮT BUỘC):
             }
           }
 
-          return res.json({
+          const geminiResult = {
             score: finalCalculatedScore,
             aiComparisonDetails: parsed.aiComparisonDetails || 'Đã đối chiếu với sản phẩm mẫu và chuẩn tin học.',
             strengths: Array.isArray(parsed.strengths) && parsed.strengths.length > 0 ? parsed.strengths : ['Sản phẩm nộp đúng định dạng yêu cầu.'],
@@ -370,6 +505,25 @@ QUY TẮC CHIẾT ĐIỂM (BẮT BUỘC):
             criteriaResults: Array.isArray(parsed.criteriaResults) ? parsed.criteriaResults : undefined,
             encouragement: parsed.encouragement || 'Tiếp tục phát huy nhé!',
             engine: 'gemini-3.8-flash-vision',
+          };
+
+          const savedSub = recordAndBroadcastGradedSubmission({
+            assignment,
+            className,
+            machineNumber,
+            studentLeader,
+            groupMembers,
+            attemptNumber,
+            fileName,
+            fileSize,
+            fileLastModified,
+            fileContent,
+            gradeResult: geminiResult,
+          });
+
+          return res.json({
+            ...geminiResult,
+            submission: savedSub,
           });
         }
       } catch (aiErr) {
@@ -386,9 +540,24 @@ QUY TẮC CHIẾT ĐIỂM (BẮT BUỘC):
       attemptNumber,
     });
 
+    const savedSub = recordAndBroadcastGradedSubmission({
+      assignment,
+      className,
+      machineNumber,
+      studentLeader,
+      groupMembers,
+      attemptNumber,
+      fileName,
+      fileSize,
+      fileLastModified,
+      fileContent,
+      gradeResult: fallbackResult,
+    });
+
     return res.json({
       ...fallbackResult,
       engine: 'smart-heuristic-evaluator',
+      submission: savedSub,
     });
   } catch (err: any) {
     console.error('Grade endpoint exception:', err);
@@ -534,10 +703,11 @@ app.post('/api/submissions', (req, res) => {
 
   try {
     const result = upsertSubmission(newSubmission);
-    // Phát sóng sự kiện thời gian thực tới tất cả máy giáo viên và học sinh
+    // Phát sóng sự kiện thời gian thực siêu nhẹ tới tất cả máy giáo viên và học sinh
+    const lightweightSub = createLightweightSubmission(result.submission);
     broadcastRealtimeEvent({
       type: 'SUBMISSION_UPDATED',
-      submission: result.submission,
+      submission: lightweightSub,
       totalSubmissions: result.totalCount,
       dbStatus: getDatabaseMetrics(),
     });

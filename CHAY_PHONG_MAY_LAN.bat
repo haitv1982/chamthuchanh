@@ -60,19 +60,26 @@ if %errorlevel% neq 0 (
 echo Thu vien: DA SAN SANG!
 echo.
 
-echo [3/3] DIA CHI TRUY CAP:
+echo [3/3] MO CONG TUONG LUA (3000) VA DIA CHI TRUY CAP PHONG MAY:
+netsh advfirewall firewall show rule name="LabGrade_Port_3000" >nul 2>nul
+if %errorlevel% neq 0 (
+    netsh advfirewall firewall add rule name="LabGrade_Port_3000" dir=in action=allow protocol=TCP localport=3000 >nul 2>nul
+)
 echo -------------------------------------------------------------------------
 echo  * Tren may Giao vien: http://localhost:3000
 echo.
-echo  * Dia chi cho may hoc sinh va may chieu (IP mang LAN phong may):
+echo  * Dia chi cho may Hoc sinh & May chieu (IP mang LAN phong may):
 ipconfig | findstr /i "IPv4"
 echo -------------------------------------------------------------------------
-echo (Hoc sinh mo trinh duyet go dia chi IP o tren them :3000)
-echo Vi du neu IPv4 la 192.168.1.15 thi link la: http://192.168.1.15:3000
-echo.
-echo Dang khoi dong may chu... Vui long khong tat cua so nay trong tiet hoc!
+echo  HUONG DAN NHANH:
+echo  1. Neu Windows Firewall hien thong bao, hay tich chon ca 2 o (Private/Public)
+echo     roi bam "Allow access" (Cho phep truy cap) de may hoc sinh ket noi duoc.
+echo  2. Tren may hoc sinh & may chieu, mo trinh duyet go: http://IP_O_TREN:3000
+echo     (Vi du: http://192.168.1.15:3000)
+echo  3. KHONG TAT cua so den nay trong suot tiet thuc hanh!
 echo -------------------------------------------------------------------------
-call npx tsx server.ts
+echo Dang khoi dong may chu...
+call npm run dev
 
 echo.
 pause

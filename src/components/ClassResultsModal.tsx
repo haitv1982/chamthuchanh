@@ -18,7 +18,8 @@ import {
   exportSubmissionsToExcel,
 } from '../utils/excelExport';
 import { formatPracticeDateVi, getTodayDateString } from '../utils/storageManager';
-import { SCHOOL_CLASSES } from '../data/classes';
+import { SCHOOL_CLASSES, normalizeClassName } from '../data/classes';
+import { realtimeSync } from '../utils/realtimeSync';
 import { ClassMultiProductGradebook } from './ClassMultiProductGradebook';
 
 interface ClassResultsModalProps {
@@ -94,13 +95,27 @@ export const ClassResultsModal: React.FC<ClassResultsModalProps> = ({
   const [isConfirmClearOpen, setIsConfirmClearOpen] = useState<boolean>(false);
   const [isClearing, setIsClearing] = useState<boolean>(false);
 
-  // Tự động làm mới kết quả trực tiếp từ server khi mở modal và định kỳ mỗi 3.5 giây
+  // Tự động làm mới kết quả trực tiếp từ server khi mở modal, khi có sự kiện nộp bài tức thời và định kỳ
   useEffect(() => {
     if (onRefresh) {
       onRefresh();
-      const interval = setInterval(onRefresh, 3500);
-      return () => clearInterval(interval);
     }
+    const unsub = realtimeSync.subscribe((event: any) => {
+      if (
+        event.type === 'SUBMISSION_UPDATED' ||
+        event.type === 'SUBMISSIONS_CLEARED' ||
+        event.type === 'SUBMISSIONS_SYNCED'
+      ) {
+        if (onRefresh) onRefresh();
+      }
+    });
+    const interval = setInterval(() => {
+      if (onRefresh) onRefresh();
+    }, 3000);
+    return () => {
+      unsub();
+      clearInterval(interval);
+    };
   }, [onRefresh]);
 
   // Cập nhật activeClass nếu lớp hiện tại không còn tồn tại trong danh sách lớp mới tải lên
@@ -110,11 +125,11 @@ export const ClassResultsModal: React.FC<ClassResultsModalProps> = ({
     }
   }, [displayedClasses, activeClass]);
 
-  // Lọc bài nộp theo lớp đang chọn
+  // Lọc bài nộp theo lớp đang chọn (chuẩn hóa tên lớp tránh lệch '9A' với 'Lớp 9A')
   const classList = useMemo(() => {
-    return activeClass === 'Tất cả'
-      ? submissions
-      : submissions.filter((s) => s.className === activeClass);
+    if (activeClass === 'Tất cả') return submissions;
+    const normActive = normalizeClassName(activeClass);
+    return submissions.filter((s) => normalizeClassName(s.className) === normActive);
   }, [submissions, activeClass]);
 
   // Tìm tất cả các ngày thực hành có trong lớp này (ngày mới nhất đứng đầu)

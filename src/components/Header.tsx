@@ -39,6 +39,7 @@ import {
   fetchNetworkInfo,
   DEFAULT_CLOUD_BACKEND_URL,
   isStaticHosting,
+  isBackendConfigured,
 } from '../utils/apiConfig';
 import { realtimeSync } from '../utils/realtimeSync';
 import {
@@ -158,9 +159,9 @@ export const Header: React.FC<HeaderProps> = ({
 
   // Đồng bộ mã PIN thời gian thực từ Firebase Cloud, máy chủ hoặc từ máy Giáo viên qua BroadcastChannel & SSE
   useEffect(() => {
-    // 1. Tải và lắng nghe cài đặt mã PIN từ Firebase Cloud Firestore
+    // 1. Tải và lắng nghe cài đặt mã PIN từ Firebase Cloud Firestore (chỉ kích hoạt trên hosting tĩnh Vercel/GitHub Pages)
     let unsubCloudSettings: (() => void) | null = null;
-    if (isFirebaseReady) {
+    if (isFirebaseReady && !isBackendConfigured()) {
       fetchSettingsFromCloud().then((cloudSettings) => {
         if (cloudSettings?.teacherPin) {
           const pin = cloudSettings.teacherPin.trim();

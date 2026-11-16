@@ -3,6 +3,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { INITIAL_SUBMISSIONS } from '../data/mockSubmissions';
 import { Submission, SubmissionAttempt, StudentRecord, PlagiarismAlert } from '../types';
+import { normalizeClassName } from '../data/classes';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -383,12 +384,14 @@ export function upsertSubmission(newSub: any): { success: boolean; submission: S
 
     const sDate = s.practiceDate || (s.latestSubmittedAt ? s.latestSubmittedAt.slice(0, 10) : '');
     const isSameDate = !subPracticeDate || !sDate || subPracticeDate === sDate;
+    const sNormClass = normalizeClassName(s.className);
+    const newNormClass = normalizeClassName(newSub.className);
 
-    if (s.className === newSub.className && s.machineNumber === newSub.machineNumber && isSameDate) {
+    if (sNormClass === newNormClass && s.machineNumber === newSub.machineNumber && isSameDate) {
       return true;
     }
 
-    if (s.className === newSub.className && (s.studentLeader || '').trim().toLowerCase() === cleanLeader && isSameDate) {
+    if (sNormClass === newNormClass && (s.studentLeader || '').trim().toLowerCase() === cleanLeader && isSameDate) {
       return true;
     }
 
@@ -487,8 +490,9 @@ export function batchSyncSubmissions(list: any[]): { success: boolean; count: nu
 
 // Xóa bài nộp theo lớp
 export function deleteSubmissions(className?: string): number {
-  if (className) {
-    dbState.submissions = dbState.submissions.filter((s) => s.className !== className);
+  if (className && className !== 'Tất cả') {
+    const norm = normalizeClassName(className);
+    dbState.submissions = dbState.submissions.filter((s) => normalizeClassName(s.className) !== norm);
   } else {
     dbState.submissions = [];
   }

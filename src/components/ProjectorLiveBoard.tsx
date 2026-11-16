@@ -20,8 +20,8 @@ import {
   Unlock,
 } from 'lucide-react';
 import { Submission, Assignment, StudentRecord } from '../types';
-import { SCHOOL_CLASSES } from '../data/classes';
-import { apiFetch } from '../utils/apiConfig';
+import { SCHOOL_CLASSES, normalizeClassName } from '../data/classes';
+import { apiFetch, isBackendConfigured } from '../utils/apiConfig';
 import { realtimeSync } from '../utils/realtimeSync';
 import { playPlagiarismWarningSound } from '../utils/antiPlagiarism';
 import { isFirebaseReady, fetchSettingsFromCloud, subscribeToSubmissionsCloud } from '../services/firebase';
@@ -161,20 +161,17 @@ export const ProjectorLiveBoard: React.FC<ProjectorLiveBoardProps> = ({
         setActivePlagiarismAlert(event as any);
       } else if (event.type === 'SUBMISSION_UPDATED' && event.submission) {
         const clean = sanitizeSubmission(event.submission);
-        const todayStr = getTodayDateString();
-        const isToday = clean.practiceDate === todayStr || isSubmittedToday(clean.latestSubmittedAt, todayStr);
+        const normSubCls = normalizeClassName(clean.className);
 
-        if (isToday) {
-          setLiveSubmissions((prev) => {
-            const filtered = prev.filter(
-              (s) => s.id !== clean.id && !(s.className === clean.className && s.machineNumber === clean.machineNumber)
-            );
-            return [clean, ...filtered];
-          });
-          setRecentMachineId(clean.machineNumber);
-          setTimeout(() => setRecentMachineId(null), 4000);
-          setLastSyncTime(new Date().toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit', second: '2-digit' }));
-        }
+        setLiveSubmissions((prev) => {
+          const filtered = prev.filter(
+            (s) => s.id !== clean.id && !(normalizeClassName(s.className) === normSubCls && s.machineNumber === clean.machineNumber)
+          );
+          return [clean, ...filtered];
+        });
+        setRecentMachineId(clean.machineNumber);
+        setTimeout(() => setRecentMachineId(null), 4000);
+        setLastSyncTime(new Date().toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit', second: '2-digit' }));
       } else if (event.type === 'SUBMISSIONS_CLEARED') {
         const targetCls = event.targetClass || event.className;
         if (!targetCls || targetCls === 'Tất cả') {
@@ -186,9 +183,9 @@ export const ProjectorLiveBoard: React.FC<ProjectorLiveBoardProps> = ({
       }
     });
 
-    // 2. Kênh Firebase Firestore đám mây (Liên thông tức thì giữa các thiết bị khác mạng/Vercel)
+    // 2. Kênh Firebase Firestore đám mây (chỉ dùng khi chạy trên Vercel/hosting tĩnh chưa có máy chủ Render/LAN)
     let unsubCloud: (() => void) | null = null;
-    if (isFirebaseReady) {
+    if (isFirebaseReady && !isBackendConfigured()) {
       unsubCloud = subscribeToSubmissionsCloud((cloudSubs) => {
         if (Array.isArray(cloudSubs)) {
           const todayStr = getTodayDateString();
@@ -385,17 +382,18 @@ export const ProjectorLiveBoard: React.FC<ProjectorLiveBoardProps> = ({
     return all;
   }, [assignments, assignment, activeClassFilter]);
 
-  // Filter submissions by class (chỉ hiển thị bài nộp của ngày thực hành hôm nay)
-  const todayStr = new Date().toISOString().slice(0, 10);
+  // Filter submissions by class (hiển thị bài nộp của phiên thực hành hôm nay hoặc bài mới nộp)
+  const todayStr = getTodayDateString();
   const activeSubs = liveSubmissions.filter((s) => {
     if (!s || String(s.id).startsWith('mock-')) return false;
     const subDate = s.practiceDate || (s.latestSubmittedAt ? s.latestSubmittedAt.slice(0, 10) : '');
-    return subDate === todayStr;
+    return !subDate || subDate === todayStr || isSubmittedToday(s.latestSubmittedAt, todayStr);
   });
 
-  const classSubmissions = activeClassFilter === 'Tất cả'
+  const normFilter = normalizeClassName(activeClassFilter);
+  const classSubmissions = activeClassFilter === 'Tất cả' || !normFilter
     ? activeSubs
-    : activeSubs.filter((s) => s.className === activeClassFilter);
+    : activeSubs.filter((s) => normalizeClassName(s.className) === normFilter);
 
   // Lọc theo sản phẩm đã nộp nếu giáo viên chọn lọc SP
   const productFilteredSubs = useMemo(() => {

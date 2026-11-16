@@ -28,7 +28,7 @@ import {
 } from './utils/storageManager';
 import { scanAndGradeProduct } from './utils/productScanner';
 import { detectPlagiarismClientSide } from './utils/antiPlagiarism';
-import { apiFetch, getApiUrl } from './utils/apiConfig';
+import { apiFetch, getApiUrl, isBackendConfigured } from './utils/apiConfig';
 import { realtimeSync } from './utils/realtimeSync';
 import {
   isFirebaseReady,
@@ -345,8 +345,11 @@ export default function App() {
         }
       } else if (event.type === 'SUBMISSION_UPDATED' && event.submission) {
         const cleanSub = sanitizeSubmission(event.submission);
+        const normSubCls = normalizeClassName(cleanSub.className);
         setSubmissions((prev) => {
-          const filtered = prev.filter((s) => s.id !== cleanSub.id && !(s.className === cleanSub.className && s.machineNumber === cleanSub.machineNumber && s.practiceDate === cleanSub.practiceDate));
+          const filtered = prev.filter(
+            (s) => s.id !== cleanSub.id && !(normalizeClassName(s.className) === normSubCls && s.machineNumber === cleanSub.machineNumber)
+          );
           const next = pruneOldSubmissions([cleanSub, ...filtered]);
           saveSubmissionsSafely(next);
           return next;
@@ -427,6 +430,18 @@ export default function App() {
           if (event.data?.type === 'ROSTER_UPDATED' && Array.isArray(event.data.students)) {
             setStudentRoster(event.data.students);
           }
+          if (event.data?.type === 'SUBMISSION_UPDATED' && event.data.submission) {
+            const cleanSub = sanitizeSubmission(event.data.submission);
+            const normSubCls = normalizeClassName(cleanSub.className);
+            setSubmissions((prev) => {
+              const filtered = prev.filter(
+                (s) => s.id !== cleanSub.id && !(normalizeClassName(s.className) === normSubCls && s.machineNumber === cleanSub.machineNumber)
+              );
+              const next = pruneOldSubmissions([cleanSub, ...filtered]);
+              saveSubmissionsSafely(next);
+              return next;
+            });
+          }
           if (event.data?.type === 'SUBMISSIONS_CLEARED') {
             const targetCls = event.data.targetClass || event.data.className;
             const todayStr = getTodayDateString();
@@ -456,12 +471,15 @@ export default function App() {
       } catch {}
     }
 
-    // 3. Kênh Firebase Cloud Firestore thời gian thực (Lưu trữ vĩnh viễn trên đám mây)
-    let unsubCloudSubs: (() => void) | null = null;
+    // 3. Kênh Firebase Cloud Firestore thời gian thực:
+    // - Khi chạy trên máy chủ thực (Render / Node.js phòng máy / Cloud Run): Kênh SSE của máy chủ xử lý toàn bộ 100% thời gian thực,
+    //   KHÔNG gắn onSnapshot liên tục trên 40 máy học sinh để tránh cạn hạn ngạch Firestore miễn phí (Quota exceeded).
+    // - Chỉ kích hoạt lắng nghe Cloud Firestore khi chạy trên hosting tĩnh thuần túy (Vercel / GitHub Pages chưa trỏ máy chủ).
     let unsubCloudRoster: (() => void) | null = null;
     let unsubCloudSettings: (() => void) | null = null;
+    const useCloudFallbackOnly = !isBackendConfigured();
 
-    if (isFirebaseReady) {
+    if (isFirebaseReady && useCloudFallbackOnly) {
       // Tải cài đặt và mã PIN mới nhất từ đám mây khi khởi động
       fetchSettingsFromCloud().then((cloudSettings) => {
         if (!cloudSettings) return;
@@ -492,31 +510,13 @@ export default function App() {
         }
       }).catch(() => {});
 
-      unsubCloudSubs = subscribeToSubmissionsCloud(
-        (cloudSubs) => {
-          if (Array.isArray(cloudSubs)) {
-            setSubmissions((prev) => {
-              const map = new Map<string, Submission>();
-              prev.forEach((s) => map.set(s.id, s));
-              cloudSubs.forEach((s) => map.set(s.id, s));
-              const merged = pruneOldSubmissions(Array.from(map.values()));
-              saveSubmissionsSafely(merged);
-              return merged;
-            });
-            setDbStatus((prev) => ({
-              ...prev,
-              status: 'connected',
-              isPersistent: true,
-              totalSubmissions: cloudSubs.length,
-              lastUpdated: new Date().toLocaleTimeString('vi-VN'),
-            }));
-            setIsRealtimeConnected(true);
-          }
-        },
-        () => {
-          // Quota exceeded hoặc lỗi mạng: duy trì hoạt động trên CSDL máy
+      // Máy học sinh chỉ tải danh sách bài nộp 1 lần khi mở trang (tiết kiệm 95% lượt đọc Firestore)
+      fetchSubmissionsFromCloud().then((cloudSubs) => {
+        if (Array.isArray(cloudSubs) && cloudSubs.length > 0) {
+          setSubmissions(pruneOldSubmissions(cloudSubs));
+          saveSubmissionsSafely(pruneOldSubmissions(cloudSubs));
         }
-      );
+      }).catch(() => {});
 
       unsubCloudRoster = subscribeToRosterCloud(
         (cloudRoster) => {
@@ -573,12 +573,42 @@ export default function App() {
       unsubscribe();
       realtimeSync.disconnect();
       if (bc) bc.close();
-      if (unsubCloudSubs) unsubCloudSubs();
       if (unsubCloudRoster) unsubCloudRoster();
       if (unsubCloudSettings) unsubCloudSettings();
       window.removeEventListener('storage', handleStorageChange);
     };
   }, []);
+
+  // Chỉ lắng nghe luồng bài nộp Cloud liên tục ở chế độ Giáo viên khi chạy trên Vercel/Hosting tĩnh
+  useEffect(() => {
+    if (!isFirebaseReady || isBackendConfigured() || !isTeacherRole) return;
+    const unsubCloudSubs = subscribeToSubmissionsCloud(
+      (cloudSubs) => {
+        if (Array.isArray(cloudSubs)) {
+          setSubmissions((prev) => {
+            const map = new Map<string, Submission>();
+            prev.forEach((s) => map.set(s.id, s));
+            cloudSubs.forEach((s) => map.set(s.id, s));
+            const merged = pruneOldSubmissions(Array.from(map.values()));
+            saveSubmissionsSafely(merged);
+            return merged;
+          });
+          setDbStatus((prev) => ({
+            ...prev,
+            status: 'connected',
+            isPersistent: true,
+            totalSubmissions: cloudSubs.length,
+            lastUpdated: new Date().toLocaleTimeString('vi-VN'),
+          }));
+          setIsRealtimeConnected(true);
+        }
+      },
+      () => {}
+    );
+    return () => {
+      if (unsubCloudSubs) unsubCloudSubs();
+    };
+  }, [isTeacherRole]);
 
   // Trạng thái Cơ sở dữ liệu phòng máy (CSDL Lưu trữ thời gian thực)
   const [dbStatus, setDbStatus] = useState<{
@@ -1223,7 +1253,9 @@ export default function App() {
 
     let updatedSubmission: Submission;
 
-    if (existingSubmission) {
+    if (gradeData?.submission) {
+      updatedSubmission = sanitizeSubmission(gradeData.submission);
+    } else if (existingSubmission) {
       const updatedAttempts = [...existingSubmission.attempts, newAttempt];
       const maxScore = Math.max(...updatedAttempts.map((a) => a.score));
 
@@ -1242,10 +1274,6 @@ export default function App() {
         plagiarismAlert: gradeData.plagiarismAlert || existingSubmission.plagiarismAlert,
         status: maxScore >= 10 ? 'perfect' : maxScore >= 7 ? 'graded' : 'needs_improvement',
       };
-
-      setSubmissions((prev) =>
-        pruneOldSubmissions(prev.map((s) => (s.id === existingSubmission.id ? updatedSubmission : s)))
-      );
     } else {
       updatedSubmission = {
         id: `sub-${data.className}-${data.machineNumber.replace(/\s+/g, '_')}-${todayStr}-${Date.now()}`,
@@ -1264,9 +1292,29 @@ export default function App() {
         plagiarismAlert: gradeData.plagiarismAlert || undefined,
         status: newAttempt.score >= 10 ? 'perfect' : newAttempt.score >= 7 ? 'graded' : 'needs_improvement',
       };
+    }
 
-      // Thêm bài nộp mới của ngày hôm nay, giữ lại các ngày trước trong lịch sử, tự động dọn dẹp các ngày cũ nhất khi đầy
-      setSubmissions((prev) => pruneOldSubmissions([updatedSubmission, ...prev]));
+    // Cập nhật ngay vào danh sách submissions của máy này
+    setSubmissions((prev) => {
+      const normCls = normalizeClassName(updatedSubmission.className);
+      const filtered = prev.filter(
+        (s) => s.id !== updatedSubmission.id && !(normalizeClassName(s.className) === normCls && s.machineNumber === updatedSubmission.machineNumber)
+      );
+      const next = pruneOldSubmissions([updatedSubmission, ...filtered]);
+      saveSubmissionsSafely(next);
+      return next;
+    });
+
+    // Phát sóng ngay qua BroadcastChannel tới các tab/máy chiếu mở trên cùng máy
+    if (typeof BroadcastChannel !== 'undefined') {
+      try {
+        const bc = new BroadcastChannel('labgrade_session_channel');
+        bc.postMessage({
+          type: 'SUBMISSION_UPDATED',
+          submission: updatedSubmission,
+        });
+        bc.close();
+      } catch {}
     }
 
     // 1. Lưu vĩnh viễn lên đám mây Google Firebase Firestore (Bảo toàn dữ liệu trên Vercel hoặc khi máy tính đóng băng ổ cứng)
@@ -1282,23 +1330,20 @@ export default function App() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(updatedSubmission),
-      }, 7000);
+      }, 15000);
       if (syncRes.ok) {
         const syncJson = await syncRes.json();
         if (syncJson.submission) {
           const finalized = sanitizeSubmission(syncJson.submission);
-          setSubmissions((prev) =>
-            pruneOldSubmissions(
-              prev.map((s) =>
-                s.id === finalized.id ||
-                (s.className === finalized.className &&
-                  s.machineNumber === finalized.machineNumber &&
-                  s.studentLeader.trim().toLowerCase() === finalized.studentLeader.trim().toLowerCase())
-                  ? finalized
-                  : s
-              )
-            )
-          );
+          setSubmissions((prev) => {
+            const normCls = normalizeClassName(finalized.className);
+            const filtered = prev.filter(
+              (s) => s.id !== finalized.id && !(normalizeClassName(s.className) === normCls && s.machineNumber === finalized.machineNumber)
+            );
+            const next = pruneOldSubmissions([finalized, ...filtered]);
+            saveSubmissionsSafely(next);
+            return next;
+          });
         }
       } else {
         const syncErrJson = await syncRes.json().catch(() => ({}));
