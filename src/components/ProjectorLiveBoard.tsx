@@ -28,6 +28,14 @@ import { isFirebaseReady, fetchSettingsFromCloud, subscribeToSubmissionsCloud } 
 import { getTodayDateString, isSubmittedToday, sanitizeSubmission } from '../utils/storageManager';
 import { downloadSubmissionProductFile } from '../utils/fileDownload';
 
+export interface OnlineMachineInfo {
+  clientId: string;
+  machineNumber: string;
+  className: string;
+  studentLeader: string;
+  lastSeen: number;
+}
+
 interface ProjectorLiveBoardProps {
   className: string;
   assignment: Assignment;
@@ -40,6 +48,7 @@ interface ProjectorLiveBoardProps {
   isTeacher?: boolean;
   allowSubmission?: boolean;
   allowedClasses?: string[];
+  onlineMachines?: OnlineMachineInfo[];
   onToggleSubmissionPermission?: (allow: boolean, targetClass?: string) => void;
 }
 
@@ -55,6 +64,7 @@ export const ProjectorLiveBoard: React.FC<ProjectorLiveBoardProps> = ({
   isTeacher = false,
   allowSubmission = true,
   allowedClasses = [],
+  onlineMachines = [],
   onToggleSubmissionPermission,
 }) => {
   // Lấy danh sách lớp duy nhất từ danh sách học sinh đã tải lên (nếu có)
@@ -96,10 +106,15 @@ export const ProjectorLiveBoard: React.FC<ProjectorLiveBoardProps> = ({
 
   // Real-time live submissions synchronized across all lab PCs
   const [liveSubmissions, setLiveSubmissions] = useState<Submission[]>(submissions || []);
+  const [liveOnlineMachines, setLiveOnlineMachines] = useState<OnlineMachineInfo[]>(onlineMachines || []);
   const [lastSyncTime, setLastSyncTime] = useState<string>(() =>
     new Date().toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
   );
   const [recentMachineId, setRecentMachineId] = useState<string | null>(null);
+
+  useEffect(() => {
+    setLiveOnlineMachines(onlineMachines || []);
+  }, [onlineMachines]);
 
   // Trạng thái modal xóa kết quả cũ
   const [isConfirmClearOpen, setIsConfirmClearOpen] = useState<boolean>(false);
@@ -156,7 +171,11 @@ export const ProjectorLiveBoard: React.FC<ProjectorLiveBoardProps> = ({
 
     // 1. Kênh Server-Sent Events (SSE) tức thời từ máy chủ CSDL
     const unsubSSE = realtimeSync.subscribe((event) => {
-      if (event.type === 'PLAGIARISM_ALERT') {
+      if (event.type === 'CONNECTED' && Array.isArray(event.onlineMachines)) {
+        setLiveOnlineMachines(event.onlineMachines);
+      } else if (event.type === 'PRESENCE_UPDATED' && Array.isArray(event.onlineMachines)) {
+        setLiveOnlineMachines(event.onlineMachines);
+      } else if (event.type === 'PLAGIARISM_ALERT') {
         playPlagiarismWarningSound();
         setActivePlagiarismAlert(event as any);
       } else if (event.type === 'SUBMISSION_UPDATED' && event.submission) {
@@ -226,6 +245,9 @@ export const ProjectorLiveBoard: React.FC<ProjectorLiveBoardProps> = ({
         const res = await apiFetch('/api/submissions');
         if (res.ok) {
           const data = await res.json();
+          if (isMounted && Array.isArray(data.onlineMachines)) {
+            setLiveOnlineMachines(data.onlineMachines);
+          }
           if (isMounted && Array.isArray(data.submissions)) {
             const todayStr = getTodayDateString();
             const validSubs = data.submissions
@@ -442,12 +464,28 @@ export const ProjectorLiveBoard: React.FC<ProjectorLiveBoardProps> = ({
     ? (Array.from(submissionByMachine.values()).reduce((sum, s) => sum + s.highestScore, 0) / totalSubmitted).toFixed(1)
     : '0';
 
+  // Bản đồ máy học sinh đang Online trong lớp đang chiếu
+  const onlineByMachine = useMemo(() => {
+    const map = new Map<string, OnlineMachineInfo>();
+    const normFilterVal = normalizeClassName(activeClassFilter);
+    (liveOnlineMachines || []).forEach((m) => {
+      if (!m || !m.machineNumber) return;
+      if (activeClassFilter === 'Tất cả' || !normFilterVal || !m.className || normalizeClassName(m.className) === normFilterVal) {
+        map.set(m.machineNumber, m);
+      }
+    });
+    return map;
+  }, [liveOnlineMachines, activeClassFilter]);
+
+  const totalOnlineMachines = onlineByMachine.size;
+
   // Tạo 36 máy tính phòng máy tiêu chuẩn
   const totalMachinesCount = 36;
   const machineCards = Array.from({ length: totalMachinesCount }, (_, i) => {
     const machineId = `Máy ${String(i + 1).padStart(2, '0')}`;
     const sub = submissionByMachine.get(machineId);
     const allSubs = duplicateMachineMap.get(machineId) || [];
+    const onlineInfo = onlineByMachine.get(machineId) || null;
     // YÊU CẦU: Khi giáo viên khóa nộp bài của lớp đó, reset toàn bộ màn hình máy chiếu về trạng thái đang thực hành
     const isShowingSubmission = isClassAllowed && Boolean(sub);
 
@@ -456,6 +494,8 @@ export const ProjectorLiveBoard: React.FC<ProjectorLiveBoardProps> = ({
       submission: isShowingSubmission ? sub : null,
       hasMultipleGroups: allSubs.length > 1,
       isPracticingState: !isClassAllowed,
+      isOnline: Boolean(onlineInfo),
+      onlineInfo,
     };
   });
 
@@ -547,11 +587,11 @@ export const ProjectorLiveBoard: React.FC<ProjectorLiveBoardProps> = ({
             <p className="text-xs text-slate-400 mt-0.5">
               {selectedProductFilter !== 'all' ? (
                 <span>
-                  Đang lọc: <strong className="text-cyan-300">{relevantAssignments.find(a => a.id === selectedProductFilter)?.title || 'Sản phẩm chọn'}</strong> • <strong className="text-white">{totalSubmitted}/36 máy</strong> đã nộp
+                  Đang lọc: <strong className="text-cyan-300">{relevantAssignments.find(a => a.id === selectedProductFilter)?.title || 'Sản phẩm chọn'}</strong> • <strong className="text-emerald-400">{totalOnlineMachines}</strong> máy online • <strong className="text-white">{totalSubmitted}/36 máy</strong> đã nộp
                 </span>
               ) : (
                 <span>
-                  {assignment.title} • {totalSubmitted}/36 máy đã nộp • Điểm TB: {avgScore}đ
+                  {assignment.title} • <strong className="text-emerald-400">{totalOnlineMachines}</strong> máy online • {totalSubmitted}/36 máy đã nộp • Điểm TB: {avgScore}đ
                 </span>
               )}
             </p>
@@ -696,7 +736,7 @@ export const ProjectorLiveBoard: React.FC<ProjectorLiveBoardProps> = ({
       {/* Main Grid 36 Máy Tính */}
       <div className="flex-1 p-4 sm:p-6 overflow-y-auto">
         <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-3 sm:gap-3.5">
-          {machineCards.map(({ machineId, submission, isPracticingState }) => {
+          {machineCards.map(({ machineId, submission, isPracticingState, isOnline, onlineInfo }) => {
             const isJustUpdated = recentMachineId === machineId;
             const hasSubmitted = Boolean(submission);
             const isPlagiarized = Boolean(
@@ -720,12 +760,17 @@ export const ProjectorLiveBoard: React.FC<ProjectorLiveBoardProps> = ({
                       : score !== null && score >= 7
                       ? 'bg-blue-950/60 border-blue-500 shadow-lg shadow-blue-950/50 ring-1 ring-blue-500/40'
                       : 'bg-amber-950/60 border-amber-500 shadow-lg shadow-amber-950/50 ring-1 ring-amber-500/40'
+                    : isOnline
+                    ? 'bg-slate-800/70 border-emerald-500/40 text-slate-200 shadow-md'
                     : 'bg-slate-900/50 border-slate-800 text-slate-500'
                 }`}
               >
                 {/* Header card: Số máy & Điểm phát sáng */}
                 <div className="flex items-center justify-between gap-1">
-                  <span className={`text-xs font-black uppercase tracking-wider ${isPlagiarized ? 'text-rose-200' : hasSubmitted ? 'text-white font-extrabold' : 'text-slate-400'}`}>
+                  <span className={`text-xs font-black uppercase tracking-wider flex items-center gap-1.5 ${isPlagiarized ? 'text-rose-200' : hasSubmitted ? 'text-white font-extrabold' : isOnline ? 'text-slate-100' : 'text-slate-400'}`}>
+                    {!hasSubmitted && isOnline && (
+                      <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse inline-block shrink-0" />
+                    )}
                     {machineId}
                   </span>
                   {isPlagiarized ? (
@@ -746,7 +791,9 @@ export const ProjectorLiveBoard: React.FC<ProjectorLiveBoardProps> = ({
                       {score.toFixed(1)}đ
                     </span>
                   ) : (
-                    <span className="text-[10px] font-semibold text-slate-500">Chưa nộp</span>
+                    <span className={`text-[10px] font-semibold ${isOnline ? 'text-emerald-300' : 'text-slate-500'}`}>
+                      Chưa nộp
+                    </span>
                   )}
                 </div>
 
@@ -762,10 +809,22 @@ export const ProjectorLiveBoard: React.FC<ProjectorLiveBoardProps> = ({
                         <span>{submission.attempts?.length || 1} lần nộp</span>
                       </div>
                     </div>
+                  ) : isOnline ? (
+                    <div>
+                      {onlineInfo?.studentLeader && (
+                        <div className="text-xs font-bold text-slate-100 truncate mb-0.5" title={onlineInfo.studentLeader}>
+                          {onlineInfo.studentLeader}
+                        </div>
+                      )}
+                      <div className="text-[11px] text-emerald-300 italic flex items-center gap-1.5 font-medium">
+                        <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse shrink-0" />
+                        <span>{isPracticingState ? 'Đang thực hành...' : 'Đang làm bài...'}</span>
+                      </div>
+                    </div>
                   ) : (
-                    <div className="text-[11px] text-slate-500 italic flex items-center gap-1">
-                      <span className="w-1.5 h-1.5 rounded-full bg-slate-600" />
-                      <span>{isPracticingState ? 'Đang thực hành...' : 'Đang làm bài...'}</span>
+                    <div className="text-[11px] text-slate-500 italic flex items-center gap-1.5">
+                      <span className="w-1.5 h-1.5 rounded-full bg-slate-600 shrink-0" />
+                      <span>Đang offline</span>
                     </div>
                   )}
                 </div>

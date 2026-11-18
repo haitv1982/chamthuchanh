@@ -128,6 +128,16 @@ export default function App() {
   const [studentLeader, setStudentLeader] = useState<string>(() => {
     return localStorage.getItem('labgrade_student_leader') || '';
   });
+  const [hasExplicitMachine, setHasExplicitMachine] = useState<boolean>(() => {
+    return Boolean(localStorage.getItem('labgrade_machine_number') || localStorage.getItem('labgrade_student_leader'));
+  });
+  const [onlineMachines, setOnlineMachines] = useState<Array<{
+    clientId: string;
+    machineNumber: string;
+    className: string;
+    studentLeader: string;
+    lastSeen: number;
+  }>>([]);
   const [groupMembers, setGroupMembers] = useState<string[]>(() => {
     try {
       const saved = localStorage.getItem('labgrade_group_members');
@@ -335,6 +345,14 @@ export default function App() {
     const unsubscribe = realtimeSync.subscribe((event) => {
       if (event.type === 'CONNECTION_STATUS') {
         setIsRealtimeConnected(event.connected);
+      } else if (event.type === 'CONNECTED') {
+        if (Array.isArray(event.onlineMachines)) {
+          setOnlineMachines(event.onlineMachines);
+        }
+      } else if (event.type === 'PRESENCE_UPDATED') {
+        if (Array.isArray(event.onlineMachines)) {
+          setOnlineMachines(event.onlineMachines);
+        }
       } else if (event.type === 'ROSTER_UPDATED') {
         if (Array.isArray(event.students)) {
           setStudentRoster(event.students);
@@ -631,6 +649,70 @@ export default function App() {
     localStorage.setItem('labgrade_user_role', isTeacherRole ? 'teacher' : 'student');
   }, [isTeacherRole]);
 
+  // Gửi tín hiệu Online / Offline (Heartbeat) của máy học sinh lên máy chủ để màn hình máy chiếu nhận biết chính xác
+  useEffect(() => {
+    if (!isBackendConfigured()) return;
+
+    let clientId = '';
+    try {
+      clientId = sessionStorage.getItem('labgrade_client_session_id') || '';
+      if (!clientId) {
+        clientId = `cli-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+        sessionStorage.setItem('labgrade_client_session_id', clientId);
+      }
+    } catch {
+      clientId = `cli-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+    }
+
+    const activeMachine = !isTeacherRole && (hasExplicitMachine || studentLeader.trim().length > 0)
+      ? machineNumber
+      : '';
+
+    const sendHeartbeat = () => {
+      apiFetch('/api/presence/heartbeat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          clientId,
+          machineNumber: activeMachine,
+          className: userClassName,
+          studentLeader: studentLeader.trim(),
+          isTeacher: isTeacherRole,
+        }),
+      }, 4000)
+        .then((res) => (res.ok ? res.json() : null))
+        .then((data) => {
+          if (data && Array.isArray(data.onlineMachines)) {
+            setOnlineMachines(data.onlineMachines);
+          }
+        })
+        .catch(() => {});
+    };
+
+    sendHeartbeat();
+    const hbInterval = setInterval(sendHeartbeat, 12000);
+
+    const handleOfflineBeacon = () => {
+      try {
+        const offlineUrl = getApiUrl('/api/presence/offline');
+        const payload = JSON.stringify({ clientId });
+        if (navigator.sendBeacon) {
+          const blob = new Blob([payload], { type: 'application/json' });
+          navigator.sendBeacon(offlineUrl, blob);
+        }
+      } catch {}
+    };
+
+    window.addEventListener('pagehide', handleOfflineBeacon);
+    window.addEventListener('beforeunload', handleOfflineBeacon);
+
+    return () => {
+      clearInterval(hbInterval);
+      window.removeEventListener('pagehide', handleOfflineBeacon);
+      window.removeEventListener('beforeunload', handleOfflineBeacon);
+    };
+  }, [isTeacherRole, hasExplicitMachine, machineNumber, userClassName, studentLeader]);
+
   // Fetch session status & sync submissions with network timeout protection
   const refreshSubmissionsAndStatus = async () => {
     // 1. Kiểm tra và đẩy hàng đợi bài nộp offline nếu có
@@ -671,6 +753,9 @@ export default function App() {
         }
         if (data.dbStatus) {
           setDbStatus(data.dbStatus);
+        }
+        if (Array.isArray(data.onlineMachines)) {
+          setOnlineMachines(data.onlineMachines);
         }
         if (Array.isArray(data.submissions)) {
           const serverSubs = data.submissions
@@ -1496,9 +1581,18 @@ export default function App() {
           userClassName={userClassName}
           onChangeClassName={handleSelectClassName}
           machineNumber={machineNumber}
-          onChangeMachineNumber={setMachineNumber}
+          onChangeMachineNumber={(m) => {
+            setMachineNumber(m);
+            setHasExplicitMachine(true);
+            try {
+              localStorage.setItem('labgrade_machine_number', m);
+            } catch {}
+          }}
           studentLeader={studentLeader}
-          onChangeStudentLeader={setStudentLeader}
+          onChangeStudentLeader={(l) => {
+            setStudentLeader(l);
+            if (l.trim()) setHasExplicitMachine(true);
+          }}
           groupMembers={groupMembers}
           onChangeGroupMembers={setGroupMembers}
           mySubmissions={submissions}
@@ -1528,6 +1622,7 @@ export default function App() {
         machineNumber={machineNumber}
         onChangeMachineNumber={(m) => {
           setMachineNumber(m);
+          setHasExplicitMachine(true);
           try {
             localStorage.setItem('labgrade_machine_number', m);
           } catch {}
@@ -1535,6 +1630,7 @@ export default function App() {
         studentLeader={studentLeader}
         onChangeStudentLeader={(l) => {
           setStudentLeader(l);
+          if (l.trim()) setHasExplicitMachine(true);
           try {
             localStorage.setItem('labgrade_student_leader', l);
           } catch {}
@@ -1600,6 +1696,7 @@ export default function App() {
           isTeacher={isTeacherRole}
           allowSubmission={isClassSubmissionAllowed(userClassName)}
           allowedClasses={allowedClasses}
+          onlineMachines={onlineMachines}
           onToggleSubmissionPermission={handleToggleSubmissionPermission}
         />
       )}

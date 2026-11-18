@@ -43,6 +43,30 @@ const PORT = Number(process.env.PORT) || 3000;
 // Bộ quản lý Server-Sent Events (SSE) thời gian thực kết nối giữa máy GV và tất cả máy HS
 const sseClients = new Set<express.Response>();
 
+export interface OnlineMachineInfo {
+  clientId: string;
+  machineNumber: string;
+  className: string;
+  studentLeader: string;
+  lastSeen: number;
+}
+
+const onlineMachinesMap = new Map<string, OnlineMachineInfo>();
+const PRESENCE_TIMEOUT_MS = 28000; // Tự đánh dấu offline nếu mất tín hiệu quá 28 giây
+
+export function getOnlineMachinesList(): OnlineMachineInfo[] {
+  const now = Date.now();
+  const list: OnlineMachineInfo[] = [];
+  for (const [id, info] of onlineMachinesMap.entries()) {
+    if (now - info.lastSeen > PRESENCE_TIMEOUT_MS) {
+      onlineMachinesMap.delete(id);
+    } else {
+      list.push(info);
+    }
+  }
+  return list;
+}
+
 export function broadcastRealtimeEvent(event: { type: string; [key: string]: any }) {
   const payload = `data: ${JSON.stringify(event)}\n\n`;
   for (const client of sseClients) {
@@ -53,6 +77,24 @@ export function broadcastRealtimeEvent(event: { type: string; [key: string]: any
     }
   }
 }
+
+// Dọn dẹp định kỳ các máy học sinh mất kết nối đột ngột (tắt máy/rút mạng)
+setInterval(() => {
+  const now = Date.now();
+  let removed = false;
+  for (const [id, info] of onlineMachinesMap.entries()) {
+    if (now - info.lastSeen > PRESENCE_TIMEOUT_MS) {
+      onlineMachinesMap.delete(id);
+      removed = true;
+    }
+  }
+  if (removed) {
+    broadcastRealtimeEvent({
+      type: 'PRESENCE_UPDATED',
+      onlineMachines: getOnlineMachinesList(),
+    });
+  }
+}, 10000);
 
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
@@ -683,6 +725,7 @@ app.get('/api/submissions', (_req, res) => {
     allowSubmission: getAllowSubmission(),
     allowedClasses: getAllowedClasses(),
     lockedClasses: getLockedClasses(),
+    onlineMachines: getOnlineMachinesList(),
     dbStatus,
   });
 });
@@ -846,6 +889,72 @@ app.post('/api/student-roster/rename', (req, res) => {
   res.json(result);
 });
 
+// API: Theo dõi trạng thái Online / Offline của từng máy học sinh tại phòng máy
+app.get('/api/presence', (_req, res) => {
+  res.json({
+    onlineMachines: getOnlineMachinesList(),
+  });
+});
+
+app.post('/api/presence/heartbeat', (req, res) => {
+  const { clientId, machineNumber, className, studentLeader, isTeacher } = req.body || {};
+  if (!clientId || typeof clientId !== 'string') {
+    return res.status(400).json({ error: 'Thiếu clientId' });
+  }
+
+  const prev = onlineMachinesMap.get(clientId);
+
+  // Nếu máy chuyển sang quyền Giáo viên hoặc chưa chọn số máy thì gỡ khỏi danh sách máy học sinh online
+  if (isTeacher || !machineNumber || typeof machineNumber !== 'string' || !machineNumber.trim()) {
+    if (prev) {
+      onlineMachinesMap.delete(clientId);
+      broadcastRealtimeEvent({
+        type: 'PRESENCE_UPDATED',
+        onlineMachines: getOnlineMachinesList(),
+      });
+    }
+    return res.json({ success: true, onlineMachines: getOnlineMachinesList() });
+  }
+
+  const nextInfo: OnlineMachineInfo = {
+    clientId,
+    machineNumber: machineNumber.trim(),
+    className: typeof className === 'string' ? className.trim() : '',
+    studentLeader: typeof studentLeader === 'string' ? studentLeader.trim() : '',
+    lastSeen: Date.now(),
+  };
+
+  onlineMachinesMap.set(clientId, nextInfo);
+
+  const isStateChanged =
+    !prev ||
+    prev.machineNumber !== nextInfo.machineNumber ||
+    prev.className !== nextInfo.className ||
+    prev.studentLeader !== nextInfo.studentLeader;
+
+  if (isStateChanged) {
+    broadcastRealtimeEvent({
+      type: 'PRESENCE_UPDATED',
+      onlineMachines: getOnlineMachinesList(),
+    });
+  }
+
+  res.json({ success: true, onlineMachines: getOnlineMachinesList() });
+});
+
+app.post('/api/presence/offline', (req, res) => {
+  const body = typeof req.body === 'string' ? (() => { try { return JSON.parse(req.body); } catch { return {}; } })() : (req.body || {});
+  const { clientId } = body;
+  if (clientId && onlineMachinesMap.has(clientId)) {
+    onlineMachinesMap.delete(clientId);
+    broadcastRealtimeEvent({
+      type: 'PRESENCE_UPDATED',
+      onlineMachines: getOnlineMachinesList(),
+    });
+  }
+  res.json({ success: true });
+});
+
 // Endpoint SSE kênh thời gian thực: /api/events (kết nối liên tục giữa máy GV và máy HS)
 app.get('/api/events', (req, res) => {
   res.writeHead(200, {
@@ -855,8 +964,8 @@ app.get('/api/events', (req, res) => {
     'Access-Control-Allow-Origin': '*',
   });
 
-  // Gửi thông báo kết nối thành công và số máy trạm đang mở
-  res.write(`data: ${JSON.stringify({ type: 'CONNECTED', clientsCount: sseClients.size + 1 })}\n\n`);
+  // Gửi thông báo kết nối thành công, số máy trạm và danh sách máy đang online
+  res.write(`data: ${JSON.stringify({ type: 'CONNECTED', clientsCount: sseClients.size + 1, onlineMachines: getOnlineMachinesList() })}\n\n`);
 
   sseClients.add(res);
 
