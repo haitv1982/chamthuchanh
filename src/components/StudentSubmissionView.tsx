@@ -32,6 +32,7 @@ import * as XLSX from 'xlsx';
 import mammoth from 'mammoth';
 import JSZip from 'jszip';
 import { Assignment, Submission, SubmissionAttempt } from '../types';
+import { normalizeClassName } from '../data/classes';
 import {
   StitchGreeting,
   StitchLaptop,
@@ -116,23 +117,42 @@ export const StudentSubmissionView: React.FC<StudentSubmissionViewProps> = ({
   const productDropdownRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // Tìm bài nộp hôm nay của học sinh này trên máy này
+  // Tìm bài nộp của học sinh này cho đúng sản phẩm đang chọn (SP1, SP2...)
+  const normUserClass = normalizeClassName(userClassName);
   const currentSubmission = mySubmissions.find(
     (s) =>
       s &&
-      s.className === userClassName &&
+      normalizeClassName(s.className) === normUserClass &&
+      (s.assignmentId || '') === activeAssignmentId &&
       (s.machineNumber === machineNumber ||
         (studentLeader && s.studentLeader.trim().toLowerCase() === studentLeader.trim().toLowerCase()))
   );
 
-  // Cập nhật kết quả mới nhất nếu đã có bài nộp trong phiên
+  const prevAssignmentIdRef = useRef<string>(activeAssignmentId);
+
+  // Cập nhật kết quả hiển thị khi chuyển sản phẩm SP1 <-> SP2 hoặc nhận bài mới
   useEffect(() => {
+    const assignmentChanged = prevAssignmentIdRef.current !== activeAssignmentId;
+    prevAssignmentIdRef.current = activeAssignmentId;
+
+    if (assignmentChanged) {
+      if (currentSubmission && currentSubmission.attempts.length > 0) {
+        const last = currentSubmission.attempts[currentSubmission.attempts.length - 1];
+        setLatestResult(last);
+        setRightMenuTab('result');
+      } else {
+        setLatestResult(null);
+        setRightMenuTab('mechanism');
+      }
+      return;
+    }
+
     if (currentSubmission && currentSubmission.attempts.length > 0 && !latestResult) {
       const last = currentSubmission.attempts[currentSubmission.attempts.length - 1];
       setLatestResult(last);
       setRightMenuTab('result');
     }
-  }, [currentSubmission, latestResult]);
+  }, [activeAssignmentId, currentSubmission, latestResult]);
 
   // Click outside to close assignment dropdown
   useEffect(() => {
@@ -168,7 +188,7 @@ export const StudentSubmissionView: React.FC<StudentSubmissionViewProps> = ({
     const prevSubs = mySubmissions.filter((s) => {
       if (!s) return false;
       if (s.assignmentId !== prevAssignment.id) return false;
-      if (userClassName && s.className !== userClassName) return false;
+      if (normUserClass && normalizeClassName(s.className) !== normUserClass) return false;
       if (studentLeader && s.studentLeader.trim().toLowerCase() === studentLeader.trim().toLowerCase()) return true;
       if (machineNumber && s.machineNumber === machineNumber) return true;
       return false;

@@ -70,7 +70,9 @@ interface HeaderProps {
   isTeacher?: boolean;
   onToggleRole?: () => void;
   allowSubmission?: boolean;
+  globalAllowSubmission?: boolean;
   onToggleSubmissionPermission?: (allow: boolean, targetClass?: string) => void;
+  onToggleAllClassesPermission?: (allow: boolean) => void;
   dbStatus?: {
     status: string;
     isPersistent: boolean;
@@ -96,7 +98,9 @@ export const Header: React.FC<HeaderProps> = ({
   isTeacher = false,
   onToggleRole,
   allowSubmission = true,
+  globalAllowSubmission = true,
   onToggleSubmissionPermission,
+  onToggleAllClassesPermission,
   dbStatus,
   onRefreshDb,
   onSyncAllLocalSubmissionsToDb,
@@ -578,8 +582,8 @@ export const Header: React.FC<HeaderProps> = ({
                 }`}
                 title={
                   allowSubmission
-                    ? `Đang CHO PHÉP học sinh Lớp ${activeClassName || ''} nộp bài. Bấm vào đây để KHÓA và kết thúc tiết thực hành của lớp.`
-                    : `Đang KHÓA nộp bài Lớp ${activeClassName || ''}. Bấm vào đây để BẬT CHO PHÉP nộp bài khi lớp đã ổn định.`
+                    ? `Đang CHO PHÉP học sinh Lớp ${activeClassName || ''} nộp bài. Bấm vào đây để KHÓA nộp bài của lớp (giữ nguyên toàn bộ điểm đã chấm).`
+                    : `Đang KHÓA nộp bài Lớp ${activeClassName || ''}. Bấm vào đây để BẬT CHO PHÉP nộp bài cho lớp.`
                 }
               >
                 {allowSubmission ? (
@@ -591,6 +595,36 @@ export const Header: React.FC<HeaderProps> = ({
                   <>
                     <Lock className="w-4 h-4" />
                     <span>Lớp {activeClassName}: Đang Khóa</span>
+                  </>
+                )}
+              </button>
+            )}
+
+            {/* Nút Khóa / Mở TẤT CẢ CÁC LỚP trong toàn hệ thống (Chỉ Giáo Viên) */}
+            {isTeacher && onToggleAllClassesPermission && (
+              <button
+                type="button"
+                onClick={() => onToggleAllClassesPermission(!globalAllowSubmission)}
+                className={`flex items-center gap-1.5 px-3 py-1.5 sm:py-2 rounded-xl text-xs sm:text-sm font-black border transition-all shadow-xs cursor-pointer ${
+                  globalAllowSubmission
+                    ? 'bg-amber-500 hover:bg-amber-600 text-slate-950 border-amber-300'
+                    : 'bg-emerald-600 hover:bg-emerald-500 text-white border-emerald-400 ring-2 ring-emerald-300/60'
+                }`}
+                title={
+                  globalAllowSubmission
+                    ? 'Bấm vào đây để KHÓA NỘP BÀI TẤT CẢ CÁC LỚP cùng lúc (giữ nguyên toàn bộ điểm SP1, SP2... đã lưu)'
+                    : 'Toàn trường đang bị KHÓA nộp bài. Bấm vào đây để MỞ NỘP BÀI TẤT CẢ CÁC LỚP'
+                }
+              >
+                {globalAllowSubmission ? (
+                  <>
+                    <Lock className="w-4 h-4" />
+                    <span>Khóa Tất Cả Lớp</span>
+                  </>
+                ) : (
+                  <>
+                    <Unlock className="w-4 h-4" />
+                    <span>Mở Tất Cả Lớp</span>
                   </>
                 )}
               </button>

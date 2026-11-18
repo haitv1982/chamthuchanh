@@ -12,7 +12,7 @@ import {
   Download,
   Trash2,
 } from 'lucide-react';
-import { Submission, Assignment, StudentRecord } from '../types';
+import { Submission, Assignment, StudentRecord, ClassGradebookDocument } from '../types';
 import {
   exportClassMultiProductGradebook,
   exportSubmissionsToExcel,
@@ -25,6 +25,7 @@ import { ClassMultiProductGradebook } from './ClassMultiProductGradebook';
 interface ClassResultsModalProps {
   className: string;
   submissions: Submission[];
+  gradebooks?: Record<string, ClassGradebookDocument>;
   onClose: () => void;
   onExportExcel?: (cls?: string, targetDate?: string | null, dateMode?: 'all' | 'latest' | 'custom') => void;
   isTeacher?: boolean;
@@ -32,7 +33,9 @@ interface ClassResultsModalProps {
   allowSubmission?: boolean;
   onChangeClassName?: (cls: string) => void;
   onRefresh?: () => void;
+  onSaveGradebooksToDb?: () => Promise<boolean>;
   onClearSubmissions?: (targetClass?: string) => Promise<boolean>;
+  onClearGradebooks?: (targetClass?: string) => Promise<boolean>;
   dbStatus?: {
     status: string;
     isPersistent: boolean;
@@ -49,11 +52,14 @@ interface ClassResultsModalProps {
 export const ClassResultsModal: React.FC<ClassResultsModalProps> = ({
   className,
   submissions,
+  gradebooks = {},
   onClose,
   isTeacher = false,
   onChangeClassName,
   onRefresh,
+  onSaveGradebooksToDb,
   onClearSubmissions,
+  onClearGradebooks,
   dbStatus,
   assignments = [],
   studentRoster = [],
@@ -94,6 +100,7 @@ export const ClassResultsModal: React.FC<ClassResultsModalProps> = ({
   // Quản lý xóa kết quả bài nộp cũ
   const [isConfirmClearOpen, setIsConfirmClearOpen] = useState<boolean>(false);
   const [isClearing, setIsClearing] = useState<boolean>(false);
+  const [alsoClearPermanentGradebook, setAlsoClearPermanentGradebook] = useState<boolean>(false);
 
   // Tự động làm mới kết quả trực tiếp từ server khi mở modal, khi có sự kiện nộp bài tức thời và định kỳ
   useEffect(() => {
@@ -172,7 +179,7 @@ export const ClassResultsModal: React.FC<ClassResultsModalProps> = ({
     }
   };
 
-  // Xuất file Excel bảng điểm tổng hợp SP1, SP2... ĐTB của tiết/ngày đang lọc
+  // Xuất file Excel bảng điểm tổng hợp SP1, SP2... ĐTB đầy đủ qua mọi tiết thực hành
   const handleExportMultiProduct = async () => {
     if (onRefresh) await onRefresh();
     if (onExportMultiProductExcel) {
@@ -181,8 +188,9 @@ export const ClassResultsModal: React.FC<ClassResultsModalProps> = ({
       exportClassMultiProductGradebook({
         className: activeClass,
         assignments,
-        submissions: dateFilteredList,
+        submissions: classList,
         roster: studentRoster,
+        gradebooks,
       });
     }
     setSyncToast(`Đã xuất Bảng Tổng Hợp SP1, SP2... ĐTB Lớp ${activeClass} thành công!`);
@@ -230,7 +238,8 @@ export const ClassResultsModal: React.FC<ClassResultsModalProps> = ({
                 >
                   <option value="Tất cả">Tất cả các lớp ({submissions.length} bài)</option>
                   {displayedClasses.map((c) => {
-                    const cCount = (submissions || []).filter((s) => s.className === c).length;
+                    const normC = normalizeClassName(c);
+                    const cCount = (submissions || []).filter((s) => normalizeClassName(s.className) === normC).length;
                     return (
                       <option key={c} value={c}>
                         Lớp {c} ({cCount} bài nộp)
@@ -443,14 +452,16 @@ export const ClassResultsModal: React.FC<ClassResultsModalProps> = ({
           </div>
         </div>
 
-        {/* 1 BẢNG TỔNG HỢP CHUNG CỦA CẢ LỚP (SP1, SP2... ĐTB) */}
+        {/* 1 BẢNG TỔNG HỢP CHUNG CỦA CẢ LỚP (SP1, SP2... ĐTB LƯU VĨNH VIỄN QUA MỌI TIẾT HỌC) */}
         <ClassMultiProductGradebook
           className={activeClass}
           assignments={assignments}
-          submissions={dateFilteredList}
+          submissions={classList}
+          gradebooks={gradebooks}
           roster={studentRoster}
           isTeacher={isTeacher}
           onRefresh={onRefresh}
+          onSaveGradebooksToDb={onSaveGradebooksToDb}
           onExportExcel={handleExportMultiProduct}
         />
 
@@ -459,7 +470,7 @@ export const ClassResultsModal: React.FC<ClassResultsModalProps> = ({
           <div className="flex items-center gap-2 text-emerald-700">
             <Sparkles className="w-4 h-4 shrink-0" />
             <span>
-              Bảng điểm tổng hợp tự động cập nhật • Lấy điểm cao nhất của từng sản phẩm thực hành (SP01, SP02...)
+              Bảng tổng hợp tự động cộng dồn &amp; lưu vĩnh viễn vào CSDL toàn bộ SP1, SP2, SP3... (chọn ngày phía trên dùng khi tải DS Kết Quả Ngày)
             </span>
           </div>
           <button
@@ -487,14 +498,31 @@ export const ClassResultsModal: React.FC<ClassResultsModalProps> = ({
               </div>
 
               <p className="text-sm text-slate-300 leading-relaxed">
-                Thầy/Cô có chắc chắn muốn xóa sạch toàn bộ các kết quả chấm ảo hoặc bài nộp cũ khỏi hệ thống không?
+                Thầy/Cô có chắc chắn muốn xóa sạch toàn bộ các kết quả chấm ảo hoặc bài nộp cũ trên bảng trực tiếp không?
               </p>
+
+              {onClearGradebooks && (
+                <label className="flex items-start gap-2.5 p-3 rounded-xl bg-slate-800/80 border border-slate-700 cursor-pointer text-xs text-amber-200">
+                  <input
+                    type="checkbox"
+                    checked={alsoClearPermanentGradebook}
+                    onChange={(e) => setAlsoClearPermanentGradebook(e.target.checked)}
+                    className="mt-0.5 rounded border-slate-600 cursor-pointer"
+                  />
+                  <span>
+                    Đồng thời xóa sạch luôn <strong>Sổ Điểm Tổng Hợp Vĩnh Viễn (SP1, SP2...)</strong> của {activeClass === 'Tất cả' ? 'tất cả các lớp' : `Lớp ${activeClass}`} trong CSDL
+                  </span>
+                </label>
+              )}
 
               <div className="flex items-center justify-end gap-2.5 pt-3 border-t border-slate-800">
                 <button
                   type="button"
                   disabled={isClearing}
-                  onClick={() => setIsConfirmClearOpen(false)}
+                  onClick={() => {
+                    setIsConfirmClearOpen(false);
+                    setAlsoClearPermanentGradebook(false);
+                  }}
                   className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 font-bold rounded-xl text-xs sm:text-sm transition cursor-pointer"
                 >
                   Hủy bỏ
@@ -508,8 +536,12 @@ export const ClassResultsModal: React.FC<ClassResultsModalProps> = ({
                       if (onClearSubmissions) {
                         await onClearSubmissions(activeClass === 'Tất cả' ? undefined : activeClass);
                       }
+                      if (alsoClearPermanentGradebook && onClearGradebooks) {
+                        await onClearGradebooks(activeClass === 'Tất cả' ? undefined : activeClass);
+                      }
                       if (onRefresh) await onRefresh();
                       setIsConfirmClearOpen(false);
+                      setAlsoClearPermanentGradebook(false);
                     } catch {}
                     setIsClearing(false);
                   }}

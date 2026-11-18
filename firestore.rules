@@ -16,6 +16,16 @@ service cloud.firestore {
       allow read, write: if true;
     }
 
+    // Bảng tổng hợp điểm vĩnh viễn tất cả sản phẩm (SP1, SP2,...) theo từng lớp
+    match /gradebooks/{classId} {
+      allow read, write: if true;
+    }
+
+    // Kiểm tra kết nối Firestore khi khởi động
+    match /test/connection {
+      allow read: if true;
+    }
+
     // Mặc định cho phép các tài liệu trong cơ sở dữ liệu thực hành
     match /{document=**} {
       allow read, write: if true;

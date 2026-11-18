@@ -1,7 +1,9 @@
 {
   "version": "2.0.0",
-  "lastUpdated": "2026-11-11T16:17:53.884Z",
+  "lastUpdated": "2026-11-18T10:14:33.632Z",
   "allowSubmission": true,
+  "allowedClasses": [],
+  "lockedClasses": [],
   "teacherPin": "A123@",
   "submissions": []
 }

@@ -7,6 +7,7 @@ import {
   setDoc,
   getDocs,
   getDoc,
+  getDocFromServer,
   deleteDoc,
   writeBatch,
   onSnapshot,
@@ -14,13 +15,61 @@ import {
   query,
   limit,
 } from 'firebase/firestore';
-import { Submission, StudentRecord } from '../types';
-import { sanitizeSubmission } from '../utils/storageManager';
+import { Submission, StudentRecord, ClassGradebookDocument } from '../types';
+import {
+  sanitizeSubmission,
+  upsertGradebookFromSubmissionClient,
+  mergeGradebooksClient,
+} from '../utils/storageManager';
+import { normalizeClassName } from '../data/classes';
 import firebaseConfigJson from '../../firebase-applet-config.json';
+
+export enum OperationType {
+  CREATE = 'create',
+  UPDATE = 'update',
+  DELETE = 'delete',
+  LIST = 'list',
+  GET = 'get',
+  WRITE = 'write',
+}
+
+export interface FirestoreErrorInfo {
+  error: string;
+  operationType: OperationType;
+  path: string | null;
+  authInfo: {
+    userId?: string | null;
+    email?: string | null;
+  };
+}
+
+function logFirestoreError(error: unknown, operationType: OperationType, path: string | null) {
+  const errInfo: FirestoreErrorInfo = {
+    error: error instanceof Error ? error.message : String(error),
+    authInfo: {
+      userId: null,
+      email: null,
+    },
+    operationType,
+    path,
+  };
+  console.warn('[Firebase Cloud Error]', JSON.stringify(errInfo));
+}
 
 let app: FirebaseApp | null = null;
 let db: Firestore | null = null;
 let isInitialized = false;
+
+async function testConnection() {
+  if (!db) return;
+  try {
+    await getDocFromServer(doc(db, 'test', 'connection'));
+  } catch (error) {
+    if (error instanceof Error && error.message.includes('the client is offline')) {
+      console.warn('[Firebase Cloud] Trình duyệt đang offline hoặc chưa thể kết nối Firestore.');
+    }
+  }
+}
 
 try {
   if (firebaseConfigJson && firebaseConfigJson.projectId) {
@@ -29,6 +78,7 @@ try {
     db = dbId && dbId !== '(default)' ? getFirestore(app, dbId) : getFirestore(app);
     isInitialized = true;
     console.log('[Firebase Cloud] ✅ Khởi tạo kết nối Firestore Cloud thành công:', firebaseConfigJson.projectId);
+    testConnection();
   }
 } catch (err) {
   console.warn('[Firebase Cloud] Không thể khởi tạo Firestore:', err);
@@ -124,10 +174,11 @@ export async function deleteSubmissionsFromCloud(className?: string): Promise<bo
     const snap = await getDocs(subCol);
     const batch = writeBatch(db);
     let count = 0;
+    const normTarget = className ? normalizeClassName(className) : '';
 
     snap.forEach((docSnap) => {
       const data = docSnap.data();
-      if (!className || data.className === className) {
+      if (!normTarget || normalizeClassName(data.className || '') === normTarget) {
         batch.delete(docSnap.ref);
         count++;
       }
@@ -138,7 +189,7 @@ export async function deleteSubmissionsFromCloud(className?: string): Promise<bo
     }
     return true;
   } catch (err) {
-    console.warn('[Firebase Cloud] Lỗi xóa bài nộp:', err);
+    logFirestoreError(err, OperationType.DELETE, 'submissions');
     return false;
   }
 }
@@ -431,8 +482,162 @@ export function subscribeToSettingsCloud(
     if (err?.code === 'resource-exhausted') {
       markCloudQuotaExhausted();
     } else {
-      console.warn('[Firebase Cloud] Lỗi subscribe settings:', err);
+      logFirestoreError(err, OperationType.GET, 'app_settings/session_config');
     }
     return null;
+  }
+}
+
+/**
+ * Lưu Bảng Tổng Hợp Điểm Vĩnh Viễn của 1 lớp (SP1, SP2,...) lên Firestore collection `gradebooks/{normClass}`
+ */
+export async function saveClassGradebookToCloud(gradebook: ClassGradebookDocument): Promise<boolean> {
+  if (!db || isCloudQuotaExhausted || !gradebook?.className) return false;
+  const normCls = normalizeClassName(gradebook.className);
+  if (!normCls) return false;
+  const docPath = `gradebooks/${normCls}`;
+  try {
+    const ref = doc(db, 'gradebooks', normCls);
+    const snap = await getDoc(ref);
+    let finalDoc: ClassGradebookDocument = {
+      ...gradebook,
+      className: normCls,
+    };
+    if (snap.exists()) {
+      const existingData = snap.data() as ClassGradebookDocument;
+      const mergedMap = mergeGradebooksClient(
+        { [normCls]: existingData },
+        { [normCls]: finalDoc }
+      );
+      finalDoc = mergedMap[normCls] || finalDoc;
+    }
+    const payload = JSON.parse(JSON.stringify(finalDoc));
+    await setDoc(ref, payload);
+    return true;
+  } catch (err: any) {
+    if (err?.code === 'resource-exhausted') {
+      markCloudQuotaExhausted();
+    } else {
+      logFirestoreError(err, OperationType.WRITE, docPath);
+    }
+    return false;
+  }
+}
+
+/**
+ * Cập nhật ngay kết quả SP1, SP2,... từ 1 bài nộp vào Bảng Tổng Hợp Điểm Vĩnh Viễn trên Cloud Firestore
+ */
+export async function saveSubmissionIntoCloudGradebook(sub: Submission): Promise<boolean> {
+  if (!db || isCloudQuotaExhausted || !sub?.className || !sub?.assignmentId) return false;
+  const normCls = normalizeClassName(sub.className);
+  if (!normCls) return false;
+  const docPath = `gradebooks/${normCls}`;
+  try {
+    const ref = doc(db, 'gradebooks', normCls);
+    const snap = await getDoc(ref);
+    const currentMap: Record<string, ClassGradebookDocument> = {};
+    if (snap.exists()) {
+      currentMap[normCls] = snap.data() as ClassGradebookDocument;
+    }
+    const updatedMap = upsertGradebookFromSubmissionClient(currentMap, sub);
+    const targetDoc = updatedMap[normCls];
+    if (!targetDoc) return false;
+    const payload = JSON.parse(JSON.stringify(targetDoc));
+    await setDoc(ref, payload);
+    return true;
+  } catch (err: any) {
+    if (err?.code === 'resource-exhausted') {
+      markCloudQuotaExhausted();
+    } else {
+      logFirestoreError(err, OperationType.WRITE, docPath);
+    }
+    return false;
+  }
+}
+
+/**
+ * Lưu đồng loạt toàn bộ Bảng Tổng Hợp Điểm Vĩnh Viễn các lớp lên Firestore Cloud
+ */
+export async function batchSaveGradebooksToCloud(
+  gradebooks: Record<string, ClassGradebookDocument>
+): Promise<boolean> {
+  if (!db || isCloudQuotaExhausted || !gradebooks) return false;
+  const entries = Object.values(gradebooks).filter((g) => g && g.className && Object.keys(g.students || {}).length > 0);
+  if (entries.length === 0) return true;
+  try {
+    for (const gb of entries) {
+      await saveClassGradebookToCloud(gb);
+    }
+    return true;
+  } catch (err: any) {
+    if (err?.code === 'resource-exhausted') {
+      markCloudQuotaExhausted();
+    } else {
+      logFirestoreError(err, OperationType.WRITE, 'gradebooks');
+    }
+    return false;
+  }
+}
+
+/**
+ * Tải toàn bộ Bảng Tổng Hợp Điểm Vĩnh Viễn các lớp từ Cloud Firestore (rất nhẹ: tối đa ~13-20 doc)
+ */
+export async function fetchAllGradebooksFromCloud(): Promise<Record<string, ClassGradebookDocument>> {
+  if (!db || isCloudQuotaExhausted) return {};
+  try {
+    const colRef = collection(db, 'gradebooks');
+    const q = query(colRef, limit(100));
+    const snap = await getDocs(q);
+    const map: Record<string, ClassGradebookDocument> = {};
+    snap.forEach((docSnap) => {
+      const data = docSnap.data() as ClassGradebookDocument;
+      if (data && (data.className || docSnap.id)) {
+        const normCls = normalizeClassName(data.className || docSnap.id);
+        map[normCls] = {
+          className: normCls,
+          students: data.students || {},
+          updatedAt: data.updatedAt || new Date().toISOString(),
+        };
+      }
+    });
+    return map;
+  } catch (err: any) {
+    if (err?.code === 'resource-exhausted') {
+      markCloudQuotaExhausted();
+    } else {
+      logFirestoreError(err, OperationType.LIST, 'gradebooks');
+    }
+    return {};
+  }
+}
+
+/**
+ * Xóa bảng điểm vĩnh viễn trên Cloud Firestore (chỉ khi giáo viên chủ động xác nhận xóa)
+ */
+export async function deleteGradebooksFromCloud(className?: string): Promise<boolean> {
+  if (!db || isCloudQuotaExhausted) return false;
+  try {
+    if (className && className !== 'Tất cả') {
+      const normCls = normalizeClassName(className);
+      await deleteDoc(doc(db, 'gradebooks', normCls));
+      return true;
+    }
+    const colRef = collection(db, 'gradebooks');
+    const snap = await getDocs(colRef);
+    const batch = writeBatch(db);
+    let count = 0;
+    snap.forEach((docSnap) => {
+      batch.delete(docSnap.ref);
+      count++;
+    });
+    if (count > 0) await batch.commit();
+    return true;
+  } catch (err: any) {
+    if (err?.code === 'resource-exhausted') {
+      markCloudQuotaExhausted();
+    } else {
+      logFirestoreError(err, OperationType.DELETE, 'gradebooks');
+    }
+    return false;
   }
 }

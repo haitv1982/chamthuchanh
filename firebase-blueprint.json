@@ -36,6 +36,15 @@
         "teacherPin": { "type": "string", "required": false, "description": "Mã PIN giáo viên" },
         "lastUpdated": { "type": "string", "required": true, "description": "Thời gian cập nhật gần nhất" }
       }
+    },
+    "ClassGradebook": {
+      "collection": "gradebooks",
+      "description": "Bảng tổng hợp điểm vĩnh viễn tất cả sản phẩm (SP1, SP2,...) của từng lớp",
+      "fields": {
+        "className": { "type": "string", "required": true, "description": "Tên lớp đã chuẩn hóa (ví dụ: 9A1)" },
+        "students": { "type": "object", "required": true, "description": "Bảng điểm từng học sinh theo từng mã sản phẩm SP1, SP2..." },
+        "updatedAt": { "type": "string", "required": true, "description": "Thời gian cập nhật gần nhất" }
+      }
     }
   }
 }

@@ -10,8 +10,9 @@ import {
   GraduationCap,
   Download,
   RefreshCw,
+  Database,
 } from 'lucide-react';
-import { Assignment, Submission, StudentRecord } from '../types';
+import { Assignment, Submission, StudentRecord, ClassGradebookDocument } from '../types';
 import {
   buildClassMultiProductData,
   exportClassMultiProductGradebook,
@@ -21,9 +22,11 @@ interface ClassMultiProductGradebookProps {
   className: string;
   assignments: Assignment[];
   submissions: Submission[];
+  gradebooks?: Record<string, ClassGradebookDocument>;
   roster: StudentRecord[];
   isTeacher?: boolean;
   onRefresh?: () => void;
+  onSaveGradebooksToDb?: () => Promise<boolean>;
   onExportExcel?: () => void;
 }
 
@@ -31,23 +34,27 @@ export const ClassMultiProductGradebook: React.FC<ClassMultiProductGradebookProp
   className,
   assignments,
   submissions,
+  gradebooks = {},
   roster,
   isTeacher = false,
   onRefresh,
+  onSaveGradebooksToDb,
 }) => {
   const [searchTerm, setSearchTerm] = useState('');
   const [isExporting, setIsExporting] = useState(false);
+  const [isSavingDb, setIsSavingDb] = useState(false);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
 
-  // Tính toán dữ liệu bảng tổng hợp nhiều sản phẩm
+  // Tính toán dữ liệu bảng tổng hợp nhiều sản phẩm (kết hợp bài nộp trực tiếp + CSDL vĩnh viễn)
   const data = useMemo(() => {
     return buildClassMultiProductData({
       className,
       assignments,
       submissions,
       roster,
+      gradebooks,
     });
-  }, [className, assignments, submissions, roster]);
+  }, [className, assignments, submissions, roster, gradebooks]);
 
   const { students, classAssignments, exportTimestamp, classAverageScore, totalStudents, studentsWithSubmissions } = data;
 
@@ -64,6 +71,23 @@ export const ClassMultiProductGradebook: React.FC<ClassMultiProductGradebookProp
     );
   }, [students, searchTerm]);
 
+  // Lưu và đồng bộ vĩnh viễn toàn bộ bảng tổng hợp SP1, SP2... lên CSDL máy chủ & Firebase Cloud
+  const handleSavePermanentDb = async () => {
+    if (!onSaveGradebooksToDb) return;
+    setIsSavingDb(true);
+    try {
+      const ok = await onSaveGradebooksToDb();
+      setToastMessage(
+        ok
+          ? `✅ Đã lưu vĩnh viễn bảng điểm tổng hợp SP1, SP2... của Lớp ${className} vào CSDL máy chủ & Đám mây!`
+          : `⚠️ Đã lưu vào bộ nhớ máy tính. Kiểm tra kết nối mạng để đồng bộ đám mây.`
+      );
+      setTimeout(() => setToastMessage(null), 4000);
+    } finally {
+      setIsSavingDb(false);
+    }
+  };
+
   // Xử lý xuất file Excel bảng tổng hợp tại thời điểm hiện tại
   const handleExport = async () => {
     setIsExporting(true);
@@ -74,6 +98,7 @@ export const ClassMultiProductGradebook: React.FC<ClassMultiProductGradebookProp
         assignments,
         submissions,
         roster,
+        gradebooks,
       });
       setToastMessage(`Đã xuất Bảng Tổng Hợp SP1, SP2... ĐTB cho Lớp ${className} thành công!`);
       setTimeout(() => setToastMessage(null), 3500);
@@ -155,7 +180,23 @@ export const ClassMultiProductGradebook: React.FC<ClassMultiProductGradebookProp
           )}
         </div>
 
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-2 flex-wrap">
+          <span className="hidden md:inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl bg-emerald-50 border border-emerald-200 text-emerald-800 text-[11px] font-bold">
+            <Database className="w-3.5 h-3.5 text-emerald-600" />
+            <span>Tự động lưu vĩnh viễn SP1, SP2... vào CSDL</span>
+          </span>
+          {isTeacher && onSaveGradebooksToDb && (
+            <button
+              type="button"
+              disabled={isSavingDb}
+              onClick={handleSavePermanentDb}
+              className="px-3.5 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-xl text-xs font-black flex items-center gap-1.5 shadow-sm transition active:scale-95 cursor-pointer disabled:opacity-50"
+              title="Đồng bộ và lưu vĩnh viễn toàn bộ điểm SP1, SP2, SP3... của các lớp lên CSDL máy chủ & Firebase Cloud"
+            >
+              {isSavingDb ? <RefreshCw className="w-4 h-4 animate-spin text-white" /> : <Database className="w-4 h-4 text-cyan-200" />}
+              <span>{isSavingDb ? 'Đang Lưu CSDL...' : 'Lưu CSDL Vĩnh Viễn'}</span>
+            </button>
+          )}
           {isTeacher && (
             <button
               type="button"

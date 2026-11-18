@@ -47,9 +47,12 @@ interface ProjectorLiveBoardProps {
   onClearSubmissions?: (targetClass?: string) => Promise<boolean>;
   isTeacher?: boolean;
   allowSubmission?: boolean;
+  globalAllowSubmission?: boolean;
   allowedClasses?: string[];
+  lockedClasses?: string[];
   onlineMachines?: OnlineMachineInfo[];
   onToggleSubmissionPermission?: (allow: boolean, targetClass?: string) => void;
+  onToggleAllClassesPermission?: (allow: boolean) => void;
 }
 
 export const ProjectorLiveBoard: React.FC<ProjectorLiveBoardProps> = ({
@@ -63,9 +66,12 @@ export const ProjectorLiveBoard: React.FC<ProjectorLiveBoardProps> = ({
   onClearSubmissions,
   isTeacher = false,
   allowSubmission = true,
+  globalAllowSubmission = true,
   allowedClasses = [],
+  lockedClasses = [],
   onlineMachines = [],
   onToggleSubmissionPermission,
+  onToggleAllClassesPermission,
 }) => {
   // Lấy danh sách lớp duy nhất từ danh sách học sinh đã tải lên (nếu có)
   const rosterClasses = useMemo(() => {
@@ -184,7 +190,13 @@ export const ProjectorLiveBoard: React.FC<ProjectorLiveBoardProps> = ({
 
         setLiveSubmissions((prev) => {
           const filtered = prev.filter(
-            (s) => s.id !== clean.id && !(normalizeClassName(s.className) === normSubCls && s.machineNumber === clean.machineNumber)
+            (s) =>
+              s.id !== clean.id &&
+              !(
+                normalizeClassName(s.className) === normSubCls &&
+                s.machineNumber === clean.machineNumber &&
+                (s.assignmentId || '') === (clean.assignmentId || '')
+              )
           );
           return [clean, ...filtered];
         });
@@ -433,7 +445,13 @@ export const ProjectorLiveBoard: React.FC<ProjectorLiveBoardProps> = ({
     duplicateMachineMap.set(s.machineNumber, list);
 
     const existing = submissionByMachine.get(s.machineNumber);
-    if (!existing || s.highestScore > existing.highestScore) {
+    if (!existing) {
+      submissionByMachine.set(s.machineNumber, s);
+    } else if (selectedProductFilter !== 'all') {
+      if (s.highestScore > existing.highestScore) {
+        submissionByMachine.set(s.machineNumber, s);
+      }
+    } else if ((s.latestSubmittedAt || '') >= (existing.latestSubmittedAt || '')) {
       submissionByMachine.set(s.machineNumber, s);
     }
   });
@@ -450,14 +468,17 @@ export const ProjectorLiveBoard: React.FC<ProjectorLiveBoardProps> = ({
   };
 
   const isClassAllowed = useMemo(() => {
-    if (!allowSubmission) return false;
-    if (activeClassFilter === 'Tất cả') return allowSubmission;
-    if (Array.isArray(allowedClasses) && allowedClasses.length > 0) {
-      const norm = activeClassFilter.trim().toUpperCase().replace(/^LỚP\s*|^LOP\s*/i, '');
-      return allowedClasses.some((c) => c.trim().toUpperCase().replace(/^LỚP\s*|^LOP\s*/i, '') === norm);
+    if (!globalAllowSubmission || !allowSubmission) return false;
+    if (activeClassFilter === 'Tất cả') return globalAllowSubmission && allowSubmission;
+    const norm = normalizeClassName(activeClassFilter);
+    if (Array.isArray(lockedClasses) && lockedClasses.some((c) => normalizeClassName(c) === norm)) {
+      return false;
     }
-    return allowSubmission;
-  }, [allowSubmission, activeClassFilter, allowedClasses]);
+    if (Array.isArray(allowedClasses) && allowedClasses.length > 0) {
+      return allowedClasses.some((c) => normalizeClassName(c) === norm);
+    }
+    return globalAllowSubmission && allowSubmission;
+  }, [globalAllowSubmission, allowSubmission, activeClassFilter, allowedClasses, lockedClasses]);
 
   const totalSubmitted = isClassAllowed ? submissionByMachine.size : 0;
   const avgScore = totalSubmitted > 0
@@ -563,7 +584,7 @@ export const ProjectorLiveBoard: React.FC<ProjectorLiveBoardProps> = ({
                       ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40 hover:bg-emerald-500/30'
                       : 'bg-rose-500/20 text-rose-300 border-rose-500/40 hover:bg-rose-500/30'
                   }`}
-                  title={isClassAllowed ? 'Bấm vào để KHÓA nộp bài và kết thúc tiết thực hành của lớp' : 'Bấm vào để MỞ nộp bài cho lớp'}
+                  title={isClassAllowed ? 'Bấm vào để KHÓA nộp bài lớp này' : 'Bấm vào để MỞ nộp bài cho lớp'}
                 >
                   {isClassAllowed ? <Unlock className="w-3 h-3" /> : <Lock className="w-3 h-3" />}
                   <span>{isClassAllowed ? `● Đang mở nộp bài ${activeClassFilter !== 'Tất cả' ? `Lớp ${activeClassFilter}` : ''}` : `🔒 Đang khóa nộp bài ${activeClassFilter !== 'Tất cả' ? `Lớp ${activeClassFilter}` : ''}`}</span>
@@ -576,6 +597,23 @@ export const ProjectorLiveBoard: React.FC<ProjectorLiveBoardProps> = ({
                 }`}>
                   {isClassAllowed ? `● Đang mở nộp bài ${activeClassFilter !== 'Tất cả' ? `Lớp ${activeClassFilter}` : ''}` : `🔒 Đang khóa nộp bài ${activeClassFilter !== 'Tất cả' ? `Lớp ${activeClassFilter}` : ''}`}
                 </span>
+              )}
+
+              {/* Nút Khóa / Mở Tất Cả Các Lớp trên Máy Chiếu */}
+              {isTeacher && onToggleAllClassesPermission && (
+                <button
+                  type="button"
+                  onClick={() => onToggleAllClassesPermission(!globalAllowSubmission)}
+                  className={`text-[11px] font-black px-2.5 py-0.5 rounded-full border transition cursor-pointer flex items-center gap-1 ${
+                    globalAllowSubmission
+                      ? 'bg-amber-500/25 text-amber-200 border-amber-400/50 hover:bg-amber-500/40'
+                      : 'bg-emerald-500/30 text-emerald-200 border-emerald-400/60 hover:bg-emerald-500/40'
+                  }`}
+                  title={globalAllowSubmission ? 'Khóa nộp bài TẤT CẢ CÁC LỚP cùng lúc' : 'Mở nộp bài TẤT CẢ CÁC LỚP'}
+                >
+                  {globalAllowSubmission ? <Lock className="w-3 h-3" /> : <Unlock className="w-3 h-3" />}
+                  <span>{globalAllowSubmission ? 'Khóa Tất Cả Lớp' : 'Mở Tất Cả Lớp'}</span>
+                </button>
               )}
 
               <span className="text-[11px] font-bold px-2 py-0.5 rounded-full bg-cyan-500/20 text-cyan-300 border border-cyan-500/40 hidden md:flex items-center gap-1">

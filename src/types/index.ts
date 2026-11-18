@@ -120,3 +120,28 @@ export interface StudentRecord {
   fullName: string;
   className: string;
 }
+
+export interface StudentProductScoreEntry {
+  assignmentId: string;
+  assignmentTitle: string;
+  highestScore: number;
+  latestScore: number;
+  attemptsCount: number;
+  lastFileName?: string;
+  updatedAt: string;
+}
+
+export interface StudentGradebookEntry {
+  studentKey: string;
+  fullName: string;
+  className: string;
+  scores: Record<string, StudentProductScoreEntry>;
+  updatedAt: string;
+}
+
+export interface ClassGradebookDocument {
+  className: string;
+  students: Record<string, StudentGradebookEntry>;
+  updatedAt: string;
+}
+

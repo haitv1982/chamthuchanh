@@ -1,6 +1,7 @@
 import * as XLSX from 'xlsx';
-import { Submission, Assignment } from '../types';
-import { formatPracticeDateVi } from './storageManager';
+import { Submission, Assignment, ClassGradebookDocument } from '../types';
+import { formatPracticeDateVi, normalizeGradebookStudentKey } from './storageManager';
+import { normalizeClassName } from '../data/classes';
 
 /**
  * Tách họ tên tiếng Việt thành:
@@ -624,27 +625,43 @@ export function getGradeLevelFromClass(className: string): string {
 export function getAssignmentsForClass(
   className: string,
   allAssignments: Assignment[],
-  submissions?: Submission[]
+  submissions?: Submission[],
+  gradebooks?: Record<string, ClassGradebookDocument>
 ): Assignment[] {
   const gradeLevel = getGradeLevelFromClass(className);
   let classAssignments = (allAssignments || []).filter((a) => a.gradeLevel === gradeLevel);
   if (classAssignments.length === 0) {
-    classAssignments = allAssignments || [];
+    classAssignments = [...(allAssignments || [])];
   }
-  // Nếu học sinh lớp này có nộp thêm sản phẩm khác ngoài danh sách khối, bổ sung thêm
+  const cleanCls = normalizeClassName(className);
+  const usedAssignmentIds = new Set<string>();
+
   if (submissions && submissions.length > 0) {
-    const cleanCls = className.trim().toUpperCase().replace(/^LỚP\s*|^LOP\s*/i, '');
     const classSubs = className === 'Tất cả'
       ? submissions
-      : submissions.filter((s) => s.className.trim().toUpperCase().replace(/^LỚP\s*|^LOP\s*/i, '') === cleanCls);
-
-    const usedAssignmentIds = new Set(classSubs.map((s) => s.assignmentId));
-    allAssignments.forEach((a) => {
-      if (usedAssignmentIds.has(a.id) && !classAssignments.some((ca) => ca.id === a.id)) {
-        classAssignments.push(a);
-      }
+      : submissions.filter((s) => normalizeClassName(s.className) === cleanCls);
+    classSubs.forEach((s) => {
+      if (s.assignmentId) usedAssignmentIds.add(s.assignmentId);
     });
   }
+
+  if (gradebooks && typeof gradebooks === 'object') {
+    const targetDocs = className === 'Tất cả'
+      ? Object.values(gradebooks)
+      : (gradebooks[cleanCls] ? [gradebooks[cleanCls]] : []);
+    targetDocs.forEach((doc) => {
+      Object.values(doc?.students || {}).forEach((stu) => {
+        Object.keys(stu?.scores || {}).forEach((aId) => usedAssignmentIds.add(aId));
+      });
+    });
+  }
+
+  allAssignments.forEach((a) => {
+    if (usedAssignmentIds.has(a.id) && !classAssignments.some((ca) => ca.id === a.id)) {
+      classAssignments.push(a);
+    }
+  });
+
   return classAssignments;
 }
 
@@ -653,6 +670,7 @@ export function buildClassMultiProductData(params: {
   assignments: Assignment[];
   submissions: Submission[];
   roster?: any[];
+  gradebooks?: Record<string, ClassGradebookDocument>;
 }): {
   students: StudentSummaryRow[];
   classAssignments: Assignment[];
@@ -662,19 +680,23 @@ export function buildClassMultiProductData(params: {
   classAverageScore: string;
   exportTimestamp: string;
 } {
-  const { className, assignments, submissions, roster = [] } = params;
+  const { className, assignments, submissions, roster = [], gradebooks = {} } = params;
 
-  const cleanCls = className.trim().toUpperCase().replace(/^LỚP\s*|^LOP\s*/i, '');
+  const cleanCls = normalizeClassName(className);
   const classSubs = className === 'Tất cả'
     ? submissions
-    : submissions.filter((s) => s.className.trim().toUpperCase().replace(/^LỚP\s*|^LOP\s*/i, '') === cleanCls);
+    : submissions.filter((s) => normalizeClassName(s.className) === cleanCls);
 
-  const classAssignments = getAssignmentsForClass(className, assignments, submissions);
+  const relevantGradebookDocs: ClassGradebookDocument[] = className === 'Tất cả'
+    ? Object.values(gradebooks || {})
+    : (gradebooks && gradebooks[cleanCls] ? [gradebooks[cleanCls]] : []);
+
+  const classAssignments = getAssignmentsForClass(className, assignments, submissions, gradebooks);
 
   // 1. Tập hợp danh sách học sinh:
   // Ưu tiên danh sách đã tải lên (roster) của lớp này
   const rosterForClass = (roster || []).filter((r: any) => {
-    const rCls = (r.className || '').trim().toUpperCase().replace(/^LỚP\s*|^LOP\s*/i, '');
+    const rCls = normalizeClassName(r.className || '');
     return className === 'Tất cả' || rCls === cleanCls;
   });
 
@@ -684,18 +706,31 @@ export function buildClassMultiProductData(params: {
   rosterForClass.forEach((r: any, idx: number) => {
     const name = (r.fullName || '').trim();
     if (name) {
-      const normKey = name.toLowerCase().replace(/\s+/g, ' ');
+      const normKey = normalizeGradebookStudentKey(name);
       if (!studentNameMap.has(normKey)) {
         studentNameMap.set(normKey, { fullName: name, originalStt: r.stt ?? idx + 1 });
       }
     }
   });
 
+  // Thêm học sinh từ Sổ Điểm Vĩnh Viễn (gradebooks)
+  relevantGradebookDocs.forEach((doc) => {
+    Object.values(doc?.students || {}).forEach((stu) => {
+      const name = (stu?.fullName || '').trim();
+      if (name) {
+        const normKey = normalizeGradebookStudentKey(name);
+        if (!studentNameMap.has(normKey)) {
+          studentNameMap.set(normKey, { fullName: name });
+        }
+      }
+    });
+  });
+
   // Thêm bất kỳ học sinh nào đã nộp bài (Trưởng nhóm hoặc thành viên) mà chưa có trong danh sách
   classSubs.forEach((sub) => {
     const leader = (sub.studentLeader || '').trim();
     if (leader) {
-      const normKey = leader.toLowerCase().replace(/\s+/g, ' ');
+      const normKey = normalizeGradebookStudentKey(leader);
       if (!studentNameMap.has(normKey)) {
         studentNameMap.set(normKey, { fullName: leader });
       }
@@ -703,7 +738,7 @@ export function buildClassMultiProductData(params: {
     (sub.groupMembers || []).forEach((m) => {
       const member = (m || '').trim();
       if (member) {
-        const normKey = member.toLowerCase().replace(/\s+/g, ' ');
+        const normKey = normalizeGradebookStudentKey(member);
         if (!studentNameMap.has(normKey)) {
           studentNameMap.set(normKey, { fullName: member });
         }
@@ -726,18 +761,29 @@ export function buildClassMultiProductData(params: {
     return nameA.hoVaDem.localeCompare(nameB.hoVaDem, 'vi', { sensitivity: 'base' });
   });
 
-  // 2. Tính điểm từng sản phẩm cho từng học sinh (LẤY KẾT QUẢ CAO NHẤT)
+  // 2. Tính điểm từng sản phẩm cho từng học sinh (Hợp nhất CSDL Vĩnh Viễn + Bài nộp hiện tại, LẤY KẾT QUẢ CAO NHẤT)
   const students: StudentSummaryRow[] = sortedList.map((st, idx) => {
-    const normName = st.fullName.toLowerCase().replace(/\s+/g, ' ');
+    const normName = normalizeGradebookStudentKey(st.fullName);
     const nameParts = splitVietnameseName(st.fullName);
     const scores: Record<string, number | null> = {};
 
     classAssignments.forEach((assign) => {
-      // Tìm tất cả các bài nộp của học sinh này cho sản phẩm assign
+      let bestScore: number | null = null;
+
+      // 2.1 Kiểm tra điểm đã lưu vĩnh viễn trong gradebooks của lớp
+      relevantGradebookDocs.forEach((doc) => {
+        const stuEntry = doc?.students?.[normName];
+        const permEntry = stuEntry?.scores?.[assign.id];
+        if (permEntry && typeof permEntry.highestScore === 'number') {
+          bestScore = bestScore === null ? permEntry.highestScore : Math.max(bestScore, permEntry.highestScore);
+        }
+      });
+
+      // 2.2 Kiểm tra tất cả bài nộp trực tiếp (submissions)
       const matchingSubs = classSubs.filter((sub) => {
         const isParticipant =
-          sub.studentLeader.trim().toLowerCase().replace(/\s+/g, ' ') === normName ||
-          (sub.groupMembers || []).some((m) => m.trim().toLowerCase().replace(/\s+/g, ' ') === normName);
+          normalizeGradebookStudentKey(sub.studentLeader) === normName ||
+          (sub.groupMembers || []).some((m) => normalizeGradebookStudentKey(m) === normName);
 
         if (!isParticipant) return false;
 
@@ -750,12 +796,11 @@ export function buildClassMultiProductData(params: {
       });
 
       if (matchingSubs.length > 0) {
-        // Lấy điểm cao nhất trong các lần nộp
-        const bestScore = Math.max(...matchingSubs.map((s) => s.highestScore));
-        scores[assign.id] = bestScore;
-      } else {
-        scores[assign.id] = null;
+        const subBest = Math.max(...matchingSubs.map((s) => s.highestScore));
+        bestScore = bestScore === null ? subBest : Math.max(bestScore, subBest);
       }
+
+      scores[assign.id] = bestScore;
     });
 
     const scoredValues = Object.values(scores).filter((v): v is number => v !== null);
@@ -825,6 +870,7 @@ export function exportClassMultiProductGradebook(params: {
   assignments: Assignment[];
   submissions: Submission[];
   roster?: any[];
+  gradebooks?: Record<string, ClassGradebookDocument>;
   teacherName?: string;
   schoolName?: string;
 }) {
@@ -833,16 +879,18 @@ export function exportClassMultiProductGradebook(params: {
     assignments,
     submissions,
     roster = [],
+    gradebooks = {},
     teacherName = 'Giáo viên Tin học',
     schoolName = 'TRƯỜNG THCS / THPT',
   } = params;
 
-  // Lấy dữ liệu tổng hợp tại thời điểm hiện tại
+  // Lấy dữ liệu tổng hợp tại thời điểm hiện tại (bao gồm CSDL Vĩnh Viễn SP1, SP2...)
   const data = buildClassMultiProductData({
     className,
     assignments,
     submissions,
     roster,
+    gradebooks,
   });
 
   const { students, classAssignments, exportTimestamp } = data;

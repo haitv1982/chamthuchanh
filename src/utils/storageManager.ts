@@ -1,12 +1,14 @@
-import { Submission } from '../types';
+import { Submission, ClassGradebookDocument, StudentGradebookEntry, StudentProductScoreEntry } from '../types';
+import { normalizeClassName } from '../data/classes';
 
 export const STORAGE_KEY_SUBMISSIONS = 'labgrade_submissions_v5';
+export const STORAGE_KEY_GRADEBOOKS = 'labgrade_permanent_gradebooks_v1';
 export const STORAGE_KEY_OLD_V4 = 'labgrade_submissions_v4';
 export const STORAGE_KEY_OLD_V3 = 'labgrade_submissions_v3';
 export const STORAGE_KEY_OLD_V2 = 'labgrade_submissions_v2';
 export const STORAGE_KEY_OLD_V1 = 'labgrade_submissions_v1';
 export const STORAGE_KEY_CLEANED_FLAG = 'labgrade_virtual_data_cleaned_v5';
-export const MAX_RETAINED_SUBMISSIONS = 120; // Ngưỡng an toàn lưu trữ lịch sử
+export const MAX_RETAINED_SUBMISSIONS = 600; // Ngưỡng an toàn lưu trữ nhiều sản phẩm SP1, SP2... across sessions
 
 /**
  * Xóa sạch toàn bộ kết quả chấm ảo các ngày trước đây và các bài nộp cũ trong localStorage
@@ -301,4 +303,189 @@ export function clearPendingSyncQueue(): void {
   try {
     localStorage.removeItem(STORAGE_KEY_PENDING_SYNC);
   } catch {}
+}
+
+/**
+ * Chuẩn hóa khóa học sinh an toàn cho cả Map JS và Firestore field path
+ */
+export function normalizeGradebookStudentKey(fullName: string): string {
+  return (fullName || '')
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, ' ')
+    .replace(/[./\[\]~*]/g, '_');
+}
+
+/**
+ * Chuẩn hóa khóa mã bài tập an toàn cho Firestore field path
+ */
+export function normalizeGradebookAssignmentKey(assignmentId: string): string {
+  return (assignmentId || 'default_sp').trim().replace(/[./\[\]~*]/g, '_');
+}
+
+/**
+ * Hợp nhất 2 bảng điểm vĩnh viễn theo lớp (luôn lấy điểm cao nhất của từng SP1, SP2,...)
+ */
+export function mergeGradebooksClient(
+  base: Record<string, ClassGradebookDocument> = {},
+  incoming: Record<string, ClassGradebookDocument> = {}
+): Record<string, ClassGradebookDocument> {
+  const result: Record<string, ClassGradebookDocument> = {};
+
+  const applyDoc = (rawDoc: ClassGradebookDocument) => {
+    if (!rawDoc || !rawDoc.className) return;
+    const normCls = normalizeClassName(rawDoc.className);
+    if (!normCls) return;
+
+    if (!result[normCls]) {
+      result[normCls] = {
+        className: normCls,
+        students: {},
+        updatedAt: rawDoc.updatedAt || new Date().toISOString(),
+      };
+    }
+
+    const targetDoc = result[normCls];
+    const incomingStudents = rawDoc.students || {};
+    Object.values(incomingStudents).forEach((stu) => {
+      if (!stu || !stu.fullName) return;
+      const key = normalizeGradebookStudentKey(stu.fullName);
+      if (!key) return;
+
+      if (!targetDoc.students[key]) {
+        targetDoc.students[key] = {
+          studentKey: key,
+          fullName: stu.fullName.trim(),
+          className: normCls,
+          scores: {},
+          updatedAt: stu.updatedAt || new Date().toISOString(),
+        };
+      }
+
+      const targetStu = targetDoc.students[key];
+      if (stu.fullName.trim().length >= targetStu.fullName.length) {
+        targetStu.fullName = stu.fullName.trim();
+      }
+
+      Object.entries(stu.scores || {}).forEach(([aId, entry]) => {
+        if (!entry) return;
+        const safeAId = entry.assignmentId || aId;
+        const existingEntry = targetStu.scores[safeAId];
+        if (!existingEntry) {
+          targetStu.scores[safeAId] = { ...entry, assignmentId: safeAId };
+        } else {
+          const bestHigh = Math.max(Number(existingEntry.highestScore) || 0, Number(entry.highestScore) || 0);
+          const isIncomingNewer = (entry.updatedAt || '') >= (existingEntry.updatedAt || '');
+          targetStu.scores[safeAId] = {
+            assignmentId: safeAId,
+            assignmentTitle: entry.assignmentTitle || existingEntry.assignmentTitle,
+            highestScore: bestHigh,
+            latestScore: isIncomingNewer ? entry.latestScore : existingEntry.latestScore,
+            attemptsCount: Math.max(Number(existingEntry.attemptsCount) || 1, Number(entry.attemptsCount) || 1),
+            lastFileName: isIncomingNewer ? (entry.lastFileName || existingEntry.lastFileName) : existingEntry.lastFileName,
+            updatedAt: isIncomingNewer ? entry.updatedAt : existingEntry.updatedAt,
+          };
+        }
+      });
+
+      if ((stu.updatedAt || '') > (targetStu.updatedAt || '')) {
+        targetStu.updatedAt = stu.updatedAt;
+      }
+    });
+
+    if ((rawDoc.updatedAt || '') > (targetDoc.updatedAt || '')) {
+      targetDoc.updatedAt = rawDoc.updatedAt;
+    }
+  };
+
+  Object.values(base || {}).forEach(applyDoc);
+  Object.values(incoming || {}).forEach(applyDoc);
+  return result;
+}
+
+/**
+ * Cập nhật một bài nộp mới (SP1, SP2,...) vào Bảng Tổng Hợp Điểm Vĩnh Viễn của lớp
+ */
+export function upsertGradebookFromSubmissionClient(
+  current: Record<string, ClassGradebookDocument>,
+  sub: Submission
+): Record<string, ClassGradebookDocument> {
+  if (!sub || !sub.className || !sub.assignmentId) return current;
+  const normCls = normalizeClassName(sub.className);
+  if (!normCls) return current;
+
+  const participantNames = [
+    sub.studentLeader,
+    ...(Array.isArray(sub.groupMembers) ? sub.groupMembers : []),
+  ]
+    .map((n) => (n || '').trim())
+    .filter(Boolean);
+
+  if (participantNames.length === 0) return current;
+
+  const nowIso = sub.latestSubmittedAt || new Date().toISOString();
+  const latestAtt = Array.isArray(sub.attempts) && sub.attempts.length > 0
+    ? sub.attempts[sub.attempts.length - 1]
+    : null;
+
+  const studentsMap: Record<string, StudentGradebookEntry> = {};
+  participantNames.forEach((fullName) => {
+    const key = normalizeGradebookStudentKey(fullName);
+    if (!key) return;
+    const scoreEntry: StudentProductScoreEntry = {
+      assignmentId: sub.assignmentId,
+      assignmentTitle: sub.assignmentTitle || 'Sản phẩm thực hành',
+      highestScore: typeof sub.highestScore === 'number' ? sub.highestScore : 0,
+      latestScore: typeof sub.latestScore === 'number' ? sub.latestScore : (sub.highestScore || 0),
+      attemptsCount: Array.isArray(sub.attempts) && sub.attempts.length > 0 ? sub.attempts.length : 1,
+      lastFileName: latestAtt?.fileName,
+      updatedAt: nowIso,
+    };
+    studentsMap[key] = {
+      studentKey: key,
+      fullName,
+      className: normCls,
+      scores: {
+        [sub.assignmentId]: scoreEntry,
+      },
+      updatedAt: nowIso,
+    };
+  });
+
+  const delta: Record<string, ClassGradebookDocument> = {
+    [normCls]: {
+      className: normCls,
+      students: studentsMap,
+      updatedAt: nowIso,
+    },
+  };
+
+  return mergeGradebooksClient(current, delta);
+}
+
+export function saveGradebooksSafely(gradebooks: Record<string, ClassGradebookDocument>): boolean {
+  try {
+    if (typeof window === 'undefined') return false;
+    localStorage.setItem(STORAGE_KEY_GRADEBOOKS, JSON.stringify(gradebooks || {}));
+    return true;
+  } catch (err) {
+    console.warn('Không thể lưu bảng điểm tổng hợp vào localStorage:', err);
+    return false;
+  }
+}
+
+export function loadGradebooksSafely(): Record<string, ClassGradebookDocument> {
+  try {
+    if (typeof window === 'undefined') return {};
+    const raw = localStorage.getItem(STORAGE_KEY_GRADEBOOKS);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === 'object') {
+        return parsed;
+      }
+    }
+  } catch (err) {
+    console.warn('Lỗi đọc bảng điểm tổng hợp từ localStorage:', err);
+  }
+  return {};
 }

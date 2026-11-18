@@ -2,8 +2,16 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { INITIAL_SUBMISSIONS } from '../data/mockSubmissions';
-import { Submission, SubmissionAttempt, StudentRecord, PlagiarismAlert } from '../types';
-import { normalizeClassName } from '../data/classes';
+import {
+  Submission,
+  SubmissionAttempt,
+  StudentRecord,
+  PlagiarismAlert,
+  ClassGradebookDocument,
+  StudentGradebookEntry,
+  StudentProductScoreEntry,
+} from '../types';
+import { SCHOOL_CLASSES, normalizeClassName } from '../data/classes';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -12,6 +20,8 @@ const __dirname = path.dirname(__filename);
 const DATA_DIR = path.resolve(process.cwd(), 'data');
 const DB_FILE = path.join(DATA_DIR, 'submissions_database.json');
 const BACKUP_FILE = path.join(DATA_DIR, 'submissions_database.backup.json');
+const GRADEBOOK_FILE = path.join(DATA_DIR, 'gradebook_database.json');
+const GRADEBOOK_BACKUP_FILE = path.join(DATA_DIR, 'gradebook_database.backup.json');
 const ROSTER_FILE = path.join(DATA_DIR, 'student_roster.json');
 const ROSTERS_DIR = path.join(DATA_DIR, 'rosters_by_class');
 
@@ -65,11 +75,186 @@ function flushDatabaseToDisk(): boolean {
   }
 }
 
+let gradebookState: Record<string, ClassGradebookDocument> = {};
+
+function normalizeGradebookStudentKey(fullName: string): string {
+  return (fullName || '')
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, ' ')
+    .replace(/[./\[\]~*]/g, '_');
+}
+
+function flushGradebookToDisk(): boolean {
+  try {
+    ensureDataDir();
+    const dataStr = JSON.stringify(gradebookState, null, 2);
+    const tempFile = `${GRADEBOOK_FILE}.tmp.${Date.now()}`;
+    fs.writeFileSync(tempFile, dataStr, 'utf-8');
+    fs.renameSync(tempFile, GRADEBOOK_FILE);
+    try {
+      fs.writeFileSync(GRADEBOOK_BACKUP_FILE, dataStr, 'utf-8');
+    } catch {}
+    return true;
+  } catch (err) {
+    console.error('[CSDL Sổ Điểm Vĩnh Viễn] Lỗi khi ghi ra đĩa:', err);
+    return false;
+  }
+}
+
+function mergeIntoGradebookState(incoming: Record<string, ClassGradebookDocument>): void {
+  if (!incoming || typeof incoming !== 'object') return;
+  Object.values(incoming).forEach((rawDoc) => {
+    if (!rawDoc || !rawDoc.className) return;
+    const normCls = normalizeClassName(rawDoc.className);
+    if (!normCls) return;
+
+    if (!gradebookState[normCls]) {
+      gradebookState[normCls] = {
+        className: normCls,
+        students: {},
+        updatedAt: rawDoc.updatedAt || new Date().toISOString(),
+      };
+    }
+    const targetDoc = gradebookState[normCls];
+
+    Object.values(rawDoc.students || {}).forEach((stu) => {
+      if (!stu || !stu.fullName) return;
+      const key = normalizeGradebookStudentKey(stu.fullName);
+      if (!key) return;
+
+      if (!targetDoc.students[key]) {
+        targetDoc.students[key] = {
+          studentKey: key,
+          fullName: stu.fullName.trim(),
+          className: normCls,
+          scores: {},
+          updatedAt: stu.updatedAt || new Date().toISOString(),
+        };
+      }
+      const targetStu = targetDoc.students[key];
+      if (stu.fullName.trim().length >= targetStu.fullName.length) {
+        targetStu.fullName = stu.fullName.trim();
+      }
+
+      Object.entries(stu.scores || {}).forEach(([aId, entry]) => {
+        if (!entry) return;
+        const safeAId = entry.assignmentId || aId;
+        const prevEntry = targetStu.scores[safeAId];
+        if (!prevEntry) {
+          targetStu.scores[safeAId] = { ...entry, assignmentId: safeAId };
+        } else {
+          const bestHigh = Math.max(Number(prevEntry.highestScore) || 0, Number(entry.highestScore) || 0);
+          const isIncomingNewer = (entry.updatedAt || '') >= (prevEntry.updatedAt || '');
+          targetStu.scores[safeAId] = {
+            assignmentId: safeAId,
+            assignmentTitle: entry.assignmentTitle || prevEntry.assignmentTitle,
+            highestScore: bestHigh,
+            latestScore: isIncomingNewer ? entry.latestScore : prevEntry.latestScore,
+            attemptsCount: Math.max(Number(prevEntry.attemptsCount) || 1, Number(entry.attemptsCount) || 1),
+            lastFileName: isIncomingNewer ? (entry.lastFileName || prevEntry.lastFileName) : prevEntry.lastFileName,
+            updatedAt: isIncomingNewer ? entry.updatedAt : prevEntry.updatedAt,
+          };
+        }
+      });
+
+      if ((stu.updatedAt || '') > (targetStu.updatedAt || '')) {
+        targetStu.updatedAt = stu.updatedAt;
+      }
+    });
+
+    if ((rawDoc.updatedAt || '') > (targetDoc.updatedAt || '')) {
+      targetDoc.updatedAt = rawDoc.updatedAt;
+    }
+  });
+}
+
+export function upsertGradebookFromSubmission(sub: Submission, skipFlush = false): void {
+  if (!sub || !sub.className || !sub.assignmentId) return;
+  const normCls = normalizeClassName(sub.className);
+  if (!normCls) return;
+
+  const participants = [
+    sub.studentLeader,
+    ...(Array.isArray(sub.groupMembers) ? sub.groupMembers : []),
+  ]
+    .map((n) => (n || '').trim())
+    .filter(Boolean);
+
+  if (participants.length === 0) return;
+
+  const nowIso = sub.latestSubmittedAt || new Date().toISOString();
+  const latestAtt = Array.isArray(sub.attempts) && sub.attempts.length > 0
+    ? sub.attempts[sub.attempts.length - 1]
+    : null;
+
+  const studentsMap: Record<string, StudentGradebookEntry> = {};
+  participants.forEach((fullName) => {
+    const key = normalizeGradebookStudentKey(fullName);
+    if (!key) return;
+    const scoreEntry: StudentProductScoreEntry = {
+      assignmentId: sub.assignmentId,
+      assignmentTitle: sub.assignmentTitle || 'Sản phẩm thực hành',
+      highestScore: typeof sub.highestScore === 'number' ? sub.highestScore : 0,
+      latestScore: typeof sub.latestScore === 'number' ? sub.latestScore : (sub.highestScore || 0),
+      attemptsCount: Array.isArray(sub.attempts) && sub.attempts.length > 0 ? sub.attempts.length : 1,
+      lastFileName: latestAtt?.fileName,
+      updatedAt: nowIso,
+    };
+    studentsMap[key] = {
+      studentKey: key,
+      fullName,
+      className: normCls,
+      scores: {
+        [sub.assignmentId]: scoreEntry,
+      },
+      updatedAt: nowIso,
+    };
+  });
+
+  mergeIntoGradebookState({
+    [normCls]: {
+      className: normCls,
+      students: studentsMap,
+      updatedAt: nowIso,
+    },
+  });
+
+  if (!skipFlush) {
+    flushGradebookToDisk();
+  }
+}
+
+function loadGradebookFromDisk(): void {
+  try {
+    if (fs.existsSync(GRADEBOOK_FILE)) {
+      const raw = fs.readFileSync(GRADEBOOK_FILE, 'utf-8');
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === 'object') {
+        gradebookState = parsed;
+        return;
+      }
+    }
+  } catch (err) {
+    console.warn('[CSDL Sổ Điểm Vĩnh Viễn] Không đọc được tệp chính, kiểm tra backup:', err);
+  }
+  try {
+    if (fs.existsSync(GRADEBOOK_BACKUP_FILE)) {
+      const rawBackup = fs.readFileSync(GRADEBOOK_BACKUP_FILE, 'utf-8');
+      const parsed = JSON.parse(rawBackup);
+      if (parsed && typeof parsed === 'object') {
+        gradebookState = parsed;
+        return;
+      }
+    }
+  } catch {}
+  gradebookState = {};
+}
+
 // Khởi động CSDL khi máy chủ khởi chạy
 export function initLabDatabase(): DatabaseState {
   ensureDataDir();
-
-  const todayStr = new Date().toISOString().slice(0, 10);
+  loadGradebookFromDisk();
 
   if (fs.existsSync(DB_FILE)) {
     try {
@@ -86,10 +271,14 @@ export function initLabDatabase(): DatabaseState {
           version: parsed.version || '2.0.0',
           lastUpdated: parsed.lastUpdated || new Date().toISOString(),
           allowSubmission: typeof parsed.allowSubmission === 'boolean' ? parsed.allowSubmission : true,
+          allowedClasses: Array.isArray(parsed.allowedClasses) ? parsed.allowedClasses : [],
+          lockedClasses: Array.isArray(parsed.lockedClasses) ? parsed.lockedClasses : [],
           teacherPin: typeof parsed.teacherPin === 'string' && parsed.teacherPin && parsed.teacherPin !== '1234' ? parsed.teacherPin : 'A123@',
           submissions: cleanSubmissions,
         };
+        cleanSubmissions.forEach((s: Submission) => upsertGradebookFromSubmission(s, true));
         flushDatabaseToDisk();
+        flushGradebookToDisk();
         console.log(`[CSDL Thực Hành] Khôi phục thành công ${dbState.submissions.length} bài nộp từ CSDL đĩa: ${DB_FILE} (Cho phép nộp: ${dbState.allowSubmission ? 'BẬT' : 'KHÓA'})`);
         return dbState;
       }
@@ -108,11 +297,15 @@ export function initLabDatabase(): DatabaseState {
               version: parsed.version || '2.0.0',
               lastUpdated: parsed.lastUpdated || new Date().toISOString(),
               allowSubmission: typeof parsed.allowSubmission === 'boolean' ? parsed.allowSubmission : true,
+              allowedClasses: Array.isArray(parsed.allowedClasses) ? parsed.allowedClasses : [],
+              lockedClasses: Array.isArray(parsed.lockedClasses) ? parsed.lockedClasses : [],
               teacherPin: typeof parsed.teacherPin === 'string' && parsed.teacherPin !== '1234' ? parsed.teacherPin : 'A123@',
               submissions: cleanSubmissions,
             };
+            cleanSubmissions.forEach((s: Submission) => upsertGradebookFromSubmission(s, true));
             console.log(`[CSDL Thực Hành] Đã khôi phục ${dbState.submissions.length} bản ghi từ tệp sao lưu.`);
             flushDatabaseToDisk();
+            flushGradebookToDisk();
             return dbState;
           }
         } catch {}
@@ -125,11 +318,14 @@ export function initLabDatabase(): DatabaseState {
     version: '2.0.0',
     lastUpdated: new Date().toISOString(),
     allowSubmission: true,
+    allowedClasses: [],
+    lockedClasses: [],
     teacherPin: 'A123@',
     submissions: [],
   };
 
   flushDatabaseToDisk();
+  flushGradebookToDisk();
   console.log(`[CSDL Thực Hành] Đã khởi tạo mới CSDL sạch với 0 bài nộp tại ${DB_FILE}`);
   return dbState;
 }
@@ -173,13 +369,39 @@ export function isClassAllowedToSubmit(className?: string): boolean {
   return dbState.allowSubmission;
 }
 
-export function setAllowSubmission(allow: boolean): void {
+export function setAllowSubmission(allow: boolean, extraKnownClasses?: string[]): {
+  allowSubmission: boolean;
+  allowedClasses: string[];
+  lockedClasses: string[];
+} {
   dbState.allowSubmission = allow;
   if (!allow) {
-    // Khóa toàn bộ
+    // Khóa toàn bộ tất cả các lớp
     dbState.allowedClasses = [];
+    const allLockedSet = new Set<string>();
+    SCHOOL_CLASSES.forEach((c) => allLockedSet.add(normalizeClassName(c)));
+    studentRosterState.forEach((s) => {
+      if (s?.className) allLockedSet.add(normalizeClassName(s.className));
+    });
+    dbState.submissions.forEach((s) => {
+      if (s?.className) allLockedSet.add(normalizeClassName(s.className));
+    });
+    Object.keys(gradebookState).forEach((c) => allLockedSet.add(normalizeClassName(c)));
+    (extraKnownClasses || []).forEach((c) => {
+      if (c) allLockedSet.add(normalizeClassName(c));
+    });
+    dbState.lockedClasses = Array.from(allLockedSet).filter(Boolean);
+  } else {
+    // Mở khóa lại toàn bộ tất cả các lớp
+    dbState.allowedClasses = [];
+    dbState.lockedClasses = [];
   }
   flushDatabaseToDisk();
+  return {
+    allowSubmission: dbState.allowSubmission,
+    allowedClasses: getAllowedClasses(),
+    lockedClasses: getLockedClasses(),
+  };
 }
 
 export function setClassSubmissionPermission(className: string, allow: boolean): {
@@ -187,9 +409,9 @@ export function setClassSubmissionPermission(className: string, allow: boolean):
   allowedClasses: string[];
   lockedClasses: string[];
 } {
-  const norm = className.trim().toUpperCase().replace(/^LỚP\s*|^LOP\s*/i, '');
-  let allowed = getAllowedClasses().map((c) => c.trim().toUpperCase().replace(/^LỚP\s*|^LOP\s*/i, ''));
-  let locked = getLockedClasses().map((c) => c.trim().toUpperCase().replace(/^LỚP\s*|^LOP\s*/i, ''));
+  const norm = normalizeClassName(className);
+  let allowed = getAllowedClasses().map((c) => normalizeClassName(c));
+  let locked = getLockedClasses().map((c) => normalizeClassName(c));
 
   if (allow) {
     // Mở khóa cho lớp này
@@ -199,24 +421,11 @@ export function setClassSubmissionPermission(className: string, allow: boolean):
     locked = locked.filter((c) => c !== norm);
     dbState.allowSubmission = true;
   } else {
-    // Khóa lớp này
+    // Khóa lớp này nhưng KHÔNG xóa bài nộp hay điểm số đã lưu vĩnh viễn của học sinh
     allowed = allowed.filter((c) => c !== norm);
     if (!locked.includes(norm)) {
       locked.push(norm);
     }
-
-    // Khi giáo viên khóa nộp bài của lớp đó: reset về trạng thái ban đầu coi như kết thúc tiết thực hành
-    // Xóa kết quả hôm nay của lớp đó khỏi CSDL phòng máy
-    const todayStr = new Date().toISOString().slice(0, 10);
-    dbState.submissions = dbState.submissions.filter((s) => {
-      if (!s) return false;
-      const sCls = (s.className || '').trim().toUpperCase().replace(/^LỚP\s*|^LOP\s*/i, '');
-      const sDate = s.practiceDate || (s.latestSubmittedAt ? s.latestSubmittedAt.slice(0, 10) : '');
-      if (sCls === norm && (!sDate || sDate === todayStr)) {
-        return false;
-      }
-      return true;
-    });
   }
 
   dbState.allowedClasses = allowed;
@@ -286,8 +495,8 @@ export function detectPlagiarism(params: {
     if (!sub || !Array.isArray(sub.attempts)) continue;
 
     const subLeader = (sub.studentLeader || '').trim().toLowerCase();
-    const isDifferentClass = sub.className !== className;
-    const isDifferentStudentSameClass = sub.className === className && subLeader !== cleanCurrentLeader;
+    const isDifferentClass = normalizeClassName(sub.className) !== normalizeClassName(className);
+    const isDifferentStudentSameClass = !isDifferentClass && subLeader !== cleanCurrentLeader;
     const isSameMachine = (sub.machineNumber || '').trim().toLowerCase() === currentMachineClean;
 
     // Chỉ phát hiện khi đối chiếu với bài của lớp khác hoặc học sinh khác
@@ -377,7 +586,9 @@ export function upsertSubmission(newSub: any): { success: boolean; submission: S
   const hasPlag = Boolean(newSub.hasPlagiarism || (newSub.plagiarismAlert && newSub.plagiarismAlert.isCopied));
   const plagAlert = newSub.plagiarismAlert || undefined;
 
-  // Tìm bản ghi trùng: cùng ID HOẶC cùng lớp + cùng máy + cùng ngày thực hành (hoặc cùng tên trưởng nhóm)
+  // Tìm bản ghi trùng: cùng ID HOẶC cùng lớp + CÙNG MÃ SẢN PHẨM (assignmentId) + cùng ngày + (cùng máy hoặc cùng tên trưởng nhóm)
+  // Tuyệt đối không ghi đè SP1 khi học sinh nộp SP2, SP3...
+  const newAssignId = String(newSub.assignmentId || '').trim();
   const existingIdx = dbState.submissions.findIndex((s) => {
     if (!s) return false;
     if (newSub.id && s.id === newSub.id) return true;
@@ -386,12 +597,18 @@ export function upsertSubmission(newSub: any): { success: boolean; submission: S
     const isSameDate = !subPracticeDate || !sDate || subPracticeDate === sDate;
     const sNormClass = normalizeClassName(s.className);
     const newNormClass = normalizeClassName(newSub.className);
+    const sAssignId = String(s.assignmentId || '').trim();
+    const isSameAssignment = !newAssignId || !sAssignId || sAssignId === newAssignId;
+
+    if (!isSameAssignment) {
+      return false;
+    }
 
     if (sNormClass === newNormClass && s.machineNumber === newSub.machineNumber && isSameDate) {
       return true;
     }
 
-    if (sNormClass === newNormClass && (s.studentLeader || '').trim().toLowerCase() === cleanLeader && isSameDate) {
+    if (sNormClass === newNormClass && cleanLeader && (s.studentLeader || '').trim().toLowerCase() === cleanLeader && isSameDate) {
       return true;
     }
 
@@ -443,7 +660,7 @@ export function upsertSubmission(newSub: any): { success: boolean; submission: S
       : (typeof newSub.highestScore === 'number' ? newSub.highestScore : 0);
 
     finalizedSub = {
-      id: newSub.id || `sub-${newSub.className}-${newSub.machineNumber.replace(/\s+/g, '_')}-${Date.now()}`,
+      id: newSub.id || `sub-${normalizeClassName(newSub.className)}-${newAssignId || 'sp'}-${newSub.machineNumber.replace(/\s+/g, '_')}-${subPracticeDate}-${Date.now()}`,
       assignmentId: newSub.assignmentId || '',
       assignmentTitle: newSub.assignmentTitle || 'Bài thực hành',
       className: newSub.className,
@@ -463,9 +680,10 @@ export function upsertSubmission(newSub: any): { success: boolean; submission: S
     dbState.submissions.unshift(finalizedSub);
   }
 
-  // Ghi tức thời ra đĩa CSDL
+  // Ghi tức thời ra đĩa CSDL bài nộp VÀ lưu vĩnh viễn vào Bảng Tổng Hợp Điểm (SP1, SP2...)
   const saved = flushDatabaseToDisk();
-  console.log(`[CSDL Thực Hành] ✅ Tự động lưu bài nộp: ${finalizedSub.studentLeader} - Lớp ${finalizedSub.className} (${finalizedSub.machineNumber}) -> Điểm: ${finalizedSub.highestScore}. Tổng CSDL: ${dbState.submissions.length}`);
+  upsertGradebookFromSubmission(finalizedSub);
+  console.log(`[CSDL Thực Hành] ✅ Tự động lưu bài nộp & sổ điểm: ${finalizedSub.studentLeader} - Lớp ${finalizedSub.className} (${finalizedSub.assignmentTitle}) -> Điểm: ${finalizedSub.highestScore}. Tổng CSDL: ${dbState.submissions.length}`);
 
   return {
     success: saved,
@@ -500,6 +718,43 @@ export function deleteSubmissions(className?: string): number {
   return dbState.submissions.length;
 }
 
+// Quản lý Bảng Tổng Hợp Điểm Vĩnh Viễn theo lớp (SP1, SP2,...)
+export function getAllGradebooks(): Record<string, ClassGradebookDocument> {
+  return gradebookState;
+}
+
+export function getClassGradebook(className: string): ClassGradebookDocument | null {
+  const norm = normalizeClassName(className);
+  return gradebookState[norm] || null;
+}
+
+export function syncGradebooks(
+  incoming: Record<string, ClassGradebookDocument> | ClassGradebookDocument[]
+): Record<string, ClassGradebookDocument> {
+  if (Array.isArray(incoming)) {
+    const map: Record<string, ClassGradebookDocument> = {};
+    incoming.forEach((doc) => {
+      if (doc?.className) map[normalizeClassName(doc.className)] = doc;
+    });
+    mergeIntoGradebookState(map);
+  } else if (incoming && typeof incoming === 'object') {
+    mergeIntoGradebookState(incoming);
+  }
+  flushGradebookToDisk();
+  return gradebookState;
+}
+
+export function deleteGradebooks(className?: string): Record<string, ClassGradebookDocument> {
+  if (className && className !== 'Tất cả') {
+    const norm = normalizeClassName(className);
+    delete gradebookState[norm];
+  } else {
+    gradebookState = {};
+  }
+  flushGradebookToDisk();
+  return gradebookState;
+}
+
 // Thống kê trạng thái CSDL thời gian thực
 export function getDatabaseMetrics() {
   const classCounts: Record<string, number> = {};
@@ -514,6 +769,12 @@ export function getDatabaseMetrics() {
     }
   });
 
+  const gradebookDocs = Object.values(gradebookState);
+  let gradebookStudentsCount = 0;
+  gradebookDocs.forEach((doc) => {
+    gradebookStudentsCount += Object.keys(doc?.students || {}).length;
+  });
+
   return {
     status: 'connected',
     isPersistent: true,
@@ -523,6 +784,8 @@ export function getDatabaseMetrics() {
     totalAttempts,
     allowSubmission: dbState.allowSubmission,
     classes: classCounts,
+    gradebookClassesCount: gradebookDocs.length,
+    gradebookStudentsCount,
     timestamp: new Date().toISOString(),
   };
 }

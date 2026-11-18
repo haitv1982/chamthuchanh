@@ -8,7 +8,7 @@ import { ProjectorLiveBoard } from './components/ProjectorLiveBoard';
 import { DEFAULT_ASSIGNMENTS } from './data/defaultAssignments';
 import { INITIAL_SUBMISSIONS } from './data/mockSubmissions';
 import { SCHOOL_CLASSES, normalizeClassName, extractGradeDigit } from './data/classes';
-import { Assignment, Submission, SubmissionAttempt, StudentRecord } from './types';
+import { Assignment, Submission, SubmissionAttempt, StudentRecord, ClassGradebookDocument } from './types';
 import {
   exportSubmissionsToExcel,
   exportSingleSubmissionToExcel,
@@ -25,6 +25,10 @@ import {
   getPendingSyncQueue,
   clearPendingSyncQueue,
   purgeAllLegacySubmissions,
+  loadGradebooksSafely,
+  saveGradebooksSafely,
+  mergeGradebooksClient,
+  upsertGradebookFromSubmissionClient,
 } from './utils/storageManager';
 import { scanAndGradeProduct } from './utils/productScanner';
 import { detectPlagiarismClientSide } from './utils/antiPlagiarism';
@@ -43,6 +47,10 @@ import {
   saveSettingsToCloud,
   fetchSettingsFromCloud,
   subscribeToSettingsCloud,
+  saveSubmissionIntoCloudGradebook,
+  batchSaveGradebooksToCloud,
+  fetchAllGradebooksFromCloud,
+  deleteGradebooksFromCloud,
 } from './services/firebase';
 
 const STORAGE_KEY_ASSIGNMENTS = 'labgrade_assignments_v7_grade6_grade7_grade8_grade9';
@@ -120,6 +128,37 @@ export default function App() {
   const [submissions, setSubmissions] = useState<Submission[]>(() => {
     return loadSubmissionsSafely([]);
   });
+
+  // Bảng tổng hợp điểm vĩnh viễn theo lớp (lưu trữ toàn bộ SP1, SP2, SP3... qua mọi tiết học)
+  const [permanentGradebooks, setPermanentGradebooks] = useState<Record<string, ClassGradebookDocument>>(() => {
+    const initialGbs = loadGradebooksSafely();
+    const initialSubs = loadSubmissionsSafely([]);
+    let rebuilt = initialGbs;
+    initialSubs.forEach((s) => {
+      rebuilt = upsertGradebookFromSubmissionClient(rebuilt, s);
+    });
+    return rebuilt;
+  });
+
+  const gradebooksRef = React.useRef<Record<string, ClassGradebookDocument>>(permanentGradebooks);
+  useEffect(() => {
+    gradebooksRef.current = permanentGradebooks;
+    saveGradebooksSafely(permanentGradebooks);
+  }, [permanentGradebooks]);
+
+  // Kiểm tra 2 bài nộp có thuộc cùng 1 phiên làm bài của cùng 1 sản phẩm & học sinh hay không (tránh SP2 ghi đè mất SP1)
+  const isSameSubmissionSlot = (a?: Submission | null, b?: Submission | null): boolean => {
+    if (!a || !b) return false;
+    if (normalizeClassName(a.className) !== normalizeClassName(b.className)) return false;
+    if ((a.assignmentId || '') !== (b.assignmentId || '')) return false;
+    const dateA = a.practiceDate || (a.latestSubmittedAt ? a.latestSubmittedAt.slice(0, 10) : '');
+    const dateB = b.practiceDate || (b.latestSubmittedAt ? b.latestSubmittedAt.slice(0, 10) : '');
+    if (dateA && dateB && dateA !== dateB) return false;
+    const leaderA = (a.studentLeader || '').trim().toLowerCase();
+    const leaderB = (b.studentLeader || '').trim().toLowerCase();
+    if (leaderA && leaderB) return leaderA === leaderB;
+    return a.machineNumber === b.machineNumber;
+  };
 
   // Student Info State (Lớp, Khối, Số máy, Trưởng nhóm, Thành viên)
   const [machineNumber, setMachineNumber] = useState<string>(() => {
@@ -349,6 +388,9 @@ export default function App() {
         if (Array.isArray(event.onlineMachines)) {
           setOnlineMachines(event.onlineMachines);
         }
+        if (event.gradebooks && typeof event.gradebooks === 'object') {
+          setPermanentGradebooks((prev) => mergeGradebooksClient(prev, event.gradebooks));
+        }
       } else if (event.type === 'PRESENCE_UPDATED') {
         if (Array.isArray(event.onlineMachines)) {
           setOnlineMachines(event.onlineMachines);
@@ -363,13 +405,19 @@ export default function App() {
         }
       } else if (event.type === 'SUBMISSION_UPDATED' && event.submission) {
         const cleanSub = sanitizeSubmission(event.submission);
-        const normSubCls = normalizeClassName(cleanSub.className);
         setSubmissions((prev) => {
           const filtered = prev.filter(
-            (s) => s.id !== cleanSub.id && !(normalizeClassName(s.className) === normSubCls && s.machineNumber === cleanSub.machineNumber)
+            (s) => s.id !== cleanSub.id && !isSameSubmissionSlot(s, cleanSub)
           );
           const next = pruneOldSubmissions([cleanSub, ...filtered]);
           saveSubmissionsSafely(next);
+          return next;
+        });
+        setPermanentGradebooks((prev) => {
+          let next = upsertGradebookFromSubmissionClient(prev, cleanSub);
+          if (event.gradebooks && typeof event.gradebooks === 'object') {
+            next = mergeGradebooksClient(next, event.gradebooks);
+          }
           return next;
         });
         if (event.dbStatus) {
@@ -382,9 +430,20 @@ export default function App() {
           .map((s: any) => sanitizeSubmission(s));
         setSubmissions(cleanList);
         saveSubmissionsSafely(cleanList);
+        setPermanentGradebooks((prev) => {
+          let next = event.gradebooks && typeof event.gradebooks === 'object'
+            ? mergeGradebooksClient(prev, event.gradebooks)
+            : prev;
+          cleanList.forEach((s: Submission) => {
+            next = upsertGradebookFromSubmissionClient(next, s);
+          });
+          return next;
+        });
         if (event.dbStatus) {
           setDbStatus(event.dbStatus);
         }
+      } else if (event.type === 'GRADEBOOK_UPDATED' && event.gradebooks) {
+        setPermanentGradebooks((prev) => mergeGradebooksClient(prev, event.gradebooks));
       } else if (event.type === 'SUBMISSIONS_CLEARED') {
         const targetCls = event.targetClass || event.className;
         if (targetCls) {
@@ -444,21 +503,27 @@ export default function App() {
             if (Array.isArray(event.data.allowedClasses)) {
               setAllowedClasses(event.data.allowedClasses);
             }
+            if (Array.isArray(event.data.lockedClasses)) {
+              setLockedClasses(event.data.lockedClasses);
+            }
           }
           if (event.data?.type === 'ROSTER_UPDATED' && Array.isArray(event.data.students)) {
             setStudentRoster(event.data.students);
           }
           if (event.data?.type === 'SUBMISSION_UPDATED' && event.data.submission) {
             const cleanSub = sanitizeSubmission(event.data.submission);
-            const normSubCls = normalizeClassName(cleanSub.className);
             setSubmissions((prev) => {
               const filtered = prev.filter(
-                (s) => s.id !== cleanSub.id && !(normalizeClassName(s.className) === normSubCls && s.machineNumber === cleanSub.machineNumber)
+                (s) => s.id !== cleanSub.id && !isSameSubmissionSlot(s, cleanSub)
               );
               const next = pruneOldSubmissions([cleanSub, ...filtered]);
               saveSubmissionsSafely(next);
               return next;
             });
+            setPermanentGradebooks((prev) => upsertGradebookFromSubmissionClient(prev, cleanSub));
+          }
+          if (event.data?.type === 'GRADEBOOK_UPDATED' && event.data.gradebooks) {
+            setPermanentGradebooks((prev) => mergeGradebooksClient(prev, event.data.gradebooks));
           }
           if (event.data?.type === 'SUBMISSIONS_CLEARED') {
             const targetCls = event.data.targetClass || event.data.className;
@@ -531,8 +596,16 @@ export default function App() {
       // Máy học sinh chỉ tải danh sách bài nộp 1 lần khi mở trang (tiết kiệm 95% lượt đọc Firestore)
       fetchSubmissionsFromCloud().then((cloudSubs) => {
         if (Array.isArray(cloudSubs) && cloudSubs.length > 0) {
-          setSubmissions(pruneOldSubmissions(cloudSubs));
-          saveSubmissionsSafely(pruneOldSubmissions(cloudSubs));
+          const pruned = pruneOldSubmissions(cloudSubs);
+          setSubmissions(pruned);
+          saveSubmissionsSafely(pruned);
+          setPermanentGradebooks((prev) => {
+            let next = prev;
+            pruned.forEach((s) => {
+              next = upsertGradebookFromSubmissionClient(next, s);
+            });
+            return next;
+          });
         }
       }).catch(() => {});
 
@@ -580,6 +653,24 @@ export default function App() {
       );
     }
 
+    // 4. Nạp Bảng Tổng Hợp Điểm Vĩnh Viễn từ Firebase Cloud Firestore (nhẹ: ~13 doc/hệ thống)
+    if (isFirebaseReady) {
+      fetchAllGradebooksFromCloud().then((cloudGbs) => {
+        if (cloudGbs && Object.keys(cloudGbs).length > 0) {
+          const merged = mergeGradebooksClient(gradebooksRef.current, cloudGbs);
+          setPermanentGradebooks(merged);
+          // Nếu có backend (Render/LAN) nhưng vừa khởi động lại trắng đĩa, đẩy lại vào máy chủ
+          if (isBackendConfigured()) {
+            apiFetch('/api/gradebooks/sync', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ gradebooks: merged }),
+            }, 6000).catch(() => {});
+          }
+        }
+      }).catch(() => {});
+    }
+
     const handleStorageChange = (e: StorageEvent) => {
       if (e.key === 'labgrade_allow_submission' && e.newValue !== null) {
         setAllowSubmission(e.newValue === 'true');
@@ -609,6 +700,13 @@ export default function App() {
             cloudSubs.forEach((s) => map.set(s.id, s));
             const merged = pruneOldSubmissions(Array.from(map.values()));
             saveSubmissionsSafely(merged);
+            setPermanentGradebooks((prevGb) => {
+              let nextGb = prevGb;
+              merged.forEach((s) => {
+                nextGb = upsertGradebookFromSubmissionClient(nextGb, s);
+              });
+              return nextGb;
+            });
             return merged;
           });
           setDbStatus((prev) => ({
@@ -762,9 +860,22 @@ export default function App() {
             .filter((s: any) => s && !String(s.id).startsWith('mock-'))
             .map((raw: any) => sanitizeSubmission(raw));
 
-          // CSDL máy chủ là nguồn dữ liệu chuẩn mực duy nhất
+          // CSDL máy chủ là nguồn dữ liệu chuẩn mực cho danh sách bài nộp trực tiếp
           setSubmissions(serverSubs);
           saveSubmissionsSafely(serverSubs);
+
+          // Đồng thời luôn hợp nhất vào Bảng Điểm Tổng Hợp Vĩnh Viễn (giữ toàn bộ điểm SP1, SP2...)
+          setPermanentGradebooks((prev) => {
+            let next = data.gradebooks && typeof data.gradebooks === 'object'
+              ? mergeGradebooksClient(prev, data.gradebooks)
+              : prev;
+            serverSubs.forEach((s: Submission) => {
+              next = upsertGradebookFromSubmissionClient(next, s);
+            });
+            return next;
+          });
+        } else if (data.gradebooks && typeof data.gradebooks === 'object') {
+          setPermanentGradebooks((prev) => mergeGradebooksClient(prev, data.gradebooks));
         }
       }
     } catch {
@@ -783,10 +894,70 @@ export default function App() {
     } catch {}
   };
 
+  // Lưu và đồng bộ vĩnh viễn toàn bộ Bảng Tổng Hợp Điểm (SP1, SP2, SP3...) lên Server + Firebase Cloud Firestore
+  const handleSaveGradebooksToDb = async (): Promise<boolean> => {
+    try {
+      const currentSubs = loadSubmissionsSafely(submissions);
+      let merged = gradebooksRef.current;
+      currentSubs.forEach((s) => {
+        merged = upsertGradebookFromSubmissionClient(merged, s);
+      });
+
+      if (isFirebaseReady) {
+        try {
+          const cloudGbs = await fetchAllGradebooksFromCloud();
+          if (cloudGbs && Object.keys(cloudGbs).length > 0) {
+            merged = mergeGradebooksClient(merged, cloudGbs);
+          }
+        } catch {}
+      }
+
+      setPermanentGradebooks(merged);
+      saveGradebooksSafely(merged);
+
+      let syncedCloud = false;
+      if (isFirebaseReady) {
+        syncedCloud = await batchSaveGradebooksToCloud(merged).catch(() => false);
+      }
+
+      let syncedServer = false;
+      try {
+        const res = await apiFetch('/api/gradebooks/sync', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ gradebooks: merged }),
+        }, 8000);
+        if (res.ok) {
+          const json = await res.json();
+          if (json?.gradebooks) {
+            const finalMerged = mergeGradebooksClient(merged, json.gradebooks);
+            setPermanentGradebooks(finalMerged);
+            saveGradebooksSafely(finalMerged);
+          }
+          syncedServer = true;
+        }
+      } catch {}
+
+      if (typeof BroadcastChannel !== 'undefined') {
+        try {
+          const bc = new BroadcastChannel('labgrade_session_channel');
+          bc.postMessage({ type: 'GRADEBOOK_UPDATED', gradebooks: merged });
+          bc.close();
+        } catch {}
+      }
+
+      return syncedCloud || syncedServer || Object.keys(merged).length > 0;
+    } catch (err) {
+      console.warn('Lỗi lưu bảng điểm vĩnh viễn:', err);
+      return false;
+    }
+  };
+
   // Đồng bộ toàn bộ bài nộp trên máy này lên CSDL trung tâm & Firebase Cloud
   const handleSyncAllLocalSubmissionsToDb = async (): Promise<{ success: boolean; count: number; error?: string }> => {
     try {
       const currentList = loadSubmissionsSafely(submissions);
+      await handleSaveGradebooksToDb();
       if (!currentList || currentList.length === 0) {
         return { success: true, count: 0 };
       }
@@ -839,8 +1010,9 @@ export default function App() {
       purgeAllLegacySubmissions();
       saveSubmissionsSafely([]);
     } else {
+      const normTarget = normalizeClassName(targetClass);
       setSubmissions((prev) => {
-        const next = prev.filter((s) => s.className !== targetClass);
+        const next = prev.filter((s) => normalizeClassName(s.className) !== normTarget);
         saveSubmissionsSafely(next);
         return next;
       });
@@ -858,7 +1030,48 @@ export default function App() {
     return true;
   };
 
-  // Toggle submission lock handler theo từng lớp (khi khóa lớp thì reset phiên thực hành lớp đó về ban đầu)
+  // Xóa bảng điểm vĩnh viễn khi giáo viên chủ động bấm xóa sổ điểm
+  const handleClearGradebooks = async (targetClass?: string): Promise<boolean> => {
+    if (isFirebaseReady) {
+      deleteGradebooksFromCloud(targetClass && targetClass !== 'Tất cả' ? targetClass : undefined).catch(() => {});
+    }
+    try {
+      if (!targetClass || targetClass === 'Tất cả') {
+        await apiFetch('/api/gradebooks', { method: 'DELETE' });
+      } else {
+        await apiFetch(`/api/gradebooks?className=${encodeURIComponent(targetClass)}`, { method: 'DELETE' });
+      }
+    } catch {}
+    if (!targetClass || targetClass === 'Tất cả') {
+      setPermanentGradebooks({});
+    } else {
+      const normCls = normalizeClassName(targetClass);
+      setPermanentGradebooks((prev) => {
+        const next = { ...prev };
+        delete next[normCls];
+        return next;
+      });
+    }
+    return true;
+  };
+
+  // Lấy tất cả tên lớp đang có trong hệ thống để khóa đồng bộ toàn trường
+  const getAllKnownClasses = (): string[] => {
+    const set = new Set<string>();
+    SCHOOL_CLASSES.forEach((c) => set.add(normalizeClassName(c)));
+    studentRoster.forEach((s) => {
+      if (s.className) set.add(normalizeClassName(s.className));
+    });
+    submissions.forEach((s) => {
+      if (s.className) set.add(normalizeClassName(s.className));
+    });
+    Object.keys(permanentGradebooks || {}).forEach((c) => {
+      if (c) set.add(normalizeClassName(c));
+    });
+    return Array.from(set).filter(Boolean);
+  };
+
+  // Toggle submission lock handler theo từng lớp (KHÔNG xóa điểm hay bài nộp SP1, SP2 đã chấm trong CSDL)
   const handleToggleSubmissionPermission = async (allow: boolean, targetClass?: string) => {
     const rawClass = targetClass || userClassName;
     const normTarget = normalizeClassName(rawClass);
@@ -867,31 +1080,15 @@ export default function App() {
 
     if (allow) {
       if (!nextAllowed.some((c) => normalizeClassName(c) === normTarget)) {
-        nextAllowed.push(rawClass);
+        nextAllowed.push(normTarget);
       }
       nextLocked = nextLocked.filter((c) => normalizeClassName(c) !== normTarget);
       setAllowSubmission(true);
     } else {
-      // Khi giáo viên nháy nút khóa nộp bài của lớp đó:
-      // Hệ thống reset về trạng thái ban đầu coi như kết thúc tiết thực hành của lớp đó!
+      // Khóa nộp bài của lớp đó (Giữ nguyên toàn bộ điểm SP1, SP2... đã chấm trong CSDL vĩnh viễn!)
       nextAllowed = nextAllowed.filter((c) => normalizeClassName(c) !== normTarget);
       if (!nextLocked.some((c) => normalizeClassName(c) === normTarget)) {
         nextLocked.push(normTarget);
-      }
-
-      const todayStr = getTodayDateString();
-      setSubmissions((prev) => {
-        const next = prev.filter((s) => {
-          const isSameClass = normalizeClassName(s.className) === normTarget;
-          const isToday = s.practiceDate === todayStr || isSubmittedToday(s.latestSubmittedAt, todayStr);
-          return !(isSameClass && isToday);
-        });
-        saveSubmissionsSafely(next);
-        return next;
-      });
-
-      if (isFirebaseReady) {
-        deleteSubmissionsFromCloud(normTarget).catch(() => {});
       }
     }
 
@@ -900,24 +1097,17 @@ export default function App() {
     try {
       localStorage.setItem('labgrade_allowed_classes', JSON.stringify(nextAllowed));
       localStorage.setItem('labgrade_locked_classes', JSON.stringify(nextLocked));
-      localStorage.setItem('labgrade_allow_submission', String(allow));
+      localStorage.setItem('labgrade_allow_submission', String(allow ? true : allowSubmission));
 
       if (typeof BroadcastChannel !== 'undefined') {
         const bc = new BroadcastChannel('labgrade_session_channel');
         bc.postMessage({
           type: 'SUBMISSION_PERMISSION_CHANGED',
-          allow,
+          allow: allow ? true : allowSubmission,
           targetClass: normTarget,
           allowedClasses: nextAllowed,
           lockedClasses: nextLocked,
         });
-        if (!allow) {
-          bc.postMessage({
-            type: 'SUBMISSIONS_CLEARED',
-            targetClass: normTarget,
-            className: normTarget,
-          });
-        }
         bc.close();
       }
     } catch {}
@@ -925,7 +1115,7 @@ export default function App() {
     // Đồng bộ tức thời lên Google Firebase Cloud Firestore (để máy xách tay và máy bàn thấy nhau ngay)
     if (isFirebaseReady) {
       saveSettingsToCloud({
-        allowSubmission: true,
+        allowSubmission: allow ? true : allowSubmission,
         allowedClasses: nextAllowed,
         lockedClasses: nextLocked,
       }).catch((cloudErr) => {
@@ -940,10 +1130,65 @@ export default function App() {
         body: JSON.stringify({ allow, className: normTarget }),
       }, 4000);
       if (res.ok) {
-        console.log(`[Quyền Nộp Bài] Lớp ${normTarget}: ${allow ? 'MỞ CHO PHÉP NỘP' : 'ĐÃ KHÓA & RESET TIẾT THỰC HÀNH'}`);
+        console.log(`[Quyền Nộp Bài] Lớp ${normTarget}: ${allow ? 'MỞ CHO PHÉP NỘP' : 'ĐÃ KHÓA NỘP BÀI'}`);
       }
     } catch (err) {
       console.warn('Lỗi gửi trạng thái khóa nộp bài tới máy chủ:', err);
+    }
+
+    await refreshSubmissionsAndStatus();
+  };
+
+  // Khóa / Mở TẤT CẢ CÁC LỚP trong toàn hệ thống chỉ bằng 1 nút bấm
+  const handleToggleAllClassesPermission = async (allow: boolean) => {
+    const allKnown = getAllKnownClasses();
+    const nextAllowed: string[] = [];
+    const nextLocked: string[] = allow ? [] : allKnown;
+
+    setAllowSubmission(allow);
+    setAllowedClasses(nextAllowed);
+    setLockedClasses(nextLocked);
+
+    try {
+      localStorage.setItem('labgrade_allow_submission', String(allow));
+      localStorage.setItem('labgrade_allowed_classes', JSON.stringify(nextAllowed));
+      localStorage.setItem('labgrade_locked_classes', JSON.stringify(nextLocked));
+
+      if (typeof BroadcastChannel !== 'undefined') {
+        const bc = new BroadcastChannel('labgrade_session_channel');
+        bc.postMessage({
+          type: 'SUBMISSION_PERMISSION_CHANGED',
+          allow,
+          allowedClasses: nextAllowed,
+          lockedClasses: nextLocked,
+        });
+        bc.close();
+      }
+    } catch {}
+
+    if (isFirebaseReady) {
+      saveSettingsToCloud({
+        allowSubmission: allow,
+        allowedClasses: nextAllowed,
+        lockedClasses: nextLocked,
+      }).catch((cloudErr) => {
+        console.warn('[Firebase Cloud] Lỗi khóa/mở tất cả lớp lên đám mây:', cloudErr);
+      });
+    }
+
+    try {
+      await apiFetch('/api/session-status', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          allow,
+          lockAll: true,
+          allClasses: allKnown,
+        }),
+      }, 4000);
+      console.log(`[Quyền Nộp Bài Toàn Trường] ${allow ? 'ĐÃ MỞ TẤT CẢ CÁC LỚP' : 'ĐÃ KHÓA TẤT CẢ CÁC LỚP'}`);
+    } catch (err) {
+      console.warn('Lỗi gửi trạng thái khóa tất cả lớp tới máy chủ:', err);
     }
 
     await refreshSubmissionsAndStatus();
@@ -1175,13 +1420,14 @@ export default function App() {
       }
     }
 
-    // KIỂM TRA BÀI NỘP CỦA HÔM NAY (Yêu cầu 3: không lưu dồn với ngày trước, sang ngày mới/tuần sau tính phiên mới)
-    // Nếu cùng số máy nhưng KHÁC tên học sinh/nhóm trưởng -> Đây là 2 nhóm khác nhau, không ghi đè mất bài của nhau!
+    // KIỂM TRA BÀI NỘP CỦA CÙNG SẢN PHẨM HÔM NAY (Khác sản phẩm SP1 vs SP2 hay khác ngày không bao giờ ghi đè nhau)
     const cleanLeader = (data.studentLeader || '').trim().toLowerCase();
+    const normDataCls = normalizeClassName(data.className);
     const existingSubmission = submissions.find(
       (s) =>
         s &&
-        s.className === data.className &&
+        normalizeClassName(s.className) === normDataCls &&
+        (s.assignmentId || '') === currentAssignment.id &&
         ((s.studentLeader || '').trim().toLowerCase() === cleanLeader ||
           (s.machineNumber === data.machineNumber &&
             Array.isArray(s.groupMembers) &&
@@ -1361,7 +1607,7 @@ export default function App() {
       };
     } else {
       updatedSubmission = {
-        id: `sub-${data.className}-${data.machineNumber.replace(/\s+/g, '_')}-${todayStr}-${Date.now()}`,
+        id: `sub-${normalizeClassName(data.className)}-${data.machineNumber.replace(/\s+/g, '_')}-${currentAssignment.id.slice(0, 18)}-${todayStr}-${Date.now()}`,
         assignmentId: currentAssignment.id,
         assignmentTitle: currentAssignment.title,
         className: data.className,
@@ -1379,16 +1625,16 @@ export default function App() {
       };
     }
 
-    // Cập nhật ngay vào danh sách submissions của máy này
+    // Cập nhật ngay vào danh sách submissions và Bảng Điểm Tổng Hợp Vĩnh Viễn của máy này
     setSubmissions((prev) => {
-      const normCls = normalizeClassName(updatedSubmission.className);
       const filtered = prev.filter(
-        (s) => s.id !== updatedSubmission.id && !(normalizeClassName(s.className) === normCls && s.machineNumber === updatedSubmission.machineNumber)
+        (s) => s.id !== updatedSubmission.id && !isSameSubmissionSlot(s, updatedSubmission)
       );
       const next = pruneOldSubmissions([updatedSubmission, ...filtered]);
       saveSubmissionsSafely(next);
       return next;
     });
+    setPermanentGradebooks((prev) => upsertGradebookFromSubmissionClient(prev, updatedSubmission));
 
     // Phát sóng ngay qua BroadcastChannel tới các tab/máy chiếu mở trên cùng máy
     if (typeof BroadcastChannel !== 'undefined') {
@@ -1402,10 +1648,13 @@ export default function App() {
       } catch {}
     }
 
-    // 1. Lưu vĩnh viễn lên đám mây Google Firebase Firestore (Bảo toàn dữ liệu trên Vercel hoặc khi máy tính đóng băng ổ cứng)
+    // 1. Lưu vĩnh viễn lên đám mây Google Firebase Firestore (cả bài nộp & bảng tổng hợp SP1, SP2... của lớp)
     if (isFirebaseReady) {
       saveSubmissionToCloud(updatedSubmission).catch((cloudErr) => {
         console.warn('[Firebase Cloud] Lỗi lưu bài nộp lên đám mây:', cloudErr);
+      });
+      saveSubmissionIntoCloudGradebook(updatedSubmission).catch((cloudErr) => {
+        console.warn('[Firebase Cloud] Lỗi lưu sổ điểm SP1, SP2... lên đám mây:', cloudErr);
       });
     }
 
@@ -1421,12 +1670,18 @@ export default function App() {
         if (syncJson.submission) {
           const finalized = sanitizeSubmission(syncJson.submission);
           setSubmissions((prev) => {
-            const normCls = normalizeClassName(finalized.className);
             const filtered = prev.filter(
-              (s) => s.id !== finalized.id && !(normalizeClassName(s.className) === normCls && s.machineNumber === finalized.machineNumber)
+              (s) => s.id !== finalized.id && !isSameSubmissionSlot(s, finalized)
             );
             const next = pruneOldSubmissions([finalized, ...filtered]);
             saveSubmissionsSafely(next);
+            return next;
+          });
+          setPermanentGradebooks((prev) => {
+            let next = upsertGradebookFromSubmissionClient(prev, finalized);
+            if (syncJson.gradebooks && typeof syncJson.gradebooks === 'object') {
+              next = mergeGradebooksClient(next, syncJson.gradebooks);
+            }
             return next;
           });
         }
@@ -1503,7 +1758,7 @@ export default function App() {
     });
   };
 
-  // Xuất file Excel bảng điểm tổng hợp SP1, SP2... ĐTB của từng lớp (lấy kết quả cao nhất)
+  // Xuất file Excel bảng điểm tổng hợp SP1, SP2... ĐTB của từng lớp (lấy kết quả cao nhất từ CSDL vĩnh viễn)
   const handleExportMultiProductExcel = async (customClass?: string) => {
     try {
       await refreshSubmissionsAndStatus();
@@ -1517,6 +1772,7 @@ export default function App() {
       assignments,
       submissions: latestSubs,
       roster: studentRoster,
+      gradebooks: gradebooksRef.current,
     });
   };
 
@@ -1529,7 +1785,9 @@ export default function App() {
   };
 
   // Statistics
-  const filteredForHeader = submissions.filter((s) => s.className === userClassName);
+  const filteredForHeader = submissions.filter(
+    (s) => normalizeClassName(s.className) === normalizeClassName(userClassName)
+  );
   const totalSubmissionsCount = filteredForHeader.length;
   const perfectCount = filteredForHeader.filter((s) => s.highestScore >= 10).length;
 
@@ -1555,7 +1813,9 @@ export default function App() {
         isTeacher={isTeacherRole}
         onToggleRole={() => setIsTeacherRole(!isTeacherRole)}
         allowSubmission={isClassSubmissionAllowed(userClassName)}
+        globalAllowSubmission={allowSubmission}
         onToggleSubmissionPermission={handleToggleSubmissionPermission}
+        onToggleAllClassesPermission={handleToggleAllClassesPermission}
         dbStatus={dbStatus}
         onRefreshDb={refreshSubmissionsAndStatus}
         onSyncAllLocalSubmissionsToDb={handleSyncAllLocalSubmissionsToDb}
@@ -1667,6 +1927,7 @@ export default function App() {
         <ClassResultsModal
           className={userClassName}
           submissions={submissions}
+          gradebooks={permanentGradebooks}
           onClose={() => setIsClassResultsOpen(false)}
           onExportExcel={handleExportClassExcel}
           isTeacher={isTeacherRole}
@@ -1674,7 +1935,9 @@ export default function App() {
           onToggleSubmissionPermission={handleToggleSubmissionPermission}
           onChangeClassName={handleSelectClassName}
           onRefresh={refreshSubmissionsAndStatus}
+          onSaveGradebooksToDb={handleSaveGradebooksToDb}
           onClearSubmissions={handleClearAllSubmissions}
+          onClearGradebooks={handleClearGradebooks}
           dbStatus={dbStatus}
           assignments={assignments}
           studentRoster={studentRoster}
@@ -1695,9 +1958,12 @@ export default function App() {
           onClearSubmissions={handleClearAllSubmissions}
           isTeacher={isTeacherRole}
           allowSubmission={isClassSubmissionAllowed(userClassName)}
+          globalAllowSubmission={allowSubmission}
           allowedClasses={allowedClasses}
+          lockedClasses={lockedClasses}
           onlineMachines={onlineMachines}
           onToggleSubmissionPermission={handleToggleSubmissionPermission}
+          onToggleAllClassesPermission={handleToggleAllClassesPermission}
         />
       )}
 

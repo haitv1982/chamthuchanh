@@ -30,6 +30,10 @@ import {
   renameStudentClass,
   getRosterLastUpdated,
   detectPlagiarism,
+  getAllGradebooks,
+  getClassGradebook,
+  syncGradebooks,
+  deleteGradebooks,
 } from './src/server/database';
 
 dotenv.config();
@@ -239,6 +243,7 @@ function recordAndBroadcastGradedSubmission(params: {
     type: 'SUBMISSION_UPDATED',
     submission: lightweightSub,
     totalSubmissions: saveRes.totalCount,
+    gradebooks: getAllGradebooks(),
     dbStatus: getDatabaseMetrics(),
   });
 
@@ -620,9 +625,9 @@ app.get('/api/session-status', (req, res) => {
 });
 
 app.post('/api/session-status', (req, res) => {
-  const { allow, className } = req.body;
+  const { allow, className, lockAll, allClasses } = req.body || {};
   if (typeof allow === 'boolean') {
-    if (className && typeof className === 'string') {
+    if (!lockAll && className && typeof className === 'string') {
       const result = setClassSubmissionPermission(className, allow);
       broadcastRealtimeEvent({
         type: 'SUBMISSION_PERMISSION_CHANGED',
@@ -632,14 +637,6 @@ app.post('/api/session-status', (req, res) => {
         lockedClasses: result.lockedClasses,
         isClassLocked: !allow,
       });
-      // Khi giáo viên khóa nộp bài của lớp đó: hệ thống reset về trạng thái ban đầu coi như kết thúc tiết thực hành
-      if (!allow) {
-        broadcastRealtimeEvent({
-          type: 'SUBMISSIONS_CLEARED',
-          targetClass: className,
-          className,
-        });
-      }
       return res.json({
         success: true,
         allowSubmission: result.allowSubmission,
@@ -647,18 +644,19 @@ app.post('/api/session-status', (req, res) => {
         lockedClasses: result.lockedClasses,
       });
     } else {
-      setAllowSubmission(allow);
+      const result = setAllowSubmission(allow, Array.isArray(allClasses) ? allClasses : undefined);
       broadcastRealtimeEvent({
         type: 'SUBMISSION_PERMISSION_CHANGED',
-        allow: getAllowSubmission(),
-        allowedClasses: getAllowedClasses(),
-        lockedClasses: getLockedClasses(),
+        allow: result.allowSubmission,
+        allowedClasses: result.allowedClasses,
+        lockedClasses: result.lockedClasses,
+        isGlobalLockToggle: true,
       });
       return res.json({
         success: true,
-        allowSubmission: getAllowSubmission(),
-        allowedClasses: getAllowedClasses(),
-        lockedClasses: getLockedClasses(),
+        allowSubmission: result.allowSubmission,
+        allowedClasses: result.allowedClasses,
+        lockedClasses: result.lockedClasses,
       });
     }
   }
@@ -722,6 +720,7 @@ app.get('/api/submissions', (_req, res) => {
   const dbStatus = getDatabaseMetrics();
   res.json({
     submissions,
+    gradebooks: getAllGradebooks(),
     allowSubmission: getAllowSubmission(),
     allowedClasses: getAllowedClasses(),
     lockedClasses: getLockedClasses(),
@@ -752,6 +751,7 @@ app.post('/api/submissions', (req, res) => {
       type: 'SUBMISSION_UPDATED',
       submission: lightweightSub,
       totalSubmissions: result.totalCount,
+      gradebooks: getAllGradebooks(),
       dbStatus: getDatabaseMetrics(),
     });
 
@@ -759,6 +759,7 @@ app.post('/api/submissions', (req, res) => {
       success: true,
       count: result.totalCount,
       submission: result.submission,
+      gradebooks: getAllGradebooks(),
       message: 'Đã lưu và cập nhật vào CSDL thành công',
     });
   } catch (err: any) {
@@ -786,6 +787,7 @@ app.post('/api/submissions/sync-batch', (req, res) => {
     type: 'SUBMISSIONS_SYNCED',
     addedCount: result.count,
     submissions: getAllSubmissions(),
+    gradebooks: getAllGradebooks(),
     dbStatus: getDatabaseMetrics(),
   });
   res.json(result);
@@ -829,6 +831,55 @@ app.get('/api/database/export-json', (_req, res) => {
   res.setHeader('Content-Disposition', `attachment; filename="CSDL_BaiNop_PhongMay_${new Date().toISOString().slice(0, 10)}.json"`);
   res.send(JSON.stringify(submissions, null, 2));
 });
+
+// API: Bảng Tổng Hợp Điểm Vĩnh Viễn SP1, SP2... của các lớp
+app.get('/api/gradebooks', (req, res) => {
+  const className = typeof req.query.className === 'string' && req.query.className.trim() ? req.query.className.trim() : undefined;
+  if (className && className !== 'Tất cả') {
+    const doc = getClassGradebook(className);
+    return res.json({
+      success: true,
+      gradebooks: doc ? { [doc.className]: doc } : {},
+      gradebook: doc,
+    });
+  }
+  res.json({
+    success: true,
+    gradebooks: getAllGradebooks(),
+  });
+});
+
+app.post('/api/gradebooks/sync', (req, res) => {
+  const incoming = req.body?.gradebooks;
+  if (!incoming || (typeof incoming !== 'object' && !Array.isArray(incoming))) {
+    return res.status(400).json({ error: 'Thiếu dữ liệu gradebooks' });
+  }
+  const merged = syncGradebooks(incoming);
+  broadcastRealtimeEvent({
+    type: 'GRADEBOOK_UPDATED',
+    gradebooks: merged,
+    dbStatus: getDatabaseMetrics(),
+  });
+  res.json({
+    success: true,
+    gradebooks: merged,
+  });
+});
+
+const handleDeleteGradebooks = (req: express.Request, res: express.Response) => {
+  const targetClass = req.query.className || req.body?.className;
+  const classNameStr = typeof targetClass === 'string' && targetClass.trim() ? targetClass.trim() : undefined;
+  const remaining = deleteGradebooks(classNameStr);
+  broadcastRealtimeEvent({
+    type: 'GRADEBOOK_UPDATED',
+    gradebooks: remaining,
+    dbStatus: getDatabaseMetrics(),
+  });
+  res.json({ success: true, gradebooks: remaining });
+};
+
+app.delete('/api/gradebooks', handleDeleteGradebooks);
+app.post('/api/gradebooks/delete', handleDeleteGradebooks);
 
 // API: Lấy danh sách học sinh các lớp (tải lên từ Excel)
 app.get('/api/student-roster', (_req, res) => {
@@ -964,8 +1015,16 @@ app.get('/api/events', (req, res) => {
     'Access-Control-Allow-Origin': '*',
   });
 
-  // Gửi thông báo kết nối thành công, số máy trạm và danh sách máy đang online
-  res.write(`data: ${JSON.stringify({ type: 'CONNECTED', clientsCount: sseClients.size + 1, onlineMachines: getOnlineMachinesList() })}\n\n`);
+  // Gửi thông báo kết nối thành công, số máy trạm, danh sách máy đang online và trạng thái khóa/sổ điểm
+  res.write(`data: ${JSON.stringify({
+    type: 'CONNECTED',
+    clientsCount: sseClients.size + 1,
+    onlineMachines: getOnlineMachinesList(),
+    allowSubmission: getAllowSubmission(),
+    allowedClasses: getAllowedClasses(),
+    lockedClasses: getLockedClasses(),
+    gradebooks: getAllGradebooks(),
+  })}\n\n`);
 
   sseClients.add(res);
 
