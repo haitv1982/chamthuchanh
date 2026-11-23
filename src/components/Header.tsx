@@ -153,11 +153,18 @@ export const Header: React.FC<HeaderProps> = ({
   const [aiStatus, setAiStatus] = useState<{ hasGeminiKey: boolean; model?: string } | null>(null);
 
   useEffect(() => {
-    if (isServerConfigModalOpen) {
+    if (isServerConfigModalOpen && isBackendConfigured()) {
       apiFetch('/api/ai-status')
-        .then((r) => r.json())
-        .then((d) => setAiStatus(d))
+        .then((r) => {
+          const cType = r.headers.get('content-type') || '';
+          return r.ok && cType.includes('application/json') ? r.json() : null;
+        })
+        .then((d) => {
+          if (d) setAiStatus(d);
+        })
         .catch(() => {});
+    } else if (isServerConfigModalOpen && !isBackendConfigured()) {
+      setAiStatus({ hasGeminiKey: false, model: 'Trình quét AI nội bộ (Vercel)' });
     }
   }, [isServerConfigModalOpen]);
 
@@ -285,37 +292,39 @@ export const Header: React.FC<HeaderProps> = ({
       return;
     }
 
-    // 2. Thử xác thực với máy chủ Express LAN nếu có API backend phản hồi JSON
-    try {
-      const res = await apiFetch('/api/verify-pin', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ pin: entered }),
-      }, 3000);
+    // 2. Thử xác thực với máy chủ Express LAN nếu đang chạy chế độ có backend
+    if (isBackendConfigured()) {
+      try {
+        const res = await apiFetch('/api/verify-pin', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ pin: entered }),
+        }, 3000);
 
-      const contentType = res.headers.get('content-type') || '';
-      if (res.ok && contentType.includes('application/json')) {
-        const data = await res.json();
-        if (data.success) {
-          setTeacherPin(entered);
-          try {
-            localStorage.setItem(STORAGE_KEY_TEACHER_PIN, entered);
-            localStorage.setItem('labgrade_teacher_pin', entered);
-          } catch {}
-          setIsPinModalOpen(false);
-          setPinInput('');
-          setPinError(null);
-          setIsVerifying(false);
-          if (onToggleRole) onToggleRole();
-          return;
-        } else {
-          setIsVerifying(false);
-          setPinError(data.error || 'Mã PIN không chính xác!');
-          return;
+        const contentType = res.headers.get('content-type') || '';
+        if (res.ok && contentType.includes('application/json')) {
+          const data = await res.json();
+          if (data.success) {
+            setTeacherPin(entered);
+            try {
+              localStorage.setItem(STORAGE_KEY_TEACHER_PIN, entered);
+              localStorage.setItem('labgrade_teacher_pin', entered);
+            } catch {}
+            setIsPinModalOpen(false);
+            setPinInput('');
+            setPinError(null);
+            setIsVerifying(false);
+            if (onToggleRole) onToggleRole();
+            return;
+          } else {
+            setIsVerifying(false);
+            setPinError(data.error || 'Mã PIN không chính xác!');
+            return;
+          }
         }
+      } catch {
+        // Backend LAN không phản hồi, chuyển sang đối chiếu với CSDL Đám mây
       }
-    } catch {
-      // Backend LAN không phản hồi (đang chạy trên Vercel hoặc static), chuyển sang đối chiếu với CSDL Đám mây
     }
 
     // 3. Chế độ Web đám mây (Vercel, GitHub Pages) hoặc khi ngoại tuyến:
@@ -406,26 +415,29 @@ export const Header: React.FC<HeaderProps> = ({
       expectedCurrentPin = (localStorage.getItem(STORAGE_KEY_TEACHER_PIN) || localStorage.getItem('labgrade_teacher_pin') || '1234').trim();
     }
 
-    // 1. Thử gửi cập nhật lên máy chủ phòng máy nội bộ (nếu có server LAN)
+    // 1. Thử gửi cập nhật lên máy chủ phòng máy nội bộ (chỉ khi có server LAN/Render)
     let syncedToBackend = false;
-    try {
-      const res = await apiFetch('/api/change-pin', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          currentPin: enteredCurrent,
-          newPin: enteredNew,
-        }),
-      }, 3000);
-      const data = await res.json().catch(() => ({}));
-      if (res.ok && data.success) {
-        syncedToBackend = true;
-      } else if (res.status === 401 || (data.error && data.error.includes('hiện tại'))) {
-        setChangePinError(data.error || 'Mã PIN hiện tại không chính xác!');
-        return;
+    if (isBackendConfigured()) {
+      try {
+        const res = await apiFetch('/api/change-pin', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            currentPin: enteredCurrent,
+            newPin: enteredNew,
+          }),
+        }, 3000);
+        const cType = res.headers.get('content-type') || '';
+        const data = cType.includes('application/json') ? await res.json().catch(() => ({})) : {};
+        if (res.ok && data.success) {
+          syncedToBackend = true;
+        } else if (res.status === 401 || (data.error && data.error.includes('hiện tại'))) {
+          setChangePinError(data.error || 'Mã PIN hiện tại không chính xác!');
+          return;
+        }
+      } catch {
+        // Backend LAN không phản hồi
       }
-    } catch {
-      // Backend LAN không phản hồi (ví dụ chạy trên Vercel)
     }
 
     // 2. Nếu không có backend LAN, tự đối chiếu mã PIN hiện tại với CSDL Đám mây / local
@@ -1026,10 +1038,14 @@ export const Header: React.FC<HeaderProps> = ({
             <div className="p-3.5 rounded-2xl bg-slate-50 border border-slate-200 space-y-2">
               <div className="flex items-center justify-between">
                 <span className="text-xs font-bold text-slate-600">Trạng thái CSDL:</span>
-                {isRealtimeConnected || pingResult?.ok ? (
+                {isRealtimeConnected || pingResult?.ok || (isFirebaseReady && !isBackendConfigured()) ? (
                   <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-black bg-emerald-100 text-emerald-800 border border-emerald-300">
                     <Wifi className="w-3.5 h-3.5 text-emerald-600" />
-                    <span>Đang kết nối thời gian thực {pingResult?.latencyMs ? `(${pingResult.latencyMs} ms)` : ''}</span>
+                    <span>
+                      {isBackendConfigured()
+                        ? `Đang kết nối thời gian thực ${pingResult?.latencyMs ? `(${pingResult.latencyMs} ms)` : ''}`
+                        : 'Đang đồng bộ Cloud Firestore (Vercel Miễn Phí)'}
+                    </span>
                   </span>
                 ) : pingResult && !pingResult.ok ? (
                   <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-black bg-rose-100 text-rose-800 border border-rose-300">
@@ -1069,13 +1085,13 @@ export const Header: React.FC<HeaderProps> = ({
                     <span>Gemini AI đã kích hoạt</span>
                   </span>
                 ) : (
-                  <span className="font-bold text-amber-700 bg-amber-50 px-2 py-0.5 rounded-full border border-amber-200 text-[11px]" title="Để bật AI chấm thông minh, hãy thêm biến GEMINI_API_KEY trên Render">
-                    Bộ lọc từ khóa (Chưa cài GEMINI_API_KEY)
+                  <span className="font-bold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-full border border-emerald-200 text-[11px]" title="Tự động quét cấu trúc Word/PPT/Excel/Scratch và chống sao chép ngay trên trình duyệt, không tốn phí máy chủ">
+                    Bộ quét thông minh & Chống sao chép (Miễn phí)
                   </span>
                 )}
               </div>
 
-              {pingResult && !pingResult.ok && (
+              {pingResult && !pingResult.ok && isBackendConfigured() && (
                 <p className="text-[11px] text-rose-600 bg-rose-50 p-2 rounded-xl border border-rose-200 font-medium">
                   {pingResult.error}
                 </p>
@@ -1193,18 +1209,18 @@ export const Header: React.FC<HeaderProps> = ({
               )}
             </div>
 
-            {/* Hướng dẫn chi tiết: Làm thế nào để chạy mượt như web động */}
+            {/* Hướng dẫn chi tiết: Chạy Vercel + Firebase Miễn phí 100% hoặc LAN nội bộ */}
             <div className="p-3 bg-slate-50 border border-slate-200 rounded-2xl text-[11px] text-slate-700 space-y-1.5">
               <p className="font-bold flex items-center gap-1 text-slate-900">
                 <Sparkles className="w-3.5 h-3.5 text-blue-600 shrink-0" />
-                <span>Giải pháp để hệ thống chạy mượt như Web Động trực tuyến:</span>
+                <span>2 Cách triển khai mượt mà, không lo hết băng thông tính phí:</span>
               </p>
               <ul className="list-disc pl-4 space-y-1 text-slate-600 leading-relaxed">
                 <li>
-                  <strong>Cách 1 (Mạng nội bộ phòng máy - Tối ưu nhất):</strong> Máy giáo viên mở ứng dụng và khởi chạy server (<code className="bg-slate-200 px-1 rounded">npm start</code>). Các máy học sinh chỉ cần truy cập địa chỉ IP của máy giáo viên (ví dụ <code className="bg-slate-200 px-1 rounded">http://192.168.1.X:3000</code>). Mọi cập nhật DS lớp và bài nộp chạy tức thời 100%.
+                  <strong>Cách 1 (Vercel + Firebase Cloud - 100 GB/tháng miễn phí):</strong> Đưa mã nguồn lên Vercel bình thường, để trống ô URL máy chủ ở trên. Mọi dữ liệu điểm SP1, SP2..., khóa/mở lớp, bài nộp, và trạng thái Online/Offline từng máy đều tự đồng bộ tức thời qua Firebase Cloud mà không tốn tiền thuê Render!
                 </li>
                 <li>
-                  <strong>Cách 2 (Web Động Online 24/7 trên Internet):</strong> Đưa toàn bộ mã nguồn lên Render.com hoặc Railway (miễn phí). Khi đó toàn trường có 1 link web động duy nhất, học sinh và giáo viên mở bất kỳ đâu đều tự động cập nhật ngay trên web.
+                  <strong>Cách 2 (Mạng nội bộ LAN phòng máy - 0 tốn băng thông Internet):</strong> Chạy lệnh <code className="bg-slate-200 px-1 rounded">npm start</code> trên máy giáo viên. Các máy học sinh truy cập IP phòng máy (<code className="bg-slate-200 px-1 rounded">http://192.168.1.X:3000</code>), tốc độ mili-giây kể cả khi mất mạng Internet.
                 </li>
               </ul>
             </div>

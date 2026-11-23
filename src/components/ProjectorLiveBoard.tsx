@@ -24,7 +24,13 @@ import { SCHOOL_CLASSES, normalizeClassName } from '../data/classes';
 import { apiFetch, isBackendConfigured } from '../utils/apiConfig';
 import { realtimeSync } from '../utils/realtimeSync';
 import { playPlagiarismWarningSound } from '../utils/antiPlagiarism';
-import { isFirebaseReady, fetchSettingsFromCloud, subscribeToSubmissionsCloud } from '../services/firebase';
+import {
+  isFirebaseReady,
+  fetchSettingsFromCloud,
+  subscribeToSubmissionsCloud,
+  subscribeToPresenceCloud,
+  PRESENCE_CLOUD_TTL_MS,
+} from '../services/firebase';
 import { getTodayDateString, isSubmittedToday, sanitizeSubmission } from '../utils/storageManager';
 import { downloadSubmissionProductFile } from '../utils/fileDownload';
 
@@ -214,10 +220,12 @@ export const ProjectorLiveBoard: React.FC<ProjectorLiveBoardProps> = ({
       }
     });
 
-    // 2. Kênh Firebase Firestore đám mây (chỉ dùng khi chạy trên Vercel/hosting tĩnh chưa có máy chủ Render/LAN)
-    let unsubCloud: (() => void) | null = null;
+    // 2. Kênh Firebase Firestore đám mây (chỉ dùng khi chạy trên Vercel/hosting tĩnh chưa có máy chủ LAN)
+    let unsubCloudSubs: (() => void) | null = null;
+    let unsubCloudPresence: (() => void) | null = null;
+    let prunePresenceTimer: any = null;
     if (isFirebaseReady && !isBackendConfigured()) {
-      unsubCloud = subscribeToSubmissionsCloud((cloudSubs) => {
+      unsubCloudSubs = subscribeToSubmissionsCloud((cloudSubs) => {
         if (Array.isArray(cloudSubs)) {
           const todayStr = getTodayDateString();
           const valid = cloudSubs
@@ -240,22 +248,44 @@ export const ProjectorLiveBoard: React.FC<ProjectorLiveBoardProps> = ({
           setLastSyncTime(new Date().toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit', second: '2-digit' }));
         }
       });
+
+      unsubCloudPresence = subscribeToPresenceCloud((machines) => {
+        setLiveOnlineMachines(machines);
+      });
+
+      prunePresenceTimer = setInterval(() => {
+        const cutoff = Date.now() - PRESENCE_CLOUD_TTL_MS;
+        setLiveOnlineMachines((prev) => {
+          const next = prev.filter((m) => m.lastSeen > cutoff);
+          return next.length === prev.length ? prev : next;
+        });
+      }, 15000);
     }
 
     return () => {
       if (bc) bc.close();
       unsubSSE();
-      if (unsubCloud) unsubCloud();
+      if (unsubCloudSubs) unsubCloudSubs();
+      if (unsubCloudPresence) unsubCloudPresence();
+      if (prunePresenceTimer) clearInterval(prunePresenceTimer);
     };
   }, []);
 
-  // 3. Tự động quét dự phòng liên tục mỗi 2.0 giây để đảm bảo 100% không sót bất kỳ bài nộp nào
+  // 3. Tự động quét dự phòng tiết kiệm băng thông (chỉ chạy khi kết nối backend LAN/Render)
+  const liveSubmissionsRef = React.useRef<Submission[]>(liveSubmissions);
   useEffect(() => {
+    liveSubmissionsRef.current = liveSubmissions;
+  }, [liveSubmissions]);
+
+  useEffect(() => {
+    if (!isBackendConfigured()) return;
     let isMounted = true;
     const fetchLabUpdates = async () => {
+      if (document.hidden) return;
       try {
         const res = await apiFetch('/api/submissions');
-        if (res.ok) {
+        const cType = res.headers.get('content-type') || '';
+        if (res.ok && cType.includes('application/json')) {
           const data = await res.json();
           if (isMounted && Array.isArray(data.onlineMachines)) {
             setLiveOnlineMachines(data.onlineMachines);
@@ -268,8 +298,9 @@ export const ProjectorLiveBoard: React.FC<ProjectorLiveBoardProps> = ({
               .filter((s: Submission) => s.practiceDate === todayStr || isSubmittedToday(s.latestSubmittedAt, todayStr));
 
             // Phát hiện máy vừa mới nộp bài hoặc cập nhật điểm số
+            const prevList = liveSubmissionsRef.current;
             const newlyUpdated = validSubs.find((s: Submission) => {
-              const old = liveSubmissions.find((o) => o.id === s.id);
+              const old = prevList.find((o) => o.id === s.id);
               return !old || s.attempts?.length !== old.attempts?.length || s.highestScore !== old.highestScore;
             });
 
@@ -287,12 +318,12 @@ export const ProjectorLiveBoard: React.FC<ProjectorLiveBoardProps> = ({
       } catch {}
     };
 
-    const interval = setInterval(fetchLabUpdates, 2000);
+    const interval = setInterval(fetchLabUpdates, 12000);
     return () => {
       isMounted = false;
       clearInterval(interval);
     };
-  }, [liveSubmissions]);
+  }, []);
 
   // Countdown timer effect
   useEffect(() => {
@@ -344,26 +375,33 @@ export const ProjectorLiveBoard: React.FC<ProjectorLiveBoardProps> = ({
           return;
         }
 
-        try {
-          const verifyRes = await apiFetch('/api/verify-pin', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ pin: teacherPinInput.trim() }),
-          }, 3000);
-          const contentType = verifyRes.headers.get('content-type') || '';
-          if (verifyRes.ok && contentType.includes('application/json')) {
-            const vData = await verifyRes.json().catch(() => ({}));
-            if (!vData.success) {
-              setPinErrorMsg(vData.error || 'Mã PIN Giáo viên không chính xác!');
-              return;
+        if (isBackendConfigured()) {
+          try {
+            const verifyRes = await apiFetch('/api/verify-pin', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ pin: teacherPinInput.trim() }),
+            }, 3000);
+            const contentType = verifyRes.headers.get('content-type') || '';
+            if (verifyRes.ok && contentType.includes('application/json')) {
+              const vData = await verifyRes.json().catch(() => ({}));
+              if (!vData.success) {
+                setPinErrorMsg(vData.error || 'Mã PIN Giáo viên không chính xác!');
+                return;
+              }
+            } else {
+              if (teacherPinInput.trim() !== expectedPin.trim()) {
+                setPinErrorMsg('Mã PIN Giáo viên không chính xác!');
+                return;
+              }
             }
-          } else {
+          } catch {
             if (teacherPinInput.trim() !== expectedPin.trim()) {
               setPinErrorMsg('Mã PIN Giáo viên không chính xác!');
               return;
             }
           }
-        } catch {
+        } else {
           if (teacherPinInput.trim() !== expectedPin.trim()) {
             setPinErrorMsg('Mã PIN Giáo viên không chính xác!');
             return;
@@ -376,7 +414,7 @@ export const ProjectorLiveBoard: React.FC<ProjectorLiveBoardProps> = ({
     try {
       if (onClearSubmissions) {
         await onClearSubmissions(activeClassFilter === 'Tất cả' ? undefined : activeClassFilter);
-      } else {
+      } else if (isBackendConfigured()) {
         await apiFetch('/api/submissions/clear', { method: 'POST' });
         await apiFetch('/api/submissions', { method: 'DELETE' });
       }

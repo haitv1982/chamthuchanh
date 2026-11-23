@@ -140,7 +140,7 @@ function fallbackHeuristicGrading(params: {
   return scanAndGradeProduct(params);
 }
 
-// Helper phát sóng bài nộp siêu nhẹ (< 1.5 KB, không chứa ảnh base64 nặng) tới máy chiếu & máy giáo viên
+// Helper phát sóng bài nộp siêu nhẹ (< 2 KB, không chứa fileDataUrl/imageBase64 nặng) tới máy chiếu & máy giáo viên
 function createLightweightSubmission(sub: any) {
   if (!sub) return sub;
   return {
@@ -151,6 +151,10 @@ function createLightweightSubmission(sub: any) {
       fileName: att.fileName,
       fileSize: att.fileSize,
       fileLastModified: att.fileLastModified,
+      fileContent: typeof att.fileContent === 'string' && att.fileContent.length > 2000
+        ? att.fileContent.slice(0, 2000)
+        : (att.fileContent || ''),
+      hasOriginalFile: Boolean(att.fileDataUrl || att.imageBase64),
       score: att.score,
       aiComparisonDetails: att.aiComparisonDetails,
       criteriaResults: att.criteriaResults,
@@ -714,9 +718,11 @@ app.get('/api/ai-status', (_req, res) => {
   });
 });
 
-// API: Lấy toàn bộ danh sách bài nộp và trạng thái CSDL thời gian thực
-app.get('/api/submissions', (_req, res) => {
-  const submissions = getAllSubmissions();
+// API: Lấy danh sách bài nộp thu gọn (tiết kiệm 95% băng thông) và trạng thái CSDL thời gian thực
+app.get('/api/submissions', (req, res) => {
+  const full = req.query.full === '1';
+  const rawSubmissions = getAllSubmissions();
+  const submissions = full ? rawSubmissions : rawSubmissions.map(createLightweightSubmission);
   const dbStatus = getDatabaseMetrics();
   res.json({
     submissions,
@@ -726,6 +732,25 @@ app.get('/api/submissions', (_req, res) => {
     lockedClasses: getLockedClasses(),
     onlineMachines: getOnlineMachinesList(),
     dbStatus,
+  });
+});
+
+// API: Tải tệp gốc nhị phân (fileDataUrl / imageBase64) theo yêu cầu khi giáo viên bấm Tải về
+app.get('/api/submissions/:id/file', (req, res) => {
+  const subId = req.params.id;
+  const attemptNum = Number(req.query.attempt || 0);
+  const all = getAllSubmissions();
+  const sub = all.find((s) => s.id === subId);
+  if (!sub || !Array.isArray(sub.attempts) || sub.attempts.length === 0) {
+    return res.status(404).json({ error: 'Không tìm thấy bài nộp' });
+  }
+  const att = (attemptNum > 0 ? sub.attempts.find((a) => a.attemptNumber === attemptNum) : null)
+    || sub.attempts[sub.attempts.length - 1];
+  res.json({
+    fileName: att.fileName,
+    fileDataUrl: att.fileDataUrl,
+    imageBase64: att.imageBase64,
+    fileContent: att.fileContent,
   });
 });
 
@@ -786,7 +811,7 @@ app.post('/api/submissions/sync-batch', (req, res) => {
   broadcastRealtimeEvent({
     type: 'SUBMISSIONS_SYNCED',
     addedCount: result.count,
-    submissions: getAllSubmissions(),
+    submissions: getAllSubmissions().map(createLightweightSubmission),
     gradebooks: getAllGradebooks(),
     dbStatus: getDatabaseMetrics(),
   });

@@ -126,14 +126,22 @@ export async function testServerConnection(customTargetUrl?: string): Promise<{
 }> {
   const target = (customTargetUrl ?? getServerBaseUrl()) || window.location.origin;
   const cleanTarget = target.replace(/\/+$/, '');
-  const testUrl = `${cleanTarget}/api/health`;
+  if (!customTargetUrl && !isBackendConfigured()) {
+    return {
+      ok: false,
+      latencyMs: 0,
+      url: cleanTarget,
+      error: 'Đang chạy chế độ Đám mây (Vercel + Firebase Firestore)',
+    };
+  }
 
   const start = performance.now();
   try {
-    const res = await apiFetch('/api/health', { method: 'GET' }, 5000);
+    const res = await fetch(`${cleanTarget}/api/health`, { method: 'GET', cache: 'no-cache' });
     const latencyMs = Math.round(performance.now() - start);
+    const contentType = res.headers.get('content-type') || '';
 
-    if (res.ok) {
+    if (res.ok && contentType.includes('application/json')) {
       const data = await res.json().catch(() => ({}));
       return {
         ok: true,
@@ -146,7 +154,7 @@ export async function testServerConnection(customTargetUrl?: string): Promise<{
       ok: false,
       latencyMs,
       url: cleanTarget,
-      error: `Máy chủ phản hồi mã lỗi HTTP ${res.status}`,
+      error: res.ok ? 'Hosting tĩnh không có máy chủ Express (/api/health trả về HTML)' : `Máy chủ phản hồi mã lỗi HTTP ${res.status}`,
     };
   } catch (err: any) {
     const latencyMs = Math.round(performance.now() - start);
@@ -169,9 +177,11 @@ export async function fetchNetworkInfo(): Promise<{
   activeClients: number;
   serverTime: string;
 } | null> {
+  if (!isBackendConfigured()) return null;
   try {
     const res = await apiFetch('/api/network-info', { method: 'GET' }, 3000);
-    if (res.ok) {
+    const contentType = res.headers.get('content-type') || '';
+    if (res.ok && contentType.includes('application/json')) {
       return await res.json();
     }
     return null;

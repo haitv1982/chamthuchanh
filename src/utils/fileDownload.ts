@@ -1,6 +1,7 @@
 import JSZip from 'jszip';
 import * as XLSX from 'xlsx';
 import { Submission, SubmissionAttempt } from '../types';
+import { apiFetch, isBackendConfigured } from './apiConfig';
 
 /**
  * Chuyển đổi chuỗi Data URL Base64 thành binary Blob chính xác tuyệt đối từng byte
@@ -163,7 +164,7 @@ export async function downloadSubmissionProductFile(
     return false;
   }
 
-  const attempt = targetAttempt || sub.attempts[sub.attempts.length - 1];
+  let attempt = targetAttempt || sub.attempts[sub.attempts.length - 1];
   const safeStudent = (sub.studentLeader || 'HocSinh').trim().replace(/[/\\?%*:|"<>]/g, '_');
   const safeMachine = (sub.machineNumber || 'May').trim().replace(/\s+/g, '');
   const safeClass = (sub.className || 'Lop').trim().replace(/\s+/g, '');
@@ -171,6 +172,29 @@ export async function downloadSubmissionProductFile(
   const ext = rawFileName.split('.').pop()?.toLowerCase() || '';
 
   const finalDownloadName = `${safeClass}_${safeMachine}_${safeStudent}_${rawFileName}`;
+
+  // Nếu đang chạy chế độ máy chủ backend và bản ghi thu gọn chưa mang file nhị phân, tải trực tiếp tệp gốc theo yêu cầu
+  if (!attempt.fileDataUrl && !attempt.imageBase64 && isBackendConfigured() && sub.id) {
+    try {
+      const fileRes = await apiFetch(
+        `/api/submissions/${encodeURIComponent(sub.id)}/file?attempt=${encodeURIComponent(String(attempt.attemptNumber || ''))}`,
+        { method: 'GET' },
+        10000
+      );
+      const cType = fileRes.headers.get('content-type') || '';
+      if (fileRes.ok && cType.includes('application/json')) {
+        const fileData = await fileRes.json();
+        attempt = {
+          ...attempt,
+          fileDataUrl: fileData.fileDataUrl || attempt.fileDataUrl,
+          imageBase64: fileData.imageBase64 || attempt.imageBase64,
+          fileContent: fileData.fileContent || attempt.fileContent,
+        };
+      }
+    } catch {
+      // Fallback sang dữ liệu văn bản hiện có
+    }
+  }
 
   // 1. ƯU TIÊN SỐ 1: Có dữ liệu nhị phân Data URL gốc (fileDataUrl)
   if (attempt.fileDataUrl && attempt.fileDataUrl.startsWith('data:')) {

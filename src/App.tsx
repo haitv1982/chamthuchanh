@@ -51,6 +51,12 @@ import {
   batchSaveGradebooksToCloud,
   fetchAllGradebooksFromCloud,
   deleteGradebooksFromCloud,
+  updatePresenceCloud,
+  markPresenceOfflineBeaconCloud,
+  buildPresenceDocId,
+  fetchPresenceFromCloud,
+  subscribeToPresenceCloud,
+  PRESENCE_CLOUD_TTL_MS,
 } from './services/firebase';
 
 const STORAGE_KEY_ASSIGNMENTS = 'labgrade_assignments_v7_grade6_grade7_grade8_grade9';
@@ -247,17 +253,20 @@ export default function App() {
         }
       }
 
-      // 2. Dự phòng máy chủ backend nội bộ
-      const res = await apiFetch('/api/student-roster');
-      if (res.ok) {
-        const data = await res.json();
-        if (Array.isArray(data.students) && data.students.length > 0) {
-          setStudentRoster(data.students);
-          try {
-            localStorage.setItem('labgrade_student_roster', JSON.stringify(data.students));
-          } catch {}
-          if (isFirebaseReady) {
-            await saveRosterToCloud(data.students);
+      // 2. Dự phòng máy chủ backend nội bộ (chỉ gọi khi có backend thực)
+      if (isBackendConfigured()) {
+        const res = await apiFetch('/api/student-roster');
+        const cType = res.headers.get('content-type') || '';
+        if (res.ok && cType.includes('application/json')) {
+          const data = await res.json();
+          if (Array.isArray(data.students) && data.students.length > 0) {
+            setStudentRoster(data.students);
+            try {
+              localStorage.setItem('labgrade_student_roster', JSON.stringify(data.students));
+            } catch {}
+            if (isFirebaseReady) {
+              await saveRosterToCloud(data.students);
+            }
           }
         }
       }
@@ -378,8 +387,12 @@ export default function App() {
 
   // Kênh thời gian thực liên thông dữ liệu tức thời giữa Máy Giáo Viên và tất cả Máy Học Sinh
   useEffect(() => {
-    // 1. Kết nối kênh SSE thời gian thực tới máy chủ
-    realtimeSync.connect();
+    // 1. Kết nối kênh SSE thời gian thực tới máy chủ (chỉ khi có backend LAN/Render)
+    if (isBackendConfigured()) {
+      realtimeSync.connect();
+    } else if (isFirebaseReady) {
+      setIsRealtimeConnected(true);
+    }
 
     const unsubscribe = realtimeSync.subscribe((event) => {
       if (event.type === 'CONNECTION_STATUS') {
@@ -688,9 +701,10 @@ export default function App() {
     };
   }, []);
 
-  // Chỉ lắng nghe luồng bài nộp Cloud liên tục ở chế độ Giáo viên khi chạy trên Vercel/Hosting tĩnh
+  // Chỉ lắng nghe luồng bài nộp & trạng thái Online/Offline Cloud liên tục ở chế độ Giáo viên khi chạy trên Vercel/Hosting tĩnh
   useEffect(() => {
     if (!isFirebaseReady || isBackendConfigured() || !isTeacherRole) return;
+
     const unsubCloudSubs = subscribeToSubmissionsCloud(
       (cloudSubs) => {
         if (Array.isArray(cloudSubs)) {
@@ -721,8 +735,27 @@ export default function App() {
       },
       () => {}
     );
+
+    const unsubCloudPresence = subscribeToPresenceCloud(
+      (machines) => {
+        setOnlineMachines(machines);
+      },
+      () => {}
+    );
+
+    // Tự động loại bỏ máy quá hạn tín hiệu nếu máy học sinh mất điện/rớt mạng đột ngột
+    const prunePresenceTimer = setInterval(() => {
+      const cutoff = Date.now() - PRESENCE_CLOUD_TTL_MS;
+      setOnlineMachines((prev) => {
+        const next = prev.filter((m) => m.lastSeen > cutoff);
+        return next.length === prev.length ? prev : next;
+      });
+    }, 15000);
+
     return () => {
       if (unsubCloudSubs) unsubCloudSubs();
+      if (unsubCloudPresence) unsubCloudPresence();
+      clearInterval(prunePresenceTimer);
     };
   }, [isTeacherRole]);
 
@@ -747,10 +780,8 @@ export default function App() {
     localStorage.setItem('labgrade_user_role', isTeacherRole ? 'teacher' : 'student');
   }, [isTeacherRole]);
 
-  // Gửi tín hiệu Online / Offline (Heartbeat) của máy học sinh lên máy chủ để màn hình máy chiếu nhận biết chính xác
+  // Gửi tín hiệu Online / Offline (Heartbeat) của máy học sinh lên máy chủ hoặc Cloud Firestore (Vercel) để màn hình máy chiếu nhận biết chính xác
   useEffect(() => {
-    if (!isBackendConfigured()) return;
-
     let clientId = '';
     try {
       clientId = sessionStorage.getItem('labgrade_client_session_id') || '';
@@ -766,55 +797,182 @@ export default function App() {
       ? machineNumber
       : '';
 
-    const sendHeartbeat = () => {
-      apiFetch('/api/presence/heartbeat', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          clientId,
-          machineNumber: activeMachine,
-          className: userClassName,
-          studentLeader: studentLeader.trim(),
-          isTeacher: isTeacherRole,
-        }),
-      }, 4000)
-        .then((res) => (res.ok ? res.json() : null))
-        .then((data) => {
-          if (data && Array.isArray(data.onlineMachines)) {
-            setOnlineMachines(data.onlineMachines);
+    // CHẾ ĐỘ 1: Có backend Express (LAN phòng máy / Render)
+    if (isBackendConfigured()) {
+      const sendHeartbeat = () => {
+        if (document.hidden) return;
+        apiFetch('/api/presence/heartbeat', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            clientId,
+            machineNumber: activeMachine,
+            className: userClassName,
+            studentLeader: studentLeader.trim(),
+            isTeacher: isTeacherRole,
+          }),
+        }, 4000)
+          .then((res) => (res.ok ? res.json() : null))
+          .then((data) => {
+            if (data && Array.isArray(data.onlineMachines)) {
+              setOnlineMachines(data.onlineMachines);
+            }
+          })
+          .catch(() => {});
+      };
+
+      sendHeartbeat();
+      const hbInterval = setInterval(sendHeartbeat, 18000);
+      const handleVisibility = () => {
+        if (!document.hidden) sendHeartbeat();
+      };
+      document.addEventListener('visibilitychange', handleVisibility);
+
+      const handleOfflineBeacon = () => {
+        try {
+          const offlineUrl = getApiUrl('/api/presence/offline');
+          const payload = JSON.stringify({ clientId });
+          if (navigator.sendBeacon) {
+            const blob = new Blob([payload], { type: 'application/json' });
+            navigator.sendBeacon(offlineUrl, blob);
           }
-        })
-        .catch(() => {});
+        } catch {}
+      };
+
+      window.addEventListener('pagehide', handleOfflineBeacon);
+      window.addEventListener('beforeunload', handleOfflineBeacon);
+
+      return () => {
+        clearInterval(hbInterval);
+        document.removeEventListener('visibilitychange', handleVisibility);
+        window.removeEventListener('pagehide', handleOfflineBeacon);
+        window.removeEventListener('beforeunload', handleOfflineBeacon);
+      };
+    }
+
+    // CHẾ ĐỘ 2: Hosting tĩnh Vercel + Cloud Firestore (Không cần Render backend)
+    if (!isFirebaseReady) return;
+
+    if (isTeacherRole || !activeMachine) {
+      // Nếu chuyển sang vai trò Giáo Viên trên máy đó -> báo Offline máy trạm nếu trước đó vừa điểm danh
+      if (hasExplicitMachine && machineNumber) {
+        const docId = buildPresenceDocId(clientId, userClassName, machineNumber);
+        markPresenceOfflineBeaconCloud(docId);
+      }
+      return;
+    }
+
+    const sendCloudHeartbeat = () => {
+      if (document.hidden) return;
+      updatePresenceCloud({
+        clientId,
+        machineNumber: activeMachine,
+        className: userClassName,
+        studentLeader: studentLeader.trim(),
+        online: true,
+      }).catch(() => {});
     };
 
-    sendHeartbeat();
-    const hbInterval = setInterval(sendHeartbeat, 12000);
+    sendCloudHeartbeat();
+    const cloudHbInterval = setInterval(sendCloudHeartbeat, 45000);
+    const handleVisibilityCloud = () => {
+      if (!document.hidden) sendCloudHeartbeat();
+    };
+    document.addEventListener('visibilitychange', handleVisibilityCloud);
 
-    const handleOfflineBeacon = () => {
-      try {
-        const offlineUrl = getApiUrl('/api/presence/offline');
-        const payload = JSON.stringify({ clientId });
-        if (navigator.sendBeacon) {
-          const blob = new Blob([payload], { type: 'application/json' });
-          navigator.sendBeacon(offlineUrl, blob);
-        }
-      } catch {}
+    const presenceDocId = buildPresenceDocId(clientId, userClassName, activeMachine);
+    const handleCloudOffline = () => {
+      markPresenceOfflineBeaconCloud(presenceDocId);
     };
 
-    window.addEventListener('pagehide', handleOfflineBeacon);
-    window.addEventListener('beforeunload', handleOfflineBeacon);
+    window.addEventListener('pagehide', handleCloudOffline);
+    window.addEventListener('beforeunload', handleCloudOffline);
 
     return () => {
-      clearInterval(hbInterval);
-      window.removeEventListener('pagehide', handleOfflineBeacon);
-      window.removeEventListener('beforeunload', handleOfflineBeacon);
+      clearInterval(cloudHbInterval);
+      document.removeEventListener('visibilitychange', handleVisibilityCloud);
+      window.removeEventListener('pagehide', handleCloudOffline);
+      window.removeEventListener('beforeunload', handleCloudOffline);
+      markPresenceOfflineBeaconCloud(presenceDocId);
     };
   }, [isTeacherRole, hasExplicitMachine, machineNumber, userClassName, studentLeader]);
 
   // Fetch session status & sync submissions with network timeout protection
   const refreshSubmissionsAndStatus = async () => {
-    // 1. Kiểm tra và đẩy hàng đợi bài nộp offline nếu có
     const pendingQueue = getPendingSyncQueue();
+
+    // CHẾ ĐỘ VERCEL + FIREBASE CLOUD (Không gọi /api/* thừa gây tốn băng thông & trả HTML)
+    if (!isBackendConfigured()) {
+      if (!isFirebaseReady) return;
+      try {
+        if (pendingQueue.length > 0) {
+          const okBatch = await batchSaveSubmissionsToCloud(pendingQueue).catch(() => false);
+          if (okBatch) clearPendingSyncQueue();
+        }
+
+        const [cloudSubs, cloudGbs, cloudSettings, cloudRoster, cloudPresence] = await Promise.all([
+          fetchSubmissionsFromCloud().catch(() => []),
+          fetchAllGradebooksFromCloud().catch(() => ({})),
+          fetchSettingsFromCloud().catch(() => null),
+          fetchRosterFromCloud().catch(() => []),
+          fetchPresenceFromCloud().catch(() => []),
+        ]);
+
+        if (cloudSettings) {
+          if (typeof cloudSettings.allowSubmission === 'boolean') {
+            setAllowSubmission(cloudSettings.allowSubmission);
+          }
+          if (Array.isArray(cloudSettings.allowedClasses)) {
+            setAllowedClasses(cloudSettings.allowedClasses);
+          }
+          if (Array.isArray(cloudSettings.lockedClasses)) {
+            setLockedClasses(cloudSettings.lockedClasses);
+          }
+        }
+
+        if (Array.isArray(cloudSubs)) {
+          const cleanCloudSubs = cloudSubs
+            .filter((s) => s && !String(s.id).startsWith('mock-'))
+            .map((s) => sanitizeSubmission(s));
+          setSubmissions(cleanCloudSubs);
+          saveSubmissionsSafely(cleanCloudSubs);
+
+          setPermanentGradebooks((prev) => {
+            let next = cloudGbs && Object.keys(cloudGbs).length > 0
+              ? mergeGradebooksClient(prev, cloudGbs)
+              : prev;
+            cleanCloudSubs.forEach((s) => {
+              next = upsertGradebookFromSubmissionClient(next, s);
+            });
+            return next;
+          });
+
+          setDbStatus((prev) => ({
+            ...prev,
+            status: 'connected',
+            isPersistent: true,
+            totalSubmissions: cleanCloudSubs.length,
+            lastUpdated: new Date().toLocaleTimeString('vi-VN'),
+          }));
+        } else if (cloudGbs && Object.keys(cloudGbs).length > 0) {
+          setPermanentGradebooks((prev) => mergeGradebooksClient(prev, cloudGbs));
+        }
+
+        if (Array.isArray(cloudRoster) && cloudRoster.length > 0) {
+          setStudentRoster(cloudRoster);
+        }
+
+        if (Array.isArray(cloudPresence)) {
+          setOnlineMachines(cloudPresence);
+        }
+
+        setIsRealtimeConnected(true);
+      } catch {}
+      return;
+    }
+
+    // CHẾ ĐỘ BACKEND NODE / LAN / RENDER
+    // 1. Kiểm tra và đẩy hàng đợi bài nộp offline nếu có
     if (pendingQueue.length > 0) {
       try {
         const batchRes = await apiFetch('/api/submissions/sync-batch', {
@@ -829,10 +987,11 @@ export default function App() {
       } catch {}
     }
 
-    // 2. Tải toàn bộ bài nộp và trạng thái CSDL mới nhất từ máy chủ
+    // 2. Tải danh sách bài nộp thu gọn và trạng thái CSDL mới nhất từ máy chủ
     try {
       const res = await apiFetch('/api/submissions', { method: 'GET' }, 15000);
-      if (res.ok) {
+      const cType = res.headers.get('content-type') || '';
+      if (res.ok && cType.includes('application/json')) {
         const data = await res.json();
         if (typeof data.allowSubmission === 'boolean') {
           setAllowSubmission(data.allowSubmission);
@@ -882,10 +1041,11 @@ export default function App() {
       // offline or network congestion resilience in busy computer lab
     }
 
-    // 3. Tự động đồng bộ danh sách học sinh từ CSDL máy chủ liên tục để máy học sinh luôn có danh sách mới nhất
+    // 3. Tự động đồng bộ danh sách học sinh từ CSDL máy chủ
     try {
       const rosterRes = await apiFetch('/api/student-roster', { method: 'GET' }, 15000);
-      if (rosterRes.ok) {
+      const rType = rosterRes.headers.get('content-type') || '';
+      if (rosterRes.ok && rType.includes('application/json')) {
         const rosterData = await rosterRes.json();
         if (Array.isArray(rosterData.students)) {
           setStudentRoster(rosterData.students);
@@ -921,22 +1081,24 @@ export default function App() {
       }
 
       let syncedServer = false;
-      try {
-        const res = await apiFetch('/api/gradebooks/sync', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ gradebooks: merged }),
-        }, 8000);
-        if (res.ok) {
-          const json = await res.json();
-          if (json?.gradebooks) {
-            const finalMerged = mergeGradebooksClient(merged, json.gradebooks);
-            setPermanentGradebooks(finalMerged);
-            saveGradebooksSafely(finalMerged);
+      if (isBackendConfigured()) {
+        try {
+          const res = await apiFetch('/api/gradebooks/sync', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ gradebooks: merged }),
+          }, 8000);
+          if (res.ok) {
+            const json = await res.json();
+            if (json?.gradebooks) {
+              const finalMerged = mergeGradebooksClient(merged, json.gradebooks);
+              setPermanentGradebooks(finalMerged);
+              saveGradebooksSafely(finalMerged);
+            }
+            syncedServer = true;
           }
-          syncedServer = true;
-        }
-      } catch {}
+        } catch {}
+      }
 
       if (typeof BroadcastChannel !== 'undefined') {
         try {
@@ -962,21 +1124,24 @@ export default function App() {
         return { success: true, count: 0 };
       }
       if (isFirebaseReady) {
-        batchSaveSubmissionsToCloud(currentList).catch((err) => {
+        await batchSaveSubmissionsToCloud(currentList).catch((err) => {
           console.warn('[Firebase Cloud] Lỗi batch sync:', err);
         });
       }
-      const res = await apiFetch('/api/submissions/sync-batch', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ submissions: currentList, isTeacherSync: true }),
-      }, 8000);
-      if (res.ok) {
-        const json = await res.json();
-        clearPendingSyncQueue();
-        await refreshSubmissionsAndStatus();
-        return { success: true, count: json.addedCount ?? currentList.length };
+      if (isBackendConfigured()) {
+        const res = await apiFetch('/api/submissions/sync-batch', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ submissions: currentList, isTeacherSync: true }),
+        }, 8000);
+        if (res.ok) {
+          const json = await res.json();
+          clearPendingSyncQueue();
+          await refreshSubmissionsAndStatus();
+          return { success: true, count: json.addedCount ?? currentList.length };
+        }
       }
+      clearPendingSyncQueue();
       return { success: true, count: currentList.length };
     } catch (err: any) {
       if (isFirebaseReady) {
@@ -989,21 +1154,23 @@ export default function App() {
   // Xóa sạch toàn bộ kết quả chấm ảo các ngày trước đây cả trên máy chủ, bộ nhớ đệm và các máy trạm
   const handleClearAllSubmissions = async (targetClass?: string): Promise<boolean> => {
     if (isFirebaseReady) {
-      deleteSubmissionsFromCloud(targetClass && targetClass !== 'Tất cả' ? targetClass : undefined).catch(() => {});
+      await deleteSubmissionsFromCloud(targetClass && targetClass !== 'Tất cả' ? targetClass : undefined).catch(() => {});
     }
-    try {
-      if (!targetClass || targetClass === 'Tất cả') {
-        await apiFetch('/api/submissions/clear', { method: 'POST' });
-        await apiFetch('/api/submissions', { method: 'DELETE' });
-      } else {
-        await apiFetch(`/api/submissions?className=${encodeURIComponent(targetClass)}`, { method: 'DELETE' });
-        await apiFetch('/api/submissions/delete', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ className: targetClass }),
-        });
-      }
-    } catch {}
+    if (isBackendConfigured()) {
+      try {
+        if (!targetClass || targetClass === 'Tất cả') {
+          await apiFetch('/api/submissions/clear', { method: 'POST' });
+          await apiFetch('/api/submissions', { method: 'DELETE' });
+        } else {
+          await apiFetch(`/api/submissions?className=${encodeURIComponent(targetClass)}`, { method: 'DELETE' });
+          await apiFetch('/api/submissions/delete', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ className: targetClass }),
+          });
+        }
+      } catch {}
+    }
 
     if (!targetClass || targetClass === 'Tất cả') {
       setSubmissions([]);
@@ -1033,15 +1200,17 @@ export default function App() {
   // Xóa bảng điểm vĩnh viễn khi giáo viên chủ động bấm xóa sổ điểm
   const handleClearGradebooks = async (targetClass?: string): Promise<boolean> => {
     if (isFirebaseReady) {
-      deleteGradebooksFromCloud(targetClass && targetClass !== 'Tất cả' ? targetClass : undefined).catch(() => {});
+      await deleteGradebooksFromCloud(targetClass && targetClass !== 'Tất cả' ? targetClass : undefined).catch(() => {});
     }
-    try {
-      if (!targetClass || targetClass === 'Tất cả') {
-        await apiFetch('/api/gradebooks', { method: 'DELETE' });
-      } else {
-        await apiFetch(`/api/gradebooks?className=${encodeURIComponent(targetClass)}`, { method: 'DELETE' });
-      }
-    } catch {}
+    if (isBackendConfigured()) {
+      try {
+        if (!targetClass || targetClass === 'Tất cả') {
+          await apiFetch('/api/gradebooks', { method: 'DELETE' });
+        } else {
+          await apiFetch(`/api/gradebooks?className=${encodeURIComponent(targetClass)}`, { method: 'DELETE' });
+        }
+      } catch {}
+    }
     if (!targetClass || targetClass === 'Tất cả') {
       setPermanentGradebooks({});
     } else {
@@ -1114,7 +1283,7 @@ export default function App() {
 
     // Đồng bộ tức thời lên Google Firebase Cloud Firestore (để máy xách tay và máy bàn thấy nhau ngay)
     if (isFirebaseReady) {
-      saveSettingsToCloud({
+      await saveSettingsToCloud({
         allowSubmission: allow ? true : allowSubmission,
         allowedClasses: nextAllowed,
         lockedClasses: nextLocked,
@@ -1123,20 +1292,21 @@ export default function App() {
       });
     }
 
-    try {
-      const res = await apiFetch('/api/session-status', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ allow, className: normTarget }),
-      }, 4000);
-      if (res.ok) {
-        console.log(`[Quyền Nộp Bài] Lớp ${normTarget}: ${allow ? 'MỞ CHO PHÉP NỘP' : 'ĐÃ KHÓA NỘP BÀI'}`);
+    if (isBackendConfigured()) {
+      try {
+        const res = await apiFetch('/api/session-status', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ allow, className: normTarget }),
+        }, 4000);
+        if (res.ok) {
+          console.log(`[Quyền Nộp Bài] Lớp ${normTarget}: ${allow ? 'MỞ CHO PHÉP NỘP' : 'ĐÃ KHÓA NỘP BÀI'}`);
+        }
+      } catch (err) {
+        console.warn('Lỗi gửi trạng thái khóa nộp bài tới máy chủ:', err);
       }
-    } catch (err) {
-      console.warn('Lỗi gửi trạng thái khóa nộp bài tới máy chủ:', err);
+      await refreshSubmissionsAndStatus();
     }
-
-    await refreshSubmissionsAndStatus();
   };
 
   // Khóa / Mở TẤT CẢ CÁC LỚP trong toàn hệ thống chỉ bằng 1 nút bấm
@@ -1167,7 +1337,7 @@ export default function App() {
     } catch {}
 
     if (isFirebaseReady) {
-      saveSettingsToCloud({
+      await saveSettingsToCloud({
         allowSubmission: allow,
         allowedClasses: nextAllowed,
         lockedClasses: nextLocked,
@@ -1176,22 +1346,23 @@ export default function App() {
       });
     }
 
-    try {
-      await apiFetch('/api/session-status', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          allow,
-          lockAll: true,
-          allClasses: allKnown,
-        }),
-      }, 4000);
-      console.log(`[Quyền Nộp Bài Toàn Trường] ${allow ? 'ĐÃ MỞ TẤT CẢ CÁC LỚP' : 'ĐÃ KHÓA TẤT CẢ CÁC LỚP'}`);
-    } catch (err) {
-      console.warn('Lỗi gửi trạng thái khóa tất cả lớp tới máy chủ:', err);
+    if (isBackendConfigured()) {
+      try {
+        await apiFetch('/api/session-status', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            allow,
+            lockAll: true,
+            allClasses: allKnown,
+          }),
+        }, 4000);
+        console.log(`[Quyền Nộp Bài Toàn Trường] ${allow ? 'ĐÃ MỞ TẤT CẢ CÁC LỚP' : 'ĐÃ KHÓA TẤT CẢ CÁC LỚP'}`);
+      } catch (err) {
+        console.warn('Lỗi gửi trạng thái khóa tất cả lớp tới máy chủ:', err);
+      }
+      await refreshSubmissionsAndStatus();
     }
-
-    await refreshSubmissionsAndStatus();
   };
 
   // Lưu danh sách học sinh từ Excel lên máy chủ và cập nhật state (Tích lũy từ lớp này sang lớp khác)
@@ -1252,13 +1423,15 @@ export default function App() {
     }
 
     // 4. Nếu có backend nội bộ (/api/student-roster), đồng bộ thêm
-    try {
-      await apiFetch('/api/student-roster', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ students: updatedRoster, mode: 'replace' }),
-      }, 5000);
-    } catch {}
+    if (isBackendConfigured()) {
+      try {
+        await apiFetch('/api/student-roster', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ students: updatedRoster, mode: 'replace' }),
+        }, 5000);
+      } catch {}
+    }
 
     return {
       success: true,
@@ -1298,12 +1471,14 @@ export default function App() {
       } catch {}
     }
 
-    try {
-      const url = className && className.trim()
-        ? `/api/student-roster?className=${encodeURIComponent(className.trim())}`
-        : '/api/student-roster';
-      await apiFetch(url, { method: 'DELETE' }, 4000);
-    } catch {}
+    if (isBackendConfigured()) {
+      try {
+        const url = className && className.trim()
+          ? `/api/student-roster?className=${encodeURIComponent(className.trim())}`
+          : '/api/student-roster';
+        await apiFetch(url, { method: 'DELETE' }, 4000);
+      } catch {}
+    }
 
     return true;
   };
@@ -1340,13 +1515,15 @@ export default function App() {
       } catch {}
     }
 
-    try {
-      await apiFetch('/api/student-roster/rename', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ oldClassName: oldClassName.trim(), newClassName: newClassName.trim() }),
-      }, 4000);
-    } catch {}
+    if (isBackendConfigured()) {
+      try {
+        await apiFetch('/api/student-roster/rename', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ oldClassName: oldClassName.trim(), newClassName: newClassName.trim() }),
+        }, 4000);
+      } catch {}
+    }
 
     return true;
   };
@@ -1370,12 +1547,17 @@ export default function App() {
     localStorage.setItem(STORAGE_KEY_CLASS, userClassName);
   }, [userClassName]);
 
-  // Background fetch from server to sync lab submissions if server has any & poll every 2.5 seconds
+  // Đồng bộ dữ liệu khi khởi động + polling dự phòng tiết kiệm băng thông
   useEffect(() => {
     refreshSubmissionsAndStatus();
+    // Khi chạy trên backend Express (Render/LAN), SSE đã đẩy tức thời nên chỉ cần quét dự phòng mỗi 15s (tiết kiệm >85% băng thông).
+    // Khi chạy trên Vercel, Cloud onSnapshot đã đồng bộ tức thời nên chỉ cần kiểm tra nhẹ mỗi 60s khi tab đang mở.
+    const pollMs = isBackendConfigured() ? 15000 : 60000;
     const interval = setInterval(() => {
-      refreshSubmissionsAndStatus();
-    }, 2500);
+      if (!document.hidden) {
+        refreshSubmissionsAndStatus();
+      }
+    }, pollMs);
     return () => clearInterval(interval);
   }, []);
 
@@ -1405,18 +1587,40 @@ export default function App() {
       throw new Error(`🔒 Tiết thực hành lớp ${data.className.toUpperCase()} chưa được giáo viên mở khóa nộp bài (hoặc tiết thực hành đã kết thúc). Em hãy chờ thầy/cô thông báo nhé!`);
     }
 
-    // Kiểm tra trực tiếp thời gian thực với máy chủ xem lớp này có đang mở nộp bài không
-    try {
-      const checkRes = await apiFetch(`/api/session-status?className=${encodeURIComponent(data.className)}`, { method: 'GET' }, 2000);
-      if (checkRes.ok) {
-        const checkData = await checkRes.json();
-        if (typeof checkData.allowSubmission === 'boolean' && !checkData.allowSubmission) {
-          throw new Error(`🔒 Giáo viên hiện đang KHÓA nhận bài nộp của lớp ${data.className.toUpperCase()}.`);
+    // Kiểm tra trực tiếp thời gian thực với máy chủ (hoặc Firebase Cloud trên Vercel) xem lớp này có đang mở nộp bài không
+    if (isBackendConfigured()) {
+      try {
+        const checkRes = await apiFetch(`/api/session-status?className=${encodeURIComponent(data.className)}`, { method: 'GET' }, 2000);
+        if (checkRes.ok) {
+          const checkData = await checkRes.json();
+          if (typeof checkData.allowSubmission === 'boolean' && !checkData.allowSubmission) {
+            throw new Error(`🔒 Giáo viên hiện đang KHÓA nhận bài nộp của lớp ${data.className.toUpperCase()}.`);
+          }
+        }
+      } catch (checkErr: any) {
+        if (checkErr?.message && (checkErr.message.includes('KHÓA') || checkErr.message.includes('khóa'))) {
+          throw checkErr;
         }
       }
-    } catch (checkErr: any) {
-      if (checkErr?.message && (checkErr.message.includes('KHÓA') || checkErr.message.includes('khóa'))) {
-        throw checkErr;
+    } else if (isFirebaseReady) {
+      try {
+        const cloudSettings = await fetchSettingsFromCloud();
+        if (cloudSettings) {
+          if (cloudSettings.allowSubmission === false) {
+            throw new Error(`🔒 Giáo viên hiện đang KHÓA nhận bài nộp toàn trường.`);
+          }
+          const normClsCheck = normalizeClassName(data.className);
+          if (Array.isArray(cloudSettings.lockedClasses) && cloudSettings.lockedClasses.some((c) => normalizeClassName(c) === normClsCheck)) {
+            throw new Error(`🔒 Giáo viên hiện đang KHÓA nhận bài nộp của lớp ${data.className.toUpperCase()}.`);
+          }
+          if (Array.isArray(cloudSettings.allowedClasses) && cloudSettings.allowedClasses.length > 0 && !cloudSettings.allowedClasses.some((c) => normalizeClassName(c) === normClsCheck)) {
+            throw new Error(`🔒 Lớp ${data.className.toUpperCase()} chưa được giáo viên mở khóa nộp bài.`);
+          }
+        }
+      } catch (cloudCheckErr: any) {
+        if (cloudCheckErr?.message && (cloudCheckErr.message.includes('KHÓA') || cloudCheckErr.message.includes('mở khóa'))) {
+          throw cloudCheckErr;
+        }
       }
     }
 
@@ -1439,41 +1643,47 @@ export default function App() {
     // Nếu là ngày hôm sau / tuần sau: bắt đầu từ lần 1 của ngày hôm đó
     const attemptNumber = existingSubmission ? existingSubmission.attempts.length + 1 : 1;
 
-    // Send to grading endpoint
+    // Chấm điểm qua máy chủ AI (nếu có backend) hoặc động cơ quét thông minh ngay trên trình duyệt (chế độ Vercel siêu nhanh, không phụ thuộc Render)
     let gradeData: any;
-    try {
-      const response = await apiFetch('/api/grade', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          assignment: currentAssignment,
-          fileName: data.fileName,
-          fileSize: data.fileSize,
-          fileLastModified: data.fileLastModified,
-          fileContent: data.fileContent,
-          imageBase64: data.imageBase64,
-          attemptNumber,
-          studentLeader: data.studentLeader,
-          groupMembers: data.groupMembers,
-          className: data.className,
-          machineNumber: data.machineNumber,
-        }),
-      });
+    let gradedViaBackend = false;
+    if (isBackendConfigured()) {
+      try {
+        const response = await apiFetch('/api/grade', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            assignment: currentAssignment,
+            fileName: data.fileName,
+            fileSize: data.fileSize,
+            fileLastModified: data.fileLastModified,
+            fileContent: data.fileContent,
+            imageBase64: data.imageBase64,
+            attemptNumber,
+            studentLeader: data.studentLeader,
+            groupMembers: data.groupMembers,
+            className: data.className,
+            machineNumber: data.machineNumber,
+          }),
+        });
 
-      if (!response.ok) {
-        const errorJson = await response.json().catch(() => ({}));
-        if (response.status === 403 || errorJson.locked || (errorJson.error && errorJson.error.includes('KHÓA'))) {
-          throw new Error(errorJson.error || '🔒 Giáo viên hiện đang KHÓA nhận bài nộp phòng thực hành.');
+        if (!response.ok) {
+          const errorJson = await response.json().catch(() => ({}));
+          if (response.status === 403 || errorJson.locked || (errorJson.error && errorJson.error.includes('KHÓA'))) {
+            throw new Error(errorJson.error || '🔒 Giáo viên hiện đang KHÓA nhận bài nộp phòng thực hành.');
+          }
+          throw new Error(errorJson.error || `Lỗi máy chủ (${response.status})`);
         }
-        throw new Error(errorJson.error || `Lỗi máy chủ (${response.status})`);
+        gradeData = await response.json();
+        gradedViaBackend = true;
+      } catch (err: any) {
+        if (err?.message && (err.message.includes('KHÓA') || err.message.includes('khóa') || err.message.includes('locked'))) {
+          throw err;
+        }
+        console.warn('Call to /api/grade failed, using smart local evaluator:', err);
       }
-      gradeData = await response.json();
-    } catch (err: any) {
-      // TUYỆT ĐỐI KHÔNG FALLBACK NẾU GIÁO VIÊN ĐANG KHÓA NỘP BÀI!
-      if (err?.message && (err.message.includes('KHÓA') || err.message.includes('khóa') || err.message.includes('locked'))) {
-        throw err;
-      }
-      console.warn('Call to /api/grade failed, using smart local evaluator:', err);
+    }
+
+    if (!gradedViaBackend) {
       // Kiểm tra phát hiện sao chép lớp trước phía client khi offline hoặc máy chủ chưa sẵn sàng
       const clientPlag = detectPlagiarismClientSide(
         {
@@ -1650,54 +1860,60 @@ export default function App() {
 
     // 1. Lưu vĩnh viễn lên đám mây Google Firebase Firestore (cả bài nộp & bảng tổng hợp SP1, SP2... của lớp)
     if (isFirebaseReady) {
-      saveSubmissionToCloud(updatedSubmission).catch((cloudErr) => {
-        console.warn('[Firebase Cloud] Lỗi lưu bài nộp lên đám mây:', cloudErr);
-      });
-      saveSubmissionIntoCloudGradebook(updatedSubmission).catch((cloudErr) => {
-        console.warn('[Firebase Cloud] Lỗi lưu sổ điểm SP1, SP2... lên đám mây:', cloudErr);
-      });
+      await Promise.all([
+        saveSubmissionToCloud(updatedSubmission).catch((cloudErr) => {
+          console.warn('[Firebase Cloud] Lỗi lưu bài nộp lên đám mây:', cloudErr);
+          return false;
+        }),
+        saveSubmissionIntoCloudGradebook(updatedSubmission).catch((cloudErr) => {
+          console.warn('[Firebase Cloud] Lỗi lưu sổ điểm SP1, SP2... lên đám mây:', cloudErr);
+          return false;
+        }),
+      ]);
     }
 
-    // 2. Tự động lưu và cập nhật ngay lập tức vào Cơ sở dữ liệu phòng máy nội bộ
-    try {
-      const syncRes = await apiFetch('/api/submissions', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(updatedSubmission),
-      }, 15000);
-      if (syncRes.ok) {
-        const syncJson = await syncRes.json();
-        if (syncJson.submission) {
-          const finalized = sanitizeSubmission(syncJson.submission);
-          setSubmissions((prev) => {
-            const filtered = prev.filter(
-              (s) => s.id !== finalized.id && !isSameSubmissionSlot(s, finalized)
-            );
-            const next = pruneOldSubmissions([finalized, ...filtered]);
-            saveSubmissionsSafely(next);
-            return next;
-          });
-          setPermanentGradebooks((prev) => {
-            let next = upsertGradebookFromSubmissionClient(prev, finalized);
-            if (syncJson.gradebooks && typeof syncJson.gradebooks === 'object') {
-              next = mergeGradebooksClient(next, syncJson.gradebooks);
-            }
-            return next;
-          });
+    // 2. Nếu có backend phòng máy (LAN / Render), lưu đồng bộ tức thời vào CSDL đĩa
+    if (isBackendConfigured()) {
+      try {
+        const syncRes = await apiFetch('/api/submissions', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(updatedSubmission),
+        }, 15000);
+        if (syncRes.ok) {
+          const syncJson = await syncRes.json();
+          if (syncJson.submission) {
+            const finalized = sanitizeSubmission(syncJson.submission);
+            setSubmissions((prev) => {
+              const filtered = prev.filter(
+                (s) => s.id !== finalized.id && !isSameSubmissionSlot(s, finalized)
+              );
+              const next = pruneOldSubmissions([finalized, ...filtered]);
+              saveSubmissionsSafely(next);
+              return next;
+            });
+            setPermanentGradebooks((prev) => {
+              let next = upsertGradebookFromSubmissionClient(prev, finalized);
+              if (syncJson.gradebooks && typeof syncJson.gradebooks === 'object') {
+                next = mergeGradebooksClient(next, syncJson.gradebooks);
+              }
+              return next;
+            });
+          }
+        } else {
+          const syncErrJson = await syncRes.json().catch(() => ({}));
+          if (syncRes.status === 403 || syncErrJson.locked || (syncErrJson.error && syncErrJson.error.includes('KHÓA'))) {
+            throw new Error(syncErrJson.error || '🔒 Giáo viên hiện đang KHÓA nhận bài nộp phòng thực hành.');
+          }
+          queuePendingSync(updatedSubmission);
         }
-      } else {
-        const syncErrJson = await syncRes.json().catch(() => ({}));
-        if (syncRes.status === 403 || syncErrJson.locked || (syncErrJson.error && syncErrJson.error.includes('KHÓA'))) {
-          throw new Error(syncErrJson.error || '🔒 Giáo viên hiện đang KHÓA nhận bài nộp phòng thực hành.');
+      } catch (netErr: any) {
+        if (netErr?.message && (netErr.message.includes('KHÓA') || netErr.message.includes('khóa'))) {
+          throw netErr;
         }
+        console.warn('Lỗi mạng khi lưu CSDL, đưa vào hàng đợi offline:', netErr);
         queuePendingSync(updatedSubmission);
       }
-    } catch (netErr: any) {
-      if (netErr?.message && (netErr.message.includes('KHÓA') || netErr.message.includes('khóa'))) {
-        throw netErr;
-      }
-      console.warn('Lỗi mạng khi lưu CSDL, đưa vào hàng đợi offline:', netErr);
-      queuePendingSync(updatedSubmission);
     }
 
     return newAttempt;
@@ -1724,11 +1940,16 @@ export default function App() {
           studentLeader: data.studentLeader,
           groupMembers: data.groupMembers,
         };
-        apiFetch('/api/submissions', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(updated[matchIdx]),
-        }).catch(() => {});
+        if (isFirebaseReady) {
+          saveSubmissionToCloud(updated[matchIdx]).catch(() => {});
+        }
+        if (isBackendConfigured()) {
+          apiFetch('/api/submissions', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(updated[matchIdx]),
+          }).catch(() => {});
+        }
         return updated;
       }
       return prev;

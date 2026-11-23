@@ -13,6 +13,7 @@ import {
   onSnapshot,
   Unsubscribe,
   query,
+  orderBy,
   limit,
 } from 'firebase/firestore';
 import { Submission, StudentRecord, ClassGradebookDocument } from '../types';
@@ -100,14 +101,60 @@ export function markCloudQuotaExhausted(): void {
 export { db, isInitialized as isFirebaseReady };
 
 /**
+ * Nén và làm sạch bài nộp trước khi ghi vào Cloud Firestore (đảm bảo luôn < 1MB / document và tiết kiệm băng thông)
+ */
+export function sanitizeSubmissionForCloud(sub: Submission): Submission {
+  const clean = sanitizeSubmission(sub);
+  const attemptsCount = clean.attempts.length;
+  const trimmedAttempts = clean.attempts.map((att, idx) => {
+    const isLatest = idx === attemptsCount - 1;
+    const rawFileContent = typeof att.fileContent === 'string' ? att.fileContent : '';
+    const safeFileContent = rawFileContent.length > 3500 ? rawFileContent.slice(0, 3500) : rawFileContent;
+    const rawDataUrl = isLatest && typeof att.fileDataUrl === 'string' && att.fileDataUrl.length <= 220000
+      ? att.fileDataUrl
+      : undefined;
+    const rawImg = isLatest && typeof att.imageBase64 === 'string' && att.imageBase64.length <= 220000
+      ? att.imageBase64
+      : undefined;
+    return {
+      ...att,
+      fileContent: safeFileContent,
+      fileDataUrl: rawDataUrl,
+      imageBase64: rawImg,
+    };
+  });
+
+  const candidate: Submission = {
+    ...clean,
+    attempts: trimmedAttempts,
+  };
+
+  try {
+    if (JSON.stringify(candidate).length > 550000) {
+      return {
+        ...candidate,
+        attempts: candidate.attempts.map((att) => ({
+          ...att,
+          fileContent: typeof att.fileContent === 'string' ? att.fileContent.slice(0, 1200) : '',
+          fileDataUrl: undefined,
+          imageBase64: undefined,
+        })),
+      };
+    }
+  } catch {}
+
+  return candidate;
+}
+
+/**
  * Đẩy một bài nộp lên Firebase Cloud Firestore
  */
 export async function saveSubmissionToCloud(sub: Submission): Promise<boolean> {
   if (!db) return false;
   try {
-    const cleanSub = sanitizeSubmission(sub);
+    const cleanSub = sanitizeSubmissionForCloud(sub);
     const subRef = doc(db, 'submissions', cleanSub.id);
-    
+
     // Đảm bảo không lưu undefined vào Firestore
     const payload = JSON.parse(JSON.stringify(cleanSub));
     await setDoc(subRef, payload, { merge: true });
@@ -128,7 +175,7 @@ export async function batchSaveSubmissionsToCloud(submissions: Submission[]): Pr
     // Giới hạn Firestore batch là tối đa 500 documents
     const toProcess = submissions.slice(0, 450);
     for (const sub of toProcess) {
-      const cleanSub = sanitizeSubmission(sub);
+      const cleanSub = sanitizeSubmissionForCloud(sub);
       const subRef = doc(db, 'submissions', cleanSub.id);
       const payload = JSON.parse(JSON.stringify(cleanSub));
       batch.set(subRef, payload, { merge: true });
@@ -142,14 +189,20 @@ export async function batchSaveSubmissionsToCloud(submissions: Submission[]): Pr
 }
 
 /**
- * Tải toàn bộ danh sách bài nộp từ Firebase Cloud Firestore
+ * Tải toàn bộ danh sách bài nộp mới nhất từ Firebase Cloud Firestore
  */
 export async function fetchSubmissionsFromCloud(): Promise<Submission[]> {
   if (!db) return [];
   try {
     const subCol = collection(db, 'submissions');
-    const q = query(subCol, limit(500));
-    const snap = await getDocs(q);
+    let snap;
+    try {
+      const q = query(subCol, orderBy('latestSubmittedAt', 'desc'), limit(300));
+      snap = await getDocs(q);
+    } catch {
+      const qFallback = query(subCol, limit(300));
+      snap = await getDocs(qFallback);
+    }
     const results: Submission[] = [];
     snap.forEach((docSnap) => {
       const data = docSnap.data();
@@ -204,7 +257,7 @@ export function subscribeToSubmissionsCloud(
   if (!db || isCloudQuotaExhausted) return null;
   try {
     const subCol = collection(db, 'submissions');
-    const q = query(subCol, limit(150));
+    const q = query(subCol, orderBy('latestSubmittedAt', 'desc'), limit(150));
     return onSnapshot(
       q,
       (snapshot) => {
@@ -639,5 +692,179 @@ export async function deleteGradebooksFromCloud(className?: string): Promise<boo
       logFirestoreError(err, OperationType.DELETE, 'gradebooks');
     }
     return false;
+  }
+}
+
+export interface OnlinePresenceRecord {
+  id?: string;
+  clientId: string;
+  machineNumber: string;
+  className: string;
+  studentLeader: string;
+  lastSeen: number;
+  online?: boolean;
+}
+
+export const PRESENCE_CLOUD_TTL_MS = 115000;
+
+export function buildPresenceDocId(clientId: string, className?: string, machineNumber?: string): string {
+  const cleanMach = (machineNumber || '').trim();
+  if (cleanMach) {
+    const normCls = normalizeClassName(className || '') || 'ALL';
+    const safeMach = cleanMach.replace(/[^a-zA-Z0-9_\-]/g, '_');
+    return `${normCls}__${safeMach}`;
+  }
+  return `cli_${(clientId || 'anon').replace(/[^a-zA-Z0-9_\-]/g, '_')}`;
+}
+
+/**
+ * Cập nhật trạng thái Online / Offline của máy học sinh lên Cloud Firestore (dành cho Vercel)
+ */
+export async function updatePresenceCloud(info: {
+  clientId: string;
+  machineNumber: string;
+  className: string;
+  studentLeader: string;
+  online: boolean;
+}): Promise<boolean> {
+  if (!db || isCloudQuotaExhausted) return false;
+  const docId = buildPresenceDocId(info.clientId, info.className, info.machineNumber);
+  try {
+    const ref = doc(db, 'lab_presence', docId);
+    if (!info.online || !info.machineNumber.trim()) {
+      await setDoc(
+        ref,
+        {
+          id: docId,
+          clientId: info.clientId,
+          machineNumber: info.machineNumber || '',
+          className: info.className || '',
+          studentLeader: info.studentLeader || '',
+          lastSeen: 0,
+          online: false,
+        },
+        { merge: true }
+      );
+      return true;
+    }
+
+    await setDoc(
+      ref,
+      {
+        id: docId,
+        clientId: info.clientId,
+        machineNumber: info.machineNumber.trim(),
+        className: info.className || '',
+        studentLeader: (info.studentLeader || '').trim(),
+        lastSeen: Date.now(),
+        online: true,
+      },
+      { merge: true }
+    );
+    return true;
+  } catch (err: any) {
+    if (err?.code === 'resource-exhausted') {
+      markCloudQuotaExhausted();
+    }
+    return false;
+  }
+}
+
+/**
+ * Gửi tín hiệu Offline ngay khi học sinh đóng tab trình duyệt trên Vercel (keepalive REST)
+ */
+export function markPresenceOfflineBeaconCloud(docId: string): void {
+  if (!docId || !firebaseConfigJson?.projectId || !firebaseConfigJson?.apiKey) return;
+  try {
+    const dbId = firebaseConfigJson.firestoreDatabaseId || '(default)';
+    const url = `https://firestore.googleapis.com/v1/projects/${firebaseConfigJson.projectId}/databases/${dbId}/documents/lab_presence/${encodeURIComponent(docId)}?updateMask.fieldPaths=online&updateMask.fieldPaths=lastSeen&key=${firebaseConfigJson.apiKey}`;
+    fetch(url, {
+      method: 'PATCH',
+      keepalive: true,
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        fields: {
+          online: { booleanValue: false },
+          lastSeen: { integerValue: '0' },
+        },
+      }),
+    }).catch(() => {});
+  } catch {}
+}
+
+/**
+ * Tải danh sách máy học sinh đang Online từ Cloud Firestore
+ */
+export async function fetchPresenceFromCloud(): Promise<OnlinePresenceRecord[]> {
+  if (!db || isCloudQuotaExhausted) return [];
+  try {
+    const colRef = collection(db, 'lab_presence');
+    const q = query(colRef, limit(100));
+    const snap = await getDocs(q);
+    const cutoff = Date.now() - PRESENCE_CLOUD_TTL_MS;
+    const list: OnlinePresenceRecord[] = [];
+    snap.forEach((docSnap) => {
+      const data = docSnap.data() as OnlinePresenceRecord;
+      if (data && data.online !== false && Number(data.lastSeen) > cutoff && data.machineNumber) {
+        list.push({
+          id: docSnap.id,
+          clientId: data.clientId || docSnap.id,
+          machineNumber: data.machineNumber,
+          className: data.className || '',
+          studentLeader: data.studentLeader || '',
+          lastSeen: Number(data.lastSeen),
+          online: true,
+        });
+      }
+    });
+    return list;
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Lắng nghe trạng thái Online / Offline theo thời gian thực (chỉ bật ở Máy Chiếu / Giáo Viên trên Vercel)
+ */
+export function subscribeToPresenceCloud(
+  onUpdate: (machines: OnlinePresenceRecord[]) => void,
+  onError?: (err: any) => void
+): Unsubscribe | null {
+  if (!db || isCloudQuotaExhausted) return null;
+  try {
+    const colRef = collection(db, 'lab_presence');
+    const q = query(colRef, limit(100));
+    return onSnapshot(
+      q,
+      (snapshot) => {
+        try {
+          const cutoff = Date.now() - PRESENCE_CLOUD_TTL_MS;
+          const list: OnlinePresenceRecord[] = [];
+          snapshot.forEach((docSnap) => {
+            const data = docSnap.data() as OnlinePresenceRecord;
+            if (data && data.online !== false && Number(data.lastSeen) > cutoff && data.machineNumber) {
+              list.push({
+                id: docSnap.id,
+                clientId: data.clientId || docSnap.id,
+                machineNumber: data.machineNumber,
+                className: data.className || '',
+                studentLeader: data.studentLeader || '',
+                lastSeen: Number(data.lastSeen),
+                online: true,
+              });
+            }
+          });
+          onUpdate(list);
+        } catch {}
+      },
+      (err) => {
+        if (err?.code === 'resource-exhausted') {
+          markCloudQuotaExhausted();
+        }
+        if (onError) onError(err);
+      }
+    );
+  } catch {
+    return null;
   }
 }

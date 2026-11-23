@@ -19,7 +19,7 @@ import {
 } from '../utils/excelExport';
 import { formatPracticeDateVi, getTodayDateString } from '../utils/storageManager';
 import { SCHOOL_CLASSES, normalizeClassName } from '../data/classes';
-import { realtimeSync } from '../utils/realtimeSync';
+import { isBackendConfigured } from '../utils/apiConfig';
 import { ClassMultiProductGradebook } from './ClassMultiProductGradebook';
 
 interface ClassResultsModalProps {
@@ -102,28 +102,24 @@ export const ClassResultsModal: React.FC<ClassResultsModalProps> = ({
   const [isClearing, setIsClearing] = useState<boolean>(false);
   const [alsoClearPermanentGradebook, setAlsoClearPermanentGradebook] = useState<boolean>(false);
 
-  // Tự động làm mới kết quả trực tiếp từ server khi mở modal, khi có sự kiện nộp bài tức thời và định kỳ
+  // Tự động đồng bộ 1 lần khi mở modal (trạng thái mới nhất tiếp tục cập nhật qua SSE / Cloud Snapshot ở App)
+  const onRefreshRef = React.useRef(onRefresh);
   useEffect(() => {
-    if (onRefresh) {
-      onRefresh();
-    }
-    const unsub = realtimeSync.subscribe((event: any) => {
-      if (
-        event.type === 'SUBMISSION_UPDATED' ||
-        event.type === 'SUBMISSIONS_CLEARED' ||
-        event.type === 'SUBMISSIONS_SYNCED'
-      ) {
-        if (onRefresh) onRefresh();
-      }
-    });
-    const interval = setInterval(() => {
-      if (onRefresh) onRefresh();
-    }, 3000);
-    return () => {
-      unsub();
-      clearInterval(interval);
-    };
+    onRefreshRef.current = onRefresh;
   }, [onRefresh]);
+
+  useEffect(() => {
+    if (onRefreshRef.current) {
+      onRefreshRef.current();
+    }
+    if (!isBackendConfigured()) return;
+    const interval = setInterval(() => {
+      if (!document.hidden && onRefreshRef.current) {
+        onRefreshRef.current();
+      }
+    }, 15000);
+    return () => clearInterval(interval);
+  }, []);
 
   // Cập nhật activeClass nếu lớp hiện tại không còn tồn tại trong danh sách lớp mới tải lên
   useEffect(() => {

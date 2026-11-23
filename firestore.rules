@@ -21,6 +21,11 @@ service cloud.firestore {
       allow read, write: if true;
     }
 
+    // Trạng thái Online / Offline của từng máy học sinh phòng tin học
+    match /lab_presence/{presenceId} {
+      allow read, write: if true;
+    }
+
     // Kiểm tra kết nối Firestore khi khởi động
     match /test/connection {
       allow read: if true;

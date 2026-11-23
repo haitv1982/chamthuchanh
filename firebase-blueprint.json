@@ -45,6 +45,19 @@
         "students": { "type": "object", "required": true, "description": "Bảng điểm từng học sinh theo từng mã sản phẩm SP1, SP2..." },
         "updatedAt": { "type": "string", "required": true, "description": "Thời gian cập nhật gần nhất" }
       }
+    },
+    "LabPresence": {
+      "collection": "lab_presence",
+      "description": "Trạng thái Online/Offline thời gian thực của từng máy học sinh trong phòng tin",
+      "fields": {
+        "id": { "type": "string", "required": true, "description": "Mã định danh máy theo lớp" },
+        "clientId": { "type": "string", "required": true, "description": "Mã phiên trình duyệt" },
+        "machineNumber": { "type": "string", "required": true, "description": "Số máy (ví dụ: Máy 05)" },
+        "className": { "type": "string", "required": true, "description": "Tên lớp học đang thực hành" },
+        "studentLeader": { "type": "string", "required": false, "description": "Họ tên học sinh đang ngồi máy" },
+        "lastSeen": { "type": "number", "required": true, "description": "Mốc thời gian tín hiệu cuối (ms)" },
+        "online": { "type": "boolean", "required": true, "description": "Trạng thái đang trực tuyến" }
+      }
     }
   }
 }

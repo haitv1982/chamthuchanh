@@ -1,4 +1,4 @@
-import { getApiUrl } from './apiConfig';
+import { getApiUrl, isBackendConfigured } from './apiConfig';
 
 export type RealtimeEventHandler = (event: { type: string; [key: string]: any }) => void;
 
@@ -12,8 +12,12 @@ class RealtimeSyncManager {
 
   connect() {
     if (typeof window === 'undefined') return;
+    if (!isBackendConfigured()) {
+      this.disconnect(true);
+      return;
+    }
     this.isManuallyClosed = false;
-    this.disconnect();
+    this.disconnect(false);
 
     const sseUrl = getApiUrl('/api/events');
     try {
@@ -39,20 +43,23 @@ class RealtimeSyncManager {
         }
         this.isConnected = false;
         this.notify({ type: 'CONNECTION_STATUS', connected: false });
-        this.disconnect();
+        this.disconnect(false);
 
-        if (!this.isManuallyClosed) {
-          const delay = Math.min(8000, 2000 * Math.pow(1.3, this.retryCount++));
+        if (!this.isManuallyClosed && isBackendConfigured()) {
+          const delay = Math.min(12000, 2500 * Math.pow(1.4, this.retryCount++));
           this.reconnectTimeout = setTimeout(() => this.connect(), delay);
         }
       };
-    } catch (err) {
+    } catch {
       this.isConnected = false;
       this.notify({ type: 'CONNECTION_STATUS', connected: false });
     }
   }
 
-  disconnect() {
+  disconnect(manual = true) {
+    if (manual) {
+      this.isManuallyClosed = true;
+    }
     if (this.reconnectTimeout) {
       clearTimeout(this.reconnectTimeout);
       this.reconnectTimeout = null;
